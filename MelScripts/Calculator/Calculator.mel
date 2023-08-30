@@ -1,0 +1,219 @@
+global proc float Addition(float $input[])
+{
+    float $sum = $input[0];
+
+    for ($i = 1; $i < size($input); $i++)
+    { 
+        $sum += $input[$i];
+    }
+    return $sum;
+    
+}
+
+//Addition();
+
+
+//Values in array after $input[0] are subtracted from $input[0]
+global proc float Subtraction(float $input[])
+{
+    float $difference = $input[0];
+
+    for ($i = 1; $i < size($input); $i++)
+    {
+        $difference -= $input[$i];
+    }
+    return $difference;
+}
+
+//Subtraction();
+
+
+global proc float Multiplication(float $input[])
+{
+    float $product = $input[0];
+
+    for ($i = 1; $i < size($input); $i++)
+    { 
+        $product *= $input[$i];
+    }
+    return $product;
+}
+
+//Multiplication();
+
+
+global proc float Division(float $input[])
+{
+    float $quotient = $input[0];
+
+    for ($i = 1; $i < size($input); $i++)
+    { 
+        $quotient /= $input[$i];
+    }
+    return $quotient;
+    print $quotient;
+}
+
+//Division();
+
+global proc float Power(float $input[])
+{
+        $product = `pow $input[0] $input [1]`;
+        return $product;
+}
+
+//Power();
+
+global proc float Mean(float $input[])
+{
+
+    float $sum = $input[0];
+
+    for ($i = 1; $i < size($input); $i++)
+    { 
+        $sum += $input[$i];
+    }
+
+    return $sum / size($input);
+}
+
+//Mean();
+
+global proc float Median(float $input[])
+{
+    $highest = $input[0];
+    for ($i = 1; $i < size($input); $i++)
+    {
+        if($input[$i] > $highest)
+        {
+            $highest = $input[$i];
+        }
+        
+    }
+
+    $lowest = $input[0];
+    for ($i = 1; $i < size($input); $i++)
+    {
+        if($input[$i] < $lowest)
+        {
+            $lowest = $input[$i];
+        }
+        
+    }
+
+    return  ($highest + $lowest) / 2;
+}
+
+//Calculator
+global proc Calculator(float $input[], int $operation)
+{
+    //addition
+    if($operation ==1)
+    {
+        print (floatArrayToString($input, " + "));
+        print (" = " + Addition($input) + "\n");
+    }
+
+    else if ($operation ==2)
+    {
+        print ($input[0]);
+        for ($i = 1; $i < size($input); $i++)
+        {
+            print (" - " + $input[$i]);
+        }
+
+        print (" = " + Subtraction($input) + "\n");
+    }
+
+    else if ($operation ==3)
+    {
+        print (floatArrayToString($input, " * "));
+        print (" = " + Multiplication($input) + "\n");
+    }
+
+    else if ($operation ==4)
+    {
+        for ($i = 0; $i < size($input); $i++)
+        {
+            if ($input[$i] = 0)
+            {
+                print ("Cannot divide by zero, ensure all input values are non-zeros");
+            }
+            
+            else if ($input[$i] != 0)
+
+            {
+                print ($input[0]);
+            for ($i = 1; $i < size($input); $i++)
+            {
+                print (" / " + $input[$i]);
+            }
+
+            print (" = " + Division($input) + "\n");
+            }
+        }
+    }
+
+    else if ($operation ==5)
+    {
+        if(size($input)==2)
+        {
+            print ($input[0] + " ^ " + $input[1] + " = " + Power($input) + "\n");
+        }
+        else
+        {
+            print("Please input only two numbers, a variable and an exponent for the variable to be raised to the power of, i.e: x^n {3, 4} \n");
+        }
+    }
+    else if ($operation ==6)
+    {
+        print ("The average of ");
+        print ($input[0]);
+        for ($i = 1; $i < (size($input) -1); $i++)
+        {
+            print (", " + $input[$i]);
+        }
+        print (" and " + $input[(size($input) -1)]);
+        print ( " is " + Mean($input));
+    }
+    else if ($operation ==7)
+    {
+        print ("The median of ");
+        for ($i = 0; $i < (size($input) -1); $i++)
+        {
+            print ($input[$i] + ", ");
+        }
+        print (" and " + $input[(size($input) -1)]);
+        print (" is " + Median($input));
+    }
+    else
+    {
+        print ("Please input valid variables (any positive or negative float) and an operation value from 1-7.");
+        print ("The Power function will only accept 2 variables at this time.");
+    }
+
+
+}
+           //$float input[]   $operation(1-7)
+//Calculator(float {10, 8, 3, 203.8, 5}, 4);
+
+global proc CalcUI()
+{
+    string $mWindow = "calcWindow";
+
+    if (`window -exists $mWindow`)
+        deleteUI $mWindow;
+
+    $mWindow =  `window -title "Calculator"
+                        -widthHeight 300 500 
+                        -resizeToFitChildren 1
+                        $mWindow`;
+    $mColumn = `columnLayout -parent $mWindow -adjustableColumn 1`;
+
+                        
+
+
+    showWindow $mWindow;
+}
+
+CalcUI();

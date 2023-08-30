@@ -1,0 +1,39 @@
+//Void Function
+proc SayHello(string $name)
+{
+    print ("Hello " + $name + "!");
+}
+
+SayHello("Doug");
+
+//Return values through function
+proc string NamePicker()
+{
+    string $names[] = {"Dave","Doug","Clarence", "Mary", "Jane", "Tina", "Phil"};
+    int $size = size($names);
+    int $randNum = `rand $size`;
+    //print ($names[$randNum] + "\n");
+
+    return ($names[$randNum]);
+}
+
+//
+proc int RandomNumber(int $num)
+{
+    int $randNum = `rand $num`;
+    print ("This random number is " + $randNum + "\n");
+    return ($randNum);
+}
+
+print (RandomNumber(100) + RandomNumber(100));
+
+print (NamePicker() + "'s favorite number is " + RandomNumber(100) + "!\n");
+
+//Calculator
+//  -Addition
+//  -Subtraction
+//  -Multiplication
+//  -Division
+//  -Exponent
+//  -Mean
+//  -Median

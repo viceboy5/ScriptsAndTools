@@ -1,0 +1,53 @@
+global proc Add()
+{
+    string $field1 = `optionVar -query "firstField"`;
+    string $field2 = `optionVar -query "secondField"`;
+    string $field3 = `optionVar -query "thirdField"`;
+    string $field4 = `optionVar -query "myTextField"`;
+
+    float $value1 = `floatField -q -v $field1`;
+    float $value2 = `floatField -q -v $field2`;
+
+    float $sum = $value1 + $value2;
+
+    floatField -e -value $sum $field3;
+    textField -e -text ("The sum of " + $value1 + " and " + $value2 + " is " + $sum + ".") $field4;
+}
+
+global proc WhatsInFloatField()
+{
+    string $field1 = `optionVar -query "firstField"`;
+    print ($field1 + "\n");
+
+    print (`floatField -q -value  $field1`);
+}
+
+string $mWindow = "test_ui";
+
+if (`window -exists $mWindow`)
+    deleteUI $mWindow;
+
+$mWindow = `window   -height 300 
+                        -title "Super Cool Window" 
+                        -sizeable 1
+                        -width 400
+                        $mWindow`;
+string $mColumn = `columnLayout -adjustableColumn 1
+                                -parent $mWindow`;
+button -parent $mColumn -label "Say Hello!" -command "print (\"Hello World!\")";
+
+optionVar -stringValue "firstField" `floatField`;
+optionVar -stringValue "secondField" `floatField`;
+optionVar -stringValue "thirdField" `floatField -editable 0`;
+optionVar -stringValue "myTextField" `textField -editable 0`;
+
+
+button -parent $mColumn -label "Print Field Value" -command WhatsInFloatField;
+button -parent $mColumn -label "Add Numbers" -command Add;
+showWindow $mWindow;
+
+
+
+
+
+/*gridLayout

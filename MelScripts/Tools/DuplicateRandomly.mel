@@ -1,0 +1,85 @@
+
+
+global proc DuplicateObjectsRandomly()
+{
+    string $duplicateField = `optionVar -q "numberOfDuplicates"`;
+    string $xminField = `optionVar -q "xMinimum"`;
+    string $xmaxField = `optionVar -q "xMaximum"`;
+    string $yminField = `optionVar -q "yMinimum"`;
+    string $ymaxField = `optionVar -q "yMaximum"`;
+    string $zminField = `optionVar -q "zMinimum"`;
+    string $zmaxField = `optionVar -q "zMaximum"`;
+
+    float $xMin = `floatField -q -value $xminField`;
+    float $xMax = `floatField -q -value $xmaxField`;
+    float $yMin = `floatField -q -value $yminField`;
+    float $yMax = `floatField -q -value $ymaxField`;
+    float $zMin = `floatField -q -value $zminField`;
+    float $zMax = `floatField -q -value $zmaxField`;
+    int $duplicates = `intField -q -value $duplicateField`;
+    
+    group;
+    
+    for($i=1; $i<=$duplicates; $i++)
+    {
+        $randomX = rand ($xMin, $xMax);
+        $randomY = rand ($yMin, $yMax);
+        $randomZ = rand ($zMin, $zMax);
+
+        duplicate;
+        move -absolute $randomX $randomY $randomZ;
+    }
+}
+
+
+
+global proc RandomDuplicationUI()
+{
+    string $mWindow = "dupWindow";
+
+    if (`window -exists $mWindow`)
+        deleteUI $mWindow;
+    
+    $mWindow = `window  -title "Random Duplication" 
+                        -widthHeight 300 400
+                        -resizeToFitChildren 1
+                        $mWindow`;
+    $mColumn = `columnLayout -parent $mWindow -adjustableColumn 1`;
+    $xMinRow = `rowLayout -parent $mWindow -adjustableColumn 2 -numberOfColumns 2`;
+    text -parent $xMinRow -width 30 -label "xmin";
+    optionVar -stringValue "xMinimum" `floatField -parent $xMinRow`;
+    $xMaxRow = `rowLayout -parent $mWindow -adjustableColumn 2 -numberOfColumns 2`;
+    text -parent $xMaxRow -width 30 -label "xmax";
+    optionVar -stringValue "xMaximum" `floatField -parent $xMaxRow`;
+
+    $yMinRow = `rowLayout -parent $mWindow -adjustableColumn 2 -numberOfColumns 2`;
+    text -parent $yMinRow -width 30 -label "ymin";
+    optionVar -stringValue "yMinimum" `floatField -parent $yMinRow`;
+    $yMaxRow = `rowLayout -parent $mWindow -adjustableColumn 2 -numberOfColumns 2`;
+    text -parent $yMaxRow -width 30 -label "ymax";
+    optionVar -stringValue "yMaximum" `floatField -parent $yMaxRow`;
+
+    $zMinRow = `rowLayout -parent $mWindow -adjustableColumn 2 -numberOfColumns 2`;
+    text -parent $zMinRow -width 30 -label "zmin";
+    optionVar -stringValue "zMinimum" `floatField -parent $zMinRow`;
+    $zMaxRow = `rowLayout -parent $mWindow -adjustableColumn 2 -numberOfColumns 2`;
+    text -parent $zMaxRow -width 30 -label "zmax";
+    optionVar -stringValue "zMaximum" `floatField -parent $zMaxRow`;
+
+    $duplicateRow = `rowLayout -parent $mWindow`;
+    optionVar -stringValue "numberOfDuplicates" `intField -parent $duplicateRow`;
+
+
+    button -parent $mColumn -label "Duplicate" -command "DuplicateObjectsRandomly";
+
+    showWindow $mWindow;
+
+
+
+}
+
+RandomDuplicationUI();
+
+//Enter minimum and maximum values for all 3 axis
+//enter how many duplicates you want
+//duplicate button will duplicate all selected objects grouped around the new random areas within bounds

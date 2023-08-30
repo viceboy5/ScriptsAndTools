@@ -1,0 +1,19 @@
+
+proc NumberCounterThing(int $min, int $max)
+{
+    for($i=$min; $i <= $max; ++$i)
+    {
+        if ($i % 2 == 0)
+        {
+            print ("Even: " + $i + "\n");
+        }
+        else
+        {
+            print ("Odd: " + $i + "\n");
+        }
+    }
+}
+
+NumberCounterThing(14, 20);
+
+

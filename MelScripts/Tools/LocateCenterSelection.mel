@@ -1,0 +1,18 @@
+//component selection (vers, edges, etc)
+//find the center point of selection (world space point)
+//create a locator
+//position locator at the center of selection
+//selection, deform, cluster
+
+string $sels[] =  `ls -sl`;
+
+string $clusterArray[] = `cluster $sels`;
+string $cluster = $clusterArray[1];
+
+float $pos[] = `xform -q -ws -rotatePivot $cluster`;
+
+string $loc[] = `spaceLocator`;
+
+xform -ws -translation $pos[0] $pos[1] $pos [2] $loc;
+delete $cluster;
+

@@ -1,0 +1,9 @@
+string $object[];
+$object = `polySphere -r 1 -sx 20 -sy 20 -ax 0 1 0 -cuv 2 -ch 1`;
+
+move -relative 5.113944 0 -10.757389 $object[0];
+
+float $radius = `polySphere -q -radius $object[0]`;
+print ($radius);
+
+polySphere -e -radius ($radius + 3.4) $object[0];

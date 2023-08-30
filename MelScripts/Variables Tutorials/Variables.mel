@@ -1,0 +1,28 @@
+//created with Professor Clayton Lantz
+
+int $number;
+$number = 27;
+print($number);
+
+
+string $name;
+$name = "david";
+print ($name);
+$name = "elizabeth";
+print ($name);
+
+float $price = 29.99;
+print ($price);
+
+//boolean
+int $grade =1;
+
+//array
+float $position[] = {-8.1, -1.8, 9.4, 36.3, 378};
+//                   0     1     2    3     4
+
+$position[0] = 5.9;
+$position[1] = -.3;
+$position[2] = -5.7;
+$position[4] = 100.7;
+print ($position);
