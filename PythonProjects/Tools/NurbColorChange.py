@@ -1,5 +1,5 @@
 import maya.cmds as cmds
-def ChangeOutlineColor(color):
+def change_outline_color(color):
 
     try:
         sels = cmds.ls(sl=True)
@@ -10,6 +10,6 @@ def ChangeOutlineColor(color):
     except:
         print("Input must be between 1 and 32 to assign new Index Color")
 
-#"color" must be between either 1 or 0 and 32
-ChangeOutlineColor(31)
+#"color" must be between 1 and 32
+change_outline_color(6)
 
