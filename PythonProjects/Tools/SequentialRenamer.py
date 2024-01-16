@@ -23,7 +23,7 @@ def RenameSequentially(txt):
             cmds.rename([sel], parts[0] + nums + parts[2])
 
 
-RenameSequentially("Leg_#######_Jnt")
+RenameSequentially("L_Leg_02_Jnt_##")
 
 
 

@@ -20,7 +20,7 @@ def set_rotation_keys():
     cmds.setKeyframe(at='rotateY', v=0, t=120)
 
     cmds.setKeyframe(at='translateX', v=0, t=120)
-    cmds.setKeyframe(at='translateX', v=120, t=135)
+    cmds.setKeyframe(at='translateX', v=5, t=135)
 
 
 
