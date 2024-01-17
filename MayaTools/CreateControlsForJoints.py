@@ -25,12 +25,11 @@ def create_group_and_ctrl(joint):
     return empty_group, circle
 
 def create_ctrls_for_joint_chain(top_joint):
-    # Get the joint chain
-    joint_chain = cmds.listRelatives(top_joint, allDescendents=True, type="joint")
+    # Create an empty group and control for the top joint
+    top_empty_group, top_circle = create_group_and_ctrl(top_joint)
 
-    if not joint_chain:
-        cmds.warning("No joints found in the chain.")
-        return
+    # Get the joint chain excluding the top joint
+    joint_chain = cmds.listRelatives(top_joint, allDescendents=True, type="joint") or []
 
     # Iterate through the joint chain
     for joint in joint_chain:
