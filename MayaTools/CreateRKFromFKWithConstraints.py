@@ -94,6 +94,9 @@ def duplicate_joint_chains():
     # Create reverse node and tie it to the control attribute
     create_reverse_node(control_attribute_name)
 
+    # Connect reverse node to IK weights and control attribute to FK weights
+    connect_weights_to_reverse_and_control(constraints, control_attribute_name)
+
     # Print the names of the created constraints with weight aliases
     print("Created Constraints and Weight Aliases:")
     constraint_dict = {}
@@ -198,25 +201,61 @@ def create_control_attribute(original_name):
     attribute_name = f"{attribute_name.replace('_', '')}_IKFK"  # Final attribute name
 
     # Add the attribute to the transform control
-    cmds.addAttr(transform_ctrl, longName=attribute_name, attributeType='float', min=0, max=1, defaultValue=0)
-
-    # Make the attribute hidden, keyable, and viewable in the channel box
-    cmds.setAttr(f"{transform_ctrl}.{attribute_name}", keyable=True)
-    print(f"Created attribute {attribute_name} on Transform_Ctrl")
+    cmds.addAttr(transform_ctrl, longName=attribute_name, attributeType='float', min=0, max=1, defaultValue=0, keyable=True)
+    print(f"Added attribute {attribute_name} to {transform_ctrl}")
 
     return attribute_name
 
 
 def create_reverse_node(control_attribute_name):
+    # Check if the reverse node already exists
+    reverse_node_name = f"{control_attribute_name}_Rev"
+    if not cmds.objExists(reverse_node_name):
+        # Create the reverse node
+        reverse_node = cmds.createNode('reverse', name=reverse_node_name)
+        print(f"Created reverse node: {reverse_node}")
+
+        # Connect the control attribute to the reverse node
+        cmds.connectAttr(f"Transform_Ctrl.{control_attribute_name}", f"{reverse_node}.inputX")
+        print(f"Connected Transform_Ctrl.{control_attribute_name} to {reverse_node}.inputX")
+    else:
+        print(f"Reverse node {reverse_node_name} already exists.")
+
+
+def connect_weights_to_reverse_and_control(constraints, control_attribute_name):
     if control_attribute_name is None:
+        cmds.warning("Control attribute not provided.")
         return
 
-    # Create the reverse node
-    reverse_node = cmds.createNode("reverse", name=f"{control_attribute_name}_Rev")
-    cmds.connectAttr(f"Transform_Ctrl.{control_attribute_name}", f"{reverse_node}.inputX")
+    # Find the reverse node
+    reverse_node = f"{control_attribute_name}_Rev"
+    if not cmds.objExists(reverse_node):
+        cmds.warning(f"Reverse node {reverse_node} does not exist.")
+        return
 
-    print(f"Created reverse node: {reverse_node} for attribute: {control_attribute_name}")
+    # Ensure the Transform_Ctrl attribute is connected to the reverse node inputX
+    if not cmds.isConnected(f"Transform_Ctrl.{control_attribute_name}", f"{reverse_node}.inputX"):
+        cmds.connectAttr(f"Transform_Ctrl.{control_attribute_name}", f"{reverse_node}.inputX")
+        print(f"Connected Transform_Ctrl.{control_attribute_name} to {reverse_node}.inputX")
+    else:
+        print(f"Connection Transform_Ctrl.{control_attribute_name} to {reverse_node}.inputX already exists")
 
+    # Connect the reverse node outputX to IK weights and control attribute to FK weights
+    for constraint, weight_aliases in constraints:
+        for alias in weight_aliases:
+            # Check for existing connections before making new ones
+            if 'IK' in alias:  # IK weight
+                if not cmds.isConnected(f"{reverse_node}.outputX", f"{constraint}.{alias}"):
+                    cmds.connectAttr(f"{reverse_node}.outputX", f"{constraint}.{alias}")
+                    print(f"Connected {reverse_node}.outputX to {constraint}.{alias} (IK weight)")
+                else:
+                    print(f"Connection {reverse_node}.outputX to {constraint}.{alias} already exists (IK weight)")
+            elif 'FK' in alias:  # FK weight
+                if not cmds.isConnected(f"Transform_Ctrl.{control_attribute_name}", f"{constraint}.{alias}"):
+                    cmds.connectAttr(f"Transform_Ctrl.{control_attribute_name}", f"{constraint}.{alias}")
+                    print(f"Connected Transform_Ctrl.{control_attribute_name} to {constraint}.{alias} (FK weight)")
+                else:
+                    print(f"Connection Transform_Ctrl.{control_attribute_name} to {constraint}.{alias} already exists (FK weight)")
 
-# Call the main function to run the script
+# Run the entire process
 duplicate_joint_chains()
