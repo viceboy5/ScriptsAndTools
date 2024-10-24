@@ -80,7 +80,7 @@ def duplicate_joint_chains():
         cmds.setAttr(f"{rk_joint}.radius", 1.0)  # RK joints set to 1.0
 
     # Create constraints for the RK joints
-    create_constraints(joint_data)
+    constraints = create_constraints(joint_data)
 
     # Set drawing overrides for joint colors
     set_joint_colors(joint_data)
@@ -88,8 +88,26 @@ def duplicate_joint_chains():
     # Create IK handle from the first IK joint to the last IK joint
     create_ik_handle(ik_joints)
 
+    # Create control attribute for the RK joints
+    control_attribute_name = create_control_attribute(original_names[0])
+
+    # Create reverse node and tie it to the control attribute
+    create_reverse_node(control_attribute_name)
+
+    # Print the names of the created constraints with weight aliases
+    print("Created Constraints and Weight Aliases:")
+    constraint_dict = {}
+    for constraint, weight_alias in constraints:
+        if constraint not in constraint_dict:
+            constraint_dict[constraint] = []
+        constraint_dict[constraint].extend(weight_alias)
+
+    for constraint, weight_aliases in constraint_dict.items():
+        print(f"Constraint: {constraint}, Weight Aliases: {list(set(weight_aliases))}")
+
 
 def create_constraints(joint_data):
+    constraints = []  # List to store the names of constraints and their weight aliases
     for rk_joint in joint_data['RK']:
         # Extract the numeric suffix from the RK joint name
         match = re.search(r'(\d+)$', rk_joint)
@@ -107,18 +125,32 @@ def create_constraints(joint_data):
             # Check if FK joint exists and create constraints if it does
             if cmds.objExists(fk_joint):
                 # Create parent constraint from FK to RK joint
-                cmds.parentConstraint(fk_joint, rk_joint, maintainOffset=True)
+                parent_constraint = cmds.parentConstraint(fk_joint, rk_joint, maintainOffset=True)
                 # Create scale constraint from FK to RK joint
-                cmds.scaleConstraint(fk_joint, rk_joint, maintainOffset=True)
+                scale_constraint = cmds.scaleConstraint(fk_joint, rk_joint, maintainOffset=True)
+                # Get the weight aliases
+                parent_weight_alias = cmds.parentConstraint(parent_constraint, query=True, weightAliasList=True)
+                scale_weight_alias = cmds.scaleConstraint(scale_constraint, query=True, weightAliasList=True)
+                # Store the constraint names and weight aliases
+                constraints.append((parent_constraint[0], parent_weight_alias))
+                constraints.append((scale_constraint[0], scale_weight_alias))
                 print(f"Created constraints from {fk_joint} to {rk_joint}")
 
             # Check if IK joint exists and create constraints if it does
             if cmds.objExists(ik_joint):
                 # Create parent constraint from IK to RK joint
-                cmds.parentConstraint(ik_joint, rk_joint, maintainOffset=True)
+                parent_constraint = cmds.parentConstraint(ik_joint, rk_joint, maintainOffset=True)
                 # Create scale constraint from IK to RK joint
-                cmds.scaleConstraint(ik_joint, rk_joint, maintainOffset=True)
+                scale_constraint = cmds.scaleConstraint(ik_joint, rk_joint, maintainOffset=True)
+                # Get the weight aliases
+                parent_weight_alias = cmds.parentConstraint(parent_constraint, query=True, weightAliasList=True)
+                scale_weight_alias = cmds.scaleConstraint(scale_constraint, query=True, weightAliasList=True)
+                # Store the constraint names and weight aliases
+                constraints.append((parent_constraint[0], parent_weight_alias))
+                constraints.append((scale_constraint[0], scale_weight_alias))
                 print(f"Created constraints from {ik_joint} to {rk_joint}")
+
+    return constraints  # Return the list of constraint names and their weight aliases
 
 
 def set_joint_colors(joint_data):
@@ -151,5 +183,40 @@ def create_ik_handle(ik_joints):
         print(f"Created IK handle: {ik_handle_name} from {start_joint} to {end_joint}")
 
 
-# Execute the function
+def create_control_attribute(original_name):
+    # Find the Transform_Ctrl in the scene
+    transform_ctrl = cmds.ls("Transform_Ctrl", type='transform')
+    if not transform_ctrl:
+        cmds.warning("Transform_Ctrl not found in the scene.")
+        return None
+
+    transform_ctrl = transform_ctrl[0]  # Get the first found transform_ctrl
+
+    # Generate the attribute name based on the original joint name
+    attribute_name = re.sub(r'FK_', '', original_name)
+    attribute_name = re.sub(r'Jnt_\d*', '', attribute_name)
+    attribute_name = f"{attribute_name.replace('_', '')}_IKFK"  # Final attribute name
+
+    # Add the attribute to the transform control
+    cmds.addAttr(transform_ctrl, longName=attribute_name, attributeType='float', min=0, max=1, defaultValue=0)
+
+    # Make the attribute hidden, keyable, and viewable in the channel box
+    cmds.setAttr(f"{transform_ctrl}.{attribute_name}", keyable=True)
+    print(f"Created attribute {attribute_name} on Transform_Ctrl")
+
+    return attribute_name
+
+
+def create_reverse_node(control_attribute_name):
+    if control_attribute_name is None:
+        return
+
+    # Create the reverse node
+    reverse_node = cmds.createNode("reverse", name=f"{control_attribute_name}_Rev")
+    cmds.connectAttr(f"Transform_Ctrl.{control_attribute_name}", f"{reverse_node}.inputX")
+
+    print(f"Created reverse node: {reverse_node} for attribute: {control_attribute_name}")
+
+
+# Call the main function to run the script
 duplicate_joint_chains()
