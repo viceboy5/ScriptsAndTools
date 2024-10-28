@@ -260,7 +260,7 @@ def duplicate_joint_chains():
         cmds.setAttr(f"{rk_joint}.radius", 1.0)  # RK joints set to 1.0
 
     # Create constraints for the RK joints
-    constraints = create_constraints(joint_data)
+    constraints = create_RK_constraints(joint_data)
 
     # Set drawing overrides for joint colors
     set_joint_colors(joint_data)
@@ -289,7 +289,7 @@ def duplicate_joint_chains():
         print(f"Constraint: {constraint}, Weight Aliases: {list(set(weight_aliases))}")
 
 
-def create_constraints(joint_data):
+def create_RK_constraints(joint_data):
     constraints = []  # List to store the names of constraints and their weight aliases
     for rk_joint in joint_data['RK']:
         # Extract the numeric suffix from the RK joint name
