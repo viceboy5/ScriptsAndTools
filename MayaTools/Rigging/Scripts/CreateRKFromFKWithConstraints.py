@@ -1,190 +1,159 @@
 import maya.cmds as cmds
 import re
 
+def duplicate_joint_chain(base_joint, suffix):
+    """
+    Duplicates the joint chain starting from base_joint and renames it using the given suffix ("IK" or "RK").
+    Requires that "FK" is in the original joint names.
+    Returns a list of duplicated joint names.
+    """
+    original_chain = cmds.listRelatives(base_joint, allDescendents=True, type='joint', fullPath=True) or []
+    original_chain = [base_joint] + original_chain
+    original_chain = cmds.ls(original_chain, long=True)  # ensure proper hierarchy order
+    duplicated_chain = []
+    joint_mapping = {}
 
-def duplicate_joint_chains():
-    # Get the selected joint (root of the hierarchy)
-    selected_joint = cmds.ls(selection=True, type='joint')
+    for joint in original_chain:
+        base_name = joint.split('|')[-1]
+        if 'FK' not in base_name:
+            cmds.error(f"Joint '{base_name}' must contain 'FK' in its name to be duplicated with suffix '{suffix}'.")
+        new_name = base_name.replace('FK', suffix)
+        dup = cmds.duplicate(joint, parentOnly=True, name=new_name)[0]
+        joint_mapping[joint] = dup
+        duplicated_chain.append(dup)
 
-    if not selected_joint:
-        cmds.warning("Please select a joint.")
-        return
+    for joint in original_chain:
+        parent = cmds.listRelatives(joint, parent=True, type='joint', fullPath=True)
+        if parent and parent[0] in joint_mapping:
+            cmds.parent(joint_mapping[joint], joint_mapping[parent[0]])
 
-    root_joint = selected_joint[0]
+    return duplicated_chain
 
-    # Get the original hierarchy (including the root joint)
-    original_joints = [root_joint] + (cmds.listRelatives(root_joint, allDescendents=True, type='joint') or [])
+def get_weight_aliases(constraint_node):
+    try:
+        # Query aliases as tuples of (alias, full attribute)
+        alias_info = cmds.aliasAttr(constraint_node, q=True)
+        if not alias_info:
+            return []
 
-    # Store the names of the original joints in a list (in hierarchical order)
-    original_names = [joint.split('|')[-1] for joint in original_joints]
+        # Convert to dict for easier filtering
+        alias_dict = dict(zip(alias_info[::2], alias_info[1::2]))
 
-    # Function to duplicate and rename joints
-    def duplicate_and_rename_chain(suffix):
-        # List to store duplicated joints
-        duplicated_joints = []
+        # Return only aliases that correspond to weight attributes
+        weight_aliases = [alias for alias, attr in alias_dict.items() if '.w[' in attr]
+        return weight_aliases
 
-        # Duplicate each joint individually and store it
-        for original_joint in original_joints:
-            # Duplicate the current joint without hierarchy
-            duplicated_joint = cmds.duplicate(original_joint, parentOnly=True)[0]
-            duplicated_joints.append(duplicated_joint)
-
-        # Create a dictionary to store original joint and its corresponding duplicated joint
-        joint_mapping = {original: duplicated for original, duplicated in zip(original_joints, duplicated_joints)}
-
-        # Rebuild the hierarchy based on numeric suffix order
-        for original_joint in original_joints:
-            # Extract the numeric suffix from the original joint name
-            match = re.search(r'(\d+)$', original_joint)
-            if match:
-                suffix_number = int(match.group(1))
-                # Check if the original joint has a parent
-                parent_joint = cmds.listRelatives(original_joint, parent=True)
-                if parent_joint:
-                    parent_joint = joint_mapping[parent_joint[0]]  # Get the corresponding duplicated parent joint
-                    # Reparent the duplicated joint to its duplicated parent joint
-                    cmds.parent(joint_mapping[original_joint], parent_joint)
-
-        # Rename the duplicated joints according to the original names, replacing 'FK' with the provided suffix
-        renamed_joints = []
-        for original_name, duplicated_joint in zip(original_names, duplicated_joints):
-            # Replace 'FK' with the given suffix while keeping the numeric suffix
-            new_name = re.sub(r'FK(.*?)(\d+)', rf'{suffix}\1\2', original_name)
-
-            # Rename the duplicated joint
-            renamed_joint = cmds.rename(duplicated_joint, new_name)
-            renamed_joints.append(renamed_joint)
-
-        # Sort renamed joints based on their numeric suffix
-        renamed_joints.sort(key=lambda j: int(re.search(r'(\d+)$', j).group(1)))  # Sort by suffix number
-
-        return renamed_joints  # Return the renamed joints for constraint creation
-
-    # Create IK chain and get the renamed joints
-    ik_joints = duplicate_and_rename_chain("IK")
-
-    # Create RK chain and get the renamed joints
-    rk_joints = duplicate_and_rename_chain("RK")
-
-    # Change joint radius for FK, IK, and RK chains
-    joint_data = {'FK': original_joints, 'IK': ik_joints, 'RK': rk_joints}
-
-    # Set radius for FK, IK, and RK joints
-    for fk_joint in joint_data['FK']:
-        cmds.setAttr(f"{fk_joint}.radius", 0.75)
-
-    for ik_joint in joint_data['IK']:
-        cmds.setAttr(f"{ik_joint}.radius", 0.5)
-
-    for rk_joint in joint_data['RK']:
-        cmds.setAttr(f"{rk_joint}.radius", 1.0)  # RK joints set to 1.0
-
-    # Create constraints for the RK joints
-    constraints = create_constraints(joint_data)
-
-    # Set drawing overrides for joint colors
-    set_joint_colors(joint_data)
-
-    # Create IK handle from the first IK joint to the last IK joint
-    create_ik_handle(ik_joints)
-
-    # Create control attribute for the RK joints
-    control_attribute_name = create_control_attribute(original_names[0])
-
-    # Create reverse node and tie it to the control attribute
-    create_reverse_node(control_attribute_name)
-
-    # Connect reverse node to IK weights and control attribute to FK weights
-    connect_weights_to_reverse_and_control(constraints, control_attribute_name)
-
-    # Print the names of the created constraints with weight aliases
-    print("Created Constraints and Weight Aliases:")
-    constraint_dict = {}
-    for constraint, weight_alias in constraints:
-        if constraint not in constraint_dict:
-            constraint_dict[constraint] = []
-        constraint_dict[constraint].extend(weight_alias)
-
-    for constraint, weight_aliases in constraint_dict.items():
-        print(f"Constraint: {constraint}, Weight Aliases: {list(set(weight_aliases))}")
+    except Exception as e:
+        print(f"# Warning: Failed to get weight aliases for {constraint_node}: {e}")
+        return []
 
 
-def create_constraints(joint_data):
-    constraints = []  # List to store the names of constraints and their weight aliases
-    for rk_joint in joint_data['RK']:
-        # Extract the numeric suffix from the RK joint name
-        match = re.search(r'(\d+)$', rk_joint)
-        if match:
-            suffix = match.group(1)
+def create_constraints(fk_chain, ik_chain, rk_chain):
+    constraints_info = []
 
-            # Construct the corresponding FK and IK joint names
-            fk_joint = rk_joint.replace('RK', 'FK')
-            ik_joint = rk_joint.replace('RK', 'IK')
+    for fk, ik, rk in zip(fk_chain, ik_chain, rk_chain):
+        base_name = rk.replace('_RK_', '_')
 
-            # Debugging output
-            print(f"Creating constraints for RK joint: {rk_joint}")
-            print(f"Corresponding FK joint: {fk_joint}, IK joint: {ik_joint}")
+        # Parent constraint FK ➜ RK
+        if cmds.objExists(fk):
+            parent_fk = cmds.parentConstraint(fk, rk, mo=True, name=f"{rk}_parentConstraint")[0]
+            parent_fk_aliases = cmds.parentConstraint(parent_fk, q=True, weightAliasList=True) or []
+            constraints_info.append((parent_fk, parent_fk_aliases, 'FK'))
+            print(f"Parent constraint created: {parent_fk}, weight aliases: {parent_fk_aliases}, source: FK")
 
-            # Check if FK joint exists and create constraints if it does
-            if cmds.objExists(fk_joint):
-                # Create parent constraint from FK to RK joint
-                parent_constraint = cmds.parentConstraint(fk_joint, rk_joint, maintainOffset=True)
-                # Create scale constraint from FK to RK joint
-                scale_constraint = cmds.scaleConstraint(fk_joint, rk_joint, maintainOffset=True)
-                # Get the weight aliases
-                parent_weight_alias = cmds.parentConstraint(parent_constraint, query=True, weightAliasList=True)
-                scale_weight_alias = cmds.scaleConstraint(scale_constraint, query=True, weightAliasList=True)
-                # Store the constraint names and weight aliases
-                constraints.append((parent_constraint[0], parent_weight_alias))
-                constraints.append((scale_constraint[0], scale_weight_alias))
-                print(f"Created constraints from {fk_joint} to {rk_joint}")
+        # Parent constraint IK ➜ RK
+        if cmds.objExists(ik):
+            parent_ik = cmds.parentConstraint(ik, rk, mo=True, name=f"{rk}_parentConstraint")[0]
+            parent_ik_aliases = cmds.parentConstraint(parent_ik, q=True, weightAliasList=True) or []
+            constraints_info.append((parent_ik, parent_ik_aliases, 'IK'))
+            print(f"Parent constraint created: {parent_ik}, weight aliases: {parent_ik_aliases}, source: IK")
 
-            # Check if IK joint exists and create constraints if it does
-            if cmds.objExists(ik_joint):
-                # Create parent constraint from IK to RK joint
-                parent_constraint = cmds.parentConstraint(ik_joint, rk_joint, maintainOffset=True)
-                # Create scale constraint from IK to RK joint
-                scale_constraint = cmds.scaleConstraint(ik_joint, rk_joint, maintainOffset=True)
-                # Get the weight aliases
-                parent_weight_alias = cmds.parentConstraint(parent_constraint, query=True, weightAliasList=True)
-                scale_weight_alias = cmds.scaleConstraint(scale_constraint, query=True, weightAliasList=True)
-                # Store the constraint names and weight aliases
-                constraints.append((parent_constraint[0], parent_weight_alias))
-                constraints.append((scale_constraint[0], scale_weight_alias))
-                print(f"Created constraints from {ik_joint} to {rk_joint}")
+        # Scale constraint FK ➜ RK
+        if cmds.objExists(fk):
+            scale_fk = cmds.scaleConstraint(fk, rk, mo=True, name=f"{rk}_scaleConstraint")[0]
+            scale_fk_aliases = cmds.scaleConstraint(scale_fk, q=True, weightAliasList=True) or []
+            constraints_info.append((scale_fk, scale_fk_aliases, 'FK'))
+            print(f"Scale constraint created: {scale_fk}, weight aliases: {scale_fk_aliases}, source: FK")
 
-    return constraints  # Return the list of constraint names and their weight aliases
+        # Scale constraint IK ➜ RK
+        if cmds.objExists(ik):
+            scale_ik = cmds.scaleConstraint(ik, rk, mo=True, name=f"{rk}_scaleConstraint")[0]
+            scale_ik_aliases = cmds.scaleConstraint(scale_ik, q=True, weightAliasList=True) or []
+            constraints_info.append((scale_ik, scale_ik_aliases, 'IK'))
+            print(f"Scale constraint created: {scale_ik}, weight aliases: {scale_ik_aliases}, source: IK")
 
+    return constraints_info
 
 def set_joint_colors(joint_data):
-    # FK joints should be blue (index 6), IK joints red (index 13), and RK joints green (index 14)
+    """
+    Sets override colors for FK, IK, and RK joints.
+    FK: Blue (6), IK: Red (13), RK: Green (14)
+    """
+    color_map = {'FK': 6, 'IK': 13, 'RK': 14}
+    for chain_type, joints in joint_data.items():
+        for joint in joints:
+            if cmds.objExists(joint):
+                cmds.setAttr(f"{joint}.overrideEnabled", 1)
+                cmds.setAttr(f"{joint}.overrideColor", color_map[chain_type])
 
-    for fk_joint in joint_data['FK']:
-        cmds.setAttr(f"{fk_joint}.overrideEnabled", 1)
-        cmds.setAttr(f"{fk_joint}.overrideColor", 6)  # Blue
+def set_joint_radii(joint_data):
+    """
+    Sets custom joint radii for visual differentiation.
+    FK: 0.75, IK: 0.5, RK: 1.0
+    """
+    radius_map = {'FK': 0.75, 'IK': 0.5, 'RK': 1.0}
+    for chain_type, joints in joint_data.items():
+        for joint in joints:
+            if cmds.objExists(joint):
+                cmds.setAttr(f"{joint}.radius", radius_map[chain_type])
 
-    for ik_joint in joint_data['IK']:
-        cmds.setAttr(f"{ik_joint}.overrideEnabled", 1)
-        cmds.setAttr(f"{ik_joint}.overrideColor", 13)  # Red
+def create_ik_handle(ik_chain):
+    if len(ik_chain) >= 2:
+        # Find the terminal joint in the IK chain
+        end_joint = ik_chain[0]
+        while True:
+            children = cmds.listRelatives(end_joint, children=True, type='joint', fullPath=True)
+            if not children:
+                break
+            end_joint = children[0]
+        start_joint = ik_chain[0]
+        handle = cmds.ikHandle(sj=start_joint, ee=end_joint, sol='ikRPsolver')[0]
+        print(f"Created IK handle: {handle} from {start_joint} to {end_joint}")
 
-    for rk_joint in joint_data['RK']:
-        cmds.setAttr(f"{rk_joint}.overrideEnabled", 1)
-        cmds.setAttr(f"{rk_joint}.overrideColor", 14)  # Green
+def process_selected_joint():
+    selection = cmds.ls(selection=True, type='joint')
+    if not selection:
+        cmds.warning("Please select a root joint to process.")
+        return
 
+    fk_root = selection[0]
+    fk_chain = cmds.listRelatives(fk_root, allDescendents=True, type='joint', fullPath=True) or []
+    fk_chain = [fk_root] + fk_chain
+    fk_chain = cmds.ls(fk_chain, long=True)
 
-def create_ik_handle(ik_joints):
-    # Print each IK joint in order
-    print("IK Joints in order:")
-    for joint in ik_joints:
-        print(joint)
+    ik_chain = duplicate_joint_chain(fk_root, "IK")
+    rk_chain = duplicate_joint_chain(fk_root, "RK")
 
-    # Create an IK handle from the first IK joint to the last IK joint
-    if len(ik_joints) >= 2:
-        start_joint = ik_joints[0]
-        end_joint = ik_joints[-1]
-        ik_handle_name = cmds.ikHandle(sj=start_joint, ee=end_joint)[0]  # Removed the 'sol' flag
-        print(f"Created IK handle: {ik_handle_name} from {start_joint} to {end_joint}")
+    joint_data = {'FK': fk_chain, 'IK': ik_chain, 'RK': rk_chain}
 
+    constraints = create_constraints(fk_chain, ik_chain, rk_chain)
+    print("Constraints info:", constraints)
+
+    set_joint_colors(joint_data)
+    set_joint_radii(joint_data)
+    create_ik_handle(ik_chain)
+
+    # Create control attribute on Transform_Ctrl based on FK root name
+    control_attr_name = create_control_attribute(fk_root)
+
+    # Create reverse node connected to that attribute
+    create_reverse_node(control_attr_name)
+
+    # Connect constraint weights to control attribute and reverse node
+    connect_weights_to_reverse_and_control(constraints, control_attr_name)
+    print("Finished connecting weights.")
+
+    print("Created IK and RK duplicate chains with constraints, colors, radii, IK handle, control attribute, reverse node, and connected weights.")
 
 def create_control_attribute(original_name):
     # Check if the Transform_Ctrl exists
@@ -258,5 +227,10 @@ def connect_weights_to_reverse_and_control(constraints, control_attribute_name):
                 else:
                     print(f"Connection Transform_Ctrl.{control_attribute_name} to {constraint}.{alias} already exists (FK weight)")
 
-# Run the entire process
-duplicate_joint_chains()
+
+if __name__ == "__main__":
+    process_selected_joint()
+
+
+
+
