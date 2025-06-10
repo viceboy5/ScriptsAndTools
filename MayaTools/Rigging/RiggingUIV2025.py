@@ -22,63 +22,48 @@ def maya_main_window():
 
 
 def create_ui():
-    # Create a window
-    window = QtWidgets.QWidget(parent=maya_main_window())
-    window.setWindowTitle("Rigging Automation")
-    window.setGeometry(200, 200, 400, 400)
+    global rigging_ui_window
+    rigging_ui_window = QtWidgets.QWidget(parent=maya_main_window())
+    rigging_ui_window.setWindowTitle("Rigging Automation")
+    rigging_ui_window.setGeometry(200, 200, 400, 400)
+    rigging_ui_window.setWindowFlags(QtCore.Qt.Window | QtCore.Qt.WindowStaysOnTopHint)
 
-    # Set window flags for resizing and moving
-    window.setWindowFlags(QtCore.Qt.Window | QtCore.Qt.WindowStaysOnTopHint)
-
-    # Create a layout
     layout = QtWidgets.QVBoxLayout()
 
-    # Button for creating controls
     color_dropdown = QtWidgets.QComboBox()
-    color_dropdown.addItem("Blue")
-    color_dropdown.addItem("Red")
-    color_dropdown.addItem("Green")
+    color_dropdown.addItems(["Blue", "Red", "Green"])
     layout.addWidget(color_dropdown)
 
     create_ctrls_button = QtWidgets.QPushButton("Create Controls")
-    create_ctrls_button.clicked.connect(lambda: create_controls_clicked(color_dropdown.currentText()))
+    create_ctrls_button.clicked.connect(lambda: CreateControlsForJoints.create_controls_clicked(color_dropdown.currentText()))
     layout.addWidget(create_ctrls_button)
 
-    # Button for clusters to joints
     clusters_to_joints_button = QtWidgets.QPushButton("Clusters to Joints")
-    clusters_to_joints_button.clicked.connect(create_joint_at_cluster_transforms)
+    clusters_to_joints_button.clicked.connect(create_joint_at_cluster_transforms)  # Make sure this is imported or defined
     layout.addWidget(clusters_to_joints_button)
 
-    # Sequential renamer input
     rename_input = QtWidgets.QLineEdit()
     rename_input.setPlaceholderText("Enter name with # for numbering (e.g. FK_Jnt_##)")
     layout.addWidget(rename_input)
 
-    # Button for sequential renamer
     sequential_renamer_button = QtWidgets.QPushButton("Sequential Renamer")
-    sequential_renamer_button.clicked.connect(lambda: RenameSequentially(rename_input.text()))
+    sequential_renamer_button.clicked.connect(lambda: SequentialRenamer.RenameSequentially(rename_input.text()))
     layout.addWidget(sequential_renamer_button)
 
-    # Button for creating constraints
     create_constraints_button = QtWidgets.QPushButton("Create Constraints for Matching Joints")
     create_constraints_button.clicked.connect(lambda: CreateConstraintsForMatchingJoints.find_and_create_constraints())
     layout.addWidget(create_constraints_button)
 
-    # Button for broken FK constraints
     broken_fk_constraints_button = QtWidgets.QPushButton("BrokenFK Constraints")
     broken_fk_constraints_button.clicked.connect(lambda: BrokenFKConstraints.create_broken_fk_constraints())
     layout.addWidget(broken_fk_constraints_button)
 
-    # Button for creating RK
     create_rk_button = QtWidgets.QPushButton("Create RK")
     create_rk_button.clicked.connect(lambda: CreateRK.build_rk_system())
     layout.addWidget(create_rk_button)
 
-    # Set the layout on the window
-    window.setLayout(layout)
-
-    # Show the window
-    window.show()
+    rigging_ui_window.setLayout(layout)
+    rigging_ui_window.show()
 
 # Run the UI
 create_ui()
