@@ -171,6 +171,8 @@ def connect_weights_to_reverse_and_control(constraints, control_attribute_name, 
                     cmds.connectAttr(f"Transform_Ctrl.{control_attribute_name}", plug)
                     connected.add(plug)
 
+def build_rk_system():
+    process_selected_joint()
 
 if __name__ == "__main__":
     process_selected_joint()
