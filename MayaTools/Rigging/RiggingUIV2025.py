@@ -12,6 +12,7 @@ import CreateControlsForJoints
 import SequentialRenamer
 import CreateConstraintsForMatchingJoints
 import BrokenFKConstraints
+import ClustersToJoints
 
 def maya_main_window():
     """
@@ -39,7 +40,7 @@ def create_ui():
     layout.addWidget(create_ctrls_button)
 
     clusters_to_joints_button = QtWidgets.QPushButton("Clusters to Joints")
-    clusters_to_joints_button.clicked.connect(create_joint_at_cluster_transforms)  # Make sure this is imported or defined
+    clusters_to_joints_button.clicked.connect(lambda: ClusterToJoints.create_joint_at_cluster_transforms())  # Make sure this is imported or defined
     layout.addWidget(clusters_to_joints_button)
 
     rename_input = QtWidgets.QLineEdit()
