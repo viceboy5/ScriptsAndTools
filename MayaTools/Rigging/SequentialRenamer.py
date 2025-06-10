@@ -21,28 +21,3 @@ def RenameSequentially(txt):
             newNum = str(i + 1).zfill(count)  # Correctly format the numbering
             new_name = parts[0] + newNum + parts[2]
             cmds.rename(sel, new_name)
-
-
-# UI function to take input and trigger renaming
-def showRenameUI():
-    if cmds.window("renameWindow", exists=True):
-        cmds.deleteUI("renameWindow")
-
-    window = cmds.window("renameWindow", title="Rename Sequentially", widthHeight=(300, 100))
-    cmds.columnLayout(adjustableColumn=True)
-
-    # Input field
-    nameField = cmds.textField(placeholderText="Enter name with # for numbering (e.g. FK_Jnt_##)")
-
-    # Button to trigger renaming
-    def onRenameButtonClicked(*args):
-        nameString = cmds.textField(nameField, query=True, text=True)
-        RenameSequentially(nameString)
-
-    cmds.button(label="Rename", command=onRenameButtonClicked)
-
-    cmds.showWindow(window)
-
-
-# Call the UI
-showRenameUI()
