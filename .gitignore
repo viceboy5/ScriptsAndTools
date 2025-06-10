@@ -2,3 +2,5 @@
 *.xml
 
 MayaTools/.idea/MayaTools.iml
+
+*.pyc
