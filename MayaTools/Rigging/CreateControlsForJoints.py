@@ -73,3 +73,5 @@ def run_control_creation(color_name):
         print(f"Controls created with color: {color_name}")
     else:
         print("Control creation failed due to no selection.")
+
+run_control_creation("Blue")
