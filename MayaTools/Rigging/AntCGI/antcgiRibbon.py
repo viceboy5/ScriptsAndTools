@@ -8,7 +8,6 @@
 # -------------------------------------------------------------------------------------------------------------------------------------
 
 import maya.cmds as cmds
-import pymel.core as pm
 import maya.mel as mel
 
 from functools import partial
@@ -294,25 +293,21 @@ def addRibbonDeformers(surface, ribbonDir, *args):
 # Use UV Pin Instead of Follicles
 
 def matrixConnect(surface, spans, direction, orientation, endorient, regenJoints):
+
     if regenJoints:
-        globalScale = cmds.getAttr((surface + ".globalScaleInput"))
-        jointFlip = cmds.getAttr((surface + ".jointOrientFlip"))
-        resetJnt = cmds.getAttr((surface + ".resetJntInput"))
-        jointOrient = cmds.getAttr((surface + ".jointOrientMenu"))
+        globalScale = cmds.getAttr(f"{surface}.globalScaleInput")
+        jointFlip = cmds.getAttr(f"{surface}.jointOrientFlip")
+        resetJnt = cmds.getAttr(f"{surface}.resetJntInput")
+        jointOrient = cmds.getAttr(f"{surface}.jointOrientMenu")
     else:
         globalScale = cmds.floatField("globalScaleInput", q=1, v=1)
         jointOrient = cmds.optionMenu("jointOrientMenu", q=1, v=1)
         jointFlip = cmds.checkBox("jointOrientFlip", q=1, v=1)
         resetJnt = cmds.checkBox("resetJntInput", q=1, v=1)
 
-    if jointFlip:
-        flipJnt = 3
-    else:
-        flipJnt = 0
+    flipJnt = 3 if jointFlip else 0
 
-    surface = pm.PyNode(surface)
-
-    for i in range(0, spans):
+    for i in range(spans):
 
         if resetJnt and i == 0:
             normalAxis = 2
@@ -328,19 +323,19 @@ def matrixConnect(surface, spans, direction, orientation, endorient, regenJoints
                 normalAxis = 0 + flipJnt
                 tangentAxis = 5 - flipJnt
 
-        jointName = '_'.join((surface.name(), 'joint', str(i + 1).zfill(2)))
+        jointName = '_'.join((surface, 'joint', str(i + 1).zfill(2)))
         newJoint = cmds.joint(rad=0.15 * globalScale, n=jointName)
 
-        cmds.shadingNode("uvPin", au=1, n=(jointName + "_uvpin"))
+        uvpin = cmds.shadingNode("uvPin", au=1, n=f"{jointName}_uvpin")
 
-        cmds.connectAttr((jointName + "_uvpin.outputMatrix[0]"), (jointName + ".offsetParentMatrix"))
-        cmds.connectAttr((surface + "Shape.worldSpace"), (jointName + "_uvpin.deformedGeometry"))
+        cmds.connectAttr(f"{uvpin}.outputMatrix[0]", f"{jointName}.offsetParentMatrix")
+        cmds.connectAttr(f"{surface}Shape.worldSpace", f"{uvpin}.deformedGeometry")
 
-        cmds.setAttr((jointName + "_uvpin.coordinate[0].coordinateV"), 0.5)
-        cmds.setAttr((jointName + "_uvpin.coordinate[0].coordinateU"), (i / (spans - 1.0)))
+        cmds.setAttr(f"{uvpin}.coordinate[0].coordinateV", 0.5)
+        cmds.setAttr(f"{uvpin}.coordinate[0].coordinateU", i / (spans - 1.0))
 
-        cmds.setAttr((jointName + "_uvpin.normalAxis"), normalAxis)
-        cmds.setAttr((jointName + "_uvpin.tangentAxis"), tangentAxis)
+        cmds.setAttr(f"{uvpin}.normalAxis", normalAxis)
+        cmds.setAttr(f"{uvpin}.tangentAxis", tangentAxis)
 
         if cmds.objExists("ribbon_joints"):
             cmds.parent(jointName, "ribbon_joints")
@@ -419,41 +414,33 @@ def useRibbon(*args):
 # Create Follicle Function
 
 def addFollicles(surface, spans, direction, orientation, endorient):
+
     globalScale = cmds.floatField("globalScaleInput", q=1, v=1)
-    surface = pm.PyNode(surface)
 
-    # cmds.group(n=surface.replace("_ribbon", "").lower() + "_follicles", em=1)
+    for i in range(spans):
+        follicleName = '_'.join((surface, 'follicle', str(i + 1).zfill(2)))
+        jointName = '_'.join((surface, 'joint', str(i + 1).zfill(2)))
 
-    # if cmds.objExists("follicles"):
-    #     cmds.parent(surface.replace("_ribbon", "").lower() + "_follicles", "follicles")
-    # else:
-    #     cmds.group(surface.replace("_ribbon", "").lower() + "_follicles", n="follicles")
+        follicle = cmds.createNode('transform', n=follicleName)
+        follicleShape = cmds.createNode('follicle', n=f"{follicle}Shape", p=follicle)
 
-    for i in range(0, spans):
-        follicleName = '_'.join((surface.name(), 'follicle', str(i + 1).zfill(2)))
-        jointName = '_'.join((surface.name(), 'joint', str(i + 1).zfill(2)))
+        cmds.connectAttr(f"{surface}Shape.local", f"{follicleShape}.inputSurface")
+        cmds.connectAttr(f"{surface}Shape.worldMatrix[0]", f"{follicleShape}.inputWorldMatrix")
+        cmds.connectAttr(f"{follicleShape}.outRotate", f"{follicle}.rotate")
+        cmds.connectAttr(f"{follicleShape}.outTranslate", f"{follicle}.translate")
+        cmds.setAttr(f"{follicle}.inheritsTransform", 0)
 
-        follicle = pm.createNode('transform', n=follicleName, ss=1)
-        follicleShape = pm.createNode('follicle', n=follicle.name() + 'Shape', p=follicle, ss=1)
+        cmds.setAttr(f"{follicleShape}.parameterU", i / (spans - 1.0))
+        cmds.setAttr(f"{follicleShape}.parameterV", 0.5)
 
-        surface.local >> follicleShape.inputSurface
-        surface.worldMatrix[0] >> follicleShape.inputWorldMatrix
-        follicleShape.outRotate >> follicle.rotate
-        follicleShape.outTranslate >> follicle.translate
-        follicle.inheritsTransform.set(False)
+        jntPos = cmds.xform(follicle, q=True, ws=True, piv=True)
+        newJoint = cmds.joint(rad=0.05 * globalScale, p=(jntPos[0], jntPos[1], jntPos[2]), n=jointName)
 
-        follicleShape.parameterU.set(i / (spans - 1.0))
-        follicleShape.parameterV.set(0.5)
-
-        jntPos = cmds.xform(str(follicle), q=True, ws=True, piv=True)
-        newJoint = cmds.joint(rad=.05 * globalScale, p=(jntPos[0], jntPos[1], jntPos[2]), n=jointName)
-
-        cmds.parent(str(newJoint), str(follicle))
-
-        cmds.matchTransform(str(newJoint), str(follicle), rot=1)
+        cmds.parent(newJoint, follicle)
+        cmds.matchTransform(newJoint, follicle, rot=True)
 
         if i == 0:
-            cmds.rotate(endorient[0], endorient[1], endorient[2], str(newJoint), r=1, os=1, fo=1)
+            cmds.rotate(endorient[0], endorient[1], endorient[2], newJoint, r=True, os=True)
         else:
             cmds.rotate(orientation[0], orientation[1], orientation[2], str(newJoint), r=1, os=1, fo=1)
 
