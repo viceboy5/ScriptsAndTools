@@ -256,7 +256,9 @@ foreach ($groupSize in $mergePlan) {
         $sSurvivor = $settObjById[$idSurvivor]
         if ($null -ne $sSurvivor) {
 
-            if ($n = $sSurvivor.SelectSingleNode('metadata[@key="name"]')) { $n.SetAttribute('value', 'Assembly') }
+            $nameNode = $sSurvivor.SelectSingleNode('metadata[@key="name"]')
+            $baseName = if ($null -ne $nameNode) { $nameNode.GetAttribute('value') } else { 'Object' }
+            if ($null -ne $nameNode) { $nameNode.SetAttribute('value', "$baseName$groupSize") }
 
             [int]$totalFaces = 0
             $fcNode = $sSurvivor.SelectSingleNode('metadata[@key="face_count"]')
@@ -329,7 +331,6 @@ if (($null -ne $cutInfoPath) -and (Test-Path $cutInfoPath)) {
 }
 
 Save-Xml $xml $modelFile
-if ($hasSettings) { Save-Xml $settings $settingsPath }
 
 # ── Retarget lone items' components to the new geometry file ─────────────────
 # The merge loop only updates p:path for merged objects. Lone items still
@@ -342,9 +343,20 @@ for ($li = ($buildItems.Count - $lone); $li -lt $buildItems.Count; $li++) {
     foreach ($c in $loneObj.SelectNodes('m:components/m:component', $xns)) {
         $c.SetAttribute('path', $nsProd, $newModelPath)
     }
+    # Rename lone item: append "1" to its current name
+    if ($hasSettings) {
+        $sLone = $settObjById[$loneId]
+        if ($null -ne $sLone) {
+            $loneNameNode = $sLone.SelectSingleNode('metadata[@key="name"]')
+            if ($null -ne $loneNameNode) {
+                $loneNameNode.SetAttribute('value', "$($loneNameNode.GetAttribute('value'))1")
+            }
+        }
+    }
 }
-# Re-save after updating lone item paths
+# Re-save both after updating lone item paths and names
 Save-Xml $xml $modelFile
+if ($hasSettings) { Save-Xml $settings $settingsPath }
 
 foreach ($f in $allModelFiles) { Remove-Item $f.FullName -Force }
 [System.IO.File]::WriteAllText($relsPath, "<?xml version='1.0' encoding='UTF-8'?><Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Target='/3D/Objects/$newModelName' Id='rel-1' Type='http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel'/></Relationships>")
