@@ -330,6 +330,22 @@ if (($null -ne $cutInfoPath) -and (Test-Path $cutInfoPath)) {
 
 Save-Xml $xml $modelFile
 if ($hasSettings) { Save-Xml $settings $settingsPath }
+
+# ── Retarget lone items' components to the new geometry file ─────────────────
+# The merge loop only updates p:path for merged objects. Lone items still
+# reference the OLD .model filename, which is about to be deleted.
+# Walk the last $lone build items and rewrite every component p:path.
+for ($li = ($buildItems.Count - $lone); $li -lt $buildItems.Count; $li++) {
+    $loneId  = $buildItems[$li].GetAttribute('objectid')
+    $loneObj = $objById[$loneId]
+    if ($null -eq $loneObj) { continue }
+    foreach ($c in $loneObj.SelectNodes('m:components/m:component', $xns)) {
+        $c.SetAttribute('path', $nsProd, $newModelPath)
+    }
+}
+# Re-save after updating lone item paths
+Save-Xml $xml $modelFile
+
 foreach ($f in $allModelFiles) { Remove-Item $f.FullName -Force }
 [System.IO.File]::WriteAllText($relsPath, "<?xml version='1.0' encoding='UTF-8'?><Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Target='/3D/Objects/$newModelName' Id='rel-1' Type='http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel'/></Relationships>")
 
