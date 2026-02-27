@@ -7,36 +7,19 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # ════════════════════════════════════════════════════════════════════════════════
-#  merge_3mf_worker.ps1 - DYNAMIC N-WAY MULTI-OBJECT VERSION
+#  merge_3mf_worker.ps1 - AUTO-PLAN N-WAY MERGE (≤ 64 OBJECTS)
 #
-#  MASTER_MERGE_COUNT controls how many consecutive build items are collapsed
-#  into a single Assembly object per group.
-#
-#  Examples:
-#    MASTER_MERGE_COUNT = 2  → pairs   (original behaviour)
-#    MASTER_MERGE_COUNT = 3  → triples
-#    MASTER_MERGE_COUNT = 4  → quads
-#
-#  If the file contains 6 build items and MASTER_MERGE_COUNT = 3:
-#    Group 1: items 0,1,2 → Assembly 1
-#    Group 2: items 3,4,5 → Assembly 2
-#
-#  Any leftover items at the end (if Count % MASTER_MERGE_COUNT != 0) are
-#  left untouched.
-#
-#  Per-group calculations that scale with N:
-#    - New build transform  = centroid of all N original build translations
-#    - Component baking     = inv(centroid_tx) · orig_build_tx[i] · orig_comp_tx
-#    - Component ordering   = [obj0 normal], [obj1 normal], ...,
-#                             [obj0 special], [obj1 special], ...
-#    - face_count           = sum of all N face_counts
-#    - model_instances      = keep first, delete rest
-#    - assemble_items       = update first to centroid, delete rest
+#  Rules (applied to the total build-item count):
+#    • Final object count must be ≤ 64.
+#    • If total is even: leave the LAST 2 objects unmerged.
+#      If total is odd:  leave the LAST 1 object  unmerged.
+#    • The remaining ("pool") objects are merged in groups, processed
+#      front-to-back.  Groups are sized to maximise pairs (size 2), using
+#      groups of size+1 only where necessary to stay within the 64 limit.
+#    • All per-group metadata (centroid, component baking, face_count,
+#      assemble_items, plate model_instances, cut_information) scales
+#      correctly with the actual group size.
 # ════════════════════════════════════════════════════════════════════════════════
-
-# ── MASTER CONTROL VARIABLE ───────────────────────────────────────────────────
-$MASTER_MERGE_COUNT = 3   # <-- Change this to merge N objects at a time
-# ─────────────────────────────────────────────────────────────────────────────
 
 $nsCore = 'http://schemas.microsoft.com/3dmanufacturing/core/2015/02'
 $nsProd = 'http://schemas.microsoft.com/3dmanufacturing/production/2015/06'
@@ -129,72 +112,126 @@ if ($hasSettings) {
     foreach ($node in $settings.config.ChildNodes) { if ($node.LocalName -eq 'object') { $settObjById[$node.GetAttribute('id')] = $node } }
 }
 
-$report = New-Object System.Collections.Generic.List[string]
-
-# ── Setup New Geometry ────────────────────────────────────────────────────────
+# ── Setup New Geometry File ───────────────────────────────────────────────────
 $maxExisting = ($allModelFiles | ForEach-Object { [int]($_.BaseName -replace 'object_','') } | Measure-Object -Maximum).Maximum
-$newModelNum = $maxExisting + 57
+$newModelNum  = $maxExisting + 57
 $newModelName = "object_$newModelNum.model"
 $newModelPath = "/3D/Objects/$newModelName"
-$newPrefix = ([int]($newModelNum -band 0xFFFF)).ToString('x4')
+$newPrefix    = ([int]($newModelNum -band 0xFFFF)).ToString('x4')
 
 $geoContent = [System.IO.File]::ReadAllText($allModelFiles[0].FullName, [System.Text.Encoding]::UTF8)
 if ($geoContent -match 'p:UUID="([0-9a-fA-F]{4})') { $geoContent = $geoContent -replace $Matches[1], $newPrefix }
 [System.IO.File]::WriteAllText((Join-Path $objectsDir $newModelName), $geoContent, (New-Object System.Text.UTF8Encoding($false)))
 
-# ── Dynamic N-Way Merge Loop ──────────────────────────────────────────────────
-# Process build items in groups of $MASTER_MERGE_COUNT.
-# Each group collapses into one Assembly, surviving on buildItems[groupStart].
+$report = New-Object System.Collections.Generic.List[string]
 
+# ── Compute merge plan ────────────────────────────────────────────────────────
+# Returns an ordered list of group sizes covering the pool, maximising pairs.
+function Get-MergePlan([int]$total) {
+    $lone    = if ($total % 2 -eq 0) { 2 } else { 1 }
+    $pool    = $total - $lone
+    $maxSlots = 64 - $lone   # merged groups may produce at most this many results
+
+    if ($pool -eq 0) { return @() }
+
+    # For base group size g (starting at 2), try covering pool with groups of
+    # exactly g and (g+1), maximising the count of size-g groups.
+    # Formula:  a*g + b*(g+1) = pool,  a+b <= maxSlots,  a >= 0, b >= 0
+    for ($g = 2; $g -le $pool; $g++) {
+        $period = $g + 1
+        $bestA  = -1
+        $bestB  = -1
+
+        # Enumerate a0 in [0, g] to find all valid residues mod (g+1)
+        for ($a0 = 0; $a0 -le $g; $a0++) {
+            $rem = $pool - $a0 * $g
+            if ($rem -lt 0) { break }
+            if ($rem % ($g + 1) -ne 0) { continue }
+
+            # All valid a: a0, a0+(g+1), a0+2*(g+1), ...  maximize a
+            $a = $a0
+            while ($a -le [int]($pool / $g)) {
+                $b = ($pool - $a * $g) / ($g + 1)
+                if (($a + $b) -le $maxSlots) {
+                    if ($a -gt $bestA) { $bestA = $a; $bestB = $b }
+                }
+                $a += $period
+            }
+            break   # found the valid residue class; no need to check others
+        }
+
+        if ($bestA -ge 0) {
+            $plan = @()
+            for ($i = 0; $i -lt $bestA; $i++) { $plan += $g       }
+            for ($i = 0; $i -lt $bestB; $i++) { $plan += ($g + 1) }
+            return $plan
+        }
+    }
+
+    return @($pool)   # fallback: one giant group
+}
+
+$totalItems = $buildItems.Count
+$lone       = if ($totalItems % 2 -eq 0) { 2 } else { 1 }
+$mergePlan  = @( Get-MergePlan $totalItems )   # array of group sizes (front of list)
+
+$report.Add("Total build items : $totalItems")
+$report.Add("Lone (untouched)  : $lone  (last $lone item(s))")
+$report.Add("Merge plan        : $($mergePlan -join ', ')  ($($mergePlan.Count) groups, $(($mergePlan | Measure-Object -Sum).Sum) items merged)")
+$report.Add("Expected final    : $($mergePlan.Count + $lone)")
+Write-Host "Plan: $($mergePlan.Count) merge group(s) + $lone lone → final $($mergePlan.Count + $lone) object(s)"
+
+# ── Dynamic Merge Loop ────────────────────────────────────────────────────────
+$cursor     = 0   # index into $buildItems
 $groupCount = 0
-for ($groupStart = 0; $groupStart + $MASTER_MERGE_COUNT -le $buildItems.Count; $groupStart += $MASTER_MERGE_COUNT) {
 
-    # Collect the K items and objects for this group
+foreach ($groupSize in $mergePlan) {
+
+    # Collect items/objects/transforms for this group
     $groupItems = @()
     $groupObjs  = @()
-    $groupTxs   = @()   # build-plate transforms for each member
+    $groupTxs   = @()
 
-    for ($k = 0; $k -lt $MASTER_MERGE_COUNT; $k++) {
-        $item = $buildItems[$groupStart + $k]
+    for ($k = 0; $k -lt $groupSize; $k++) {
+        $item = $buildItems[$cursor + $k]
         $id   = $item.GetAttribute('objectid')
         $groupItems += $item
         $groupObjs  += $objById[$id]
         $groupTxs   += ,( Parse-Tx ($item.GetAttribute('transform')) )
     }
-
-    $idSurvivor = $groupItems[0].GetAttribute('objectid')
+    $cursor     += $groupSize
+    $idSurvivor  = $groupItems[0].GetAttribute('objectid')
 
     # ── Centroid of all N build translations ──────────────────────────────────
     [double]$sumX = 0; [double]$sumY = 0; [double]$sumZ = 0
     foreach ($tx in $groupTxs) { $sumX += $tx[9]; $sumY += $tx[10]; $sumZ += $tx[11] }
-    [double]$cX = $sumX / $MASTER_MERGE_COUNT
-    [double]$cY = $sumY / $MASTER_MERGE_COUNT
-    [double]$cZ = $sumZ / $MASTER_MERGE_COUNT
+    [double]$cX = $sumX / $groupSize
+    [double]$cY = $sumY / $groupSize
+    [double]$cZ = $sumZ / $groupSize
 
-    # Write centroid to build item and read back exact stored value
+    # Write centroid and read back exact stored value for baking
     [double[]]$txNew = (1,0,0, 0,1,0, 0,0,1, $cX, $cY, $cZ)
     $txNewStr = Fmt-Tx $txNew
     $groupItems[0].SetAttribute('transform', $txNewStr)
-    [double[]]$txNew    = Parse-Tx $txNewStr   # exact stored value
+    [double[]]$txNew    = Parse-Tx $txNewStr
     [double[]]$invTxNew = Inv-Tx $txNew
 
-    # ── Build merged <components> in correct N-way order ──────────────────────
-    # Ordering: [normal comps for each obj in order], [special comps for each obj in order]
-    # "special" = objectid == '40' (the negative/support cube, always floats last)
+    # ── Merge components: normal phase then special phase ─────────────────────
+    # "special" = objectid '40' (negative/support cube) — always floats last
     $newCompsEl = $xml.CreateElement('components', $nsCore)
 
     foreach ($phase in @('normal', 'special')) {
-        for ($k = 0; $k -lt $MASTER_MERGE_COUNT; $k++) {
-            $obj  = $groupObjs[$k]
-            [double[]]$origBuildTx = $groupTxs[$k]
+        for ($k = 0; $k -lt $groupSize; $k++) {
+            $obj              = $groupObjs[$k]
+            [double[]]$origTx = $groupTxs[$k]
 
             foreach ($c in $obj.SelectNodes('m:components/m:component', $xns)) {
                 $isSpecial = ($c.GetAttribute('objectid') -eq '40')
-                if (($phase -eq 'normal'  -and $isSpecial) -or
-                    ($phase -eq 'special' -and -not $isSpecial)) { continue }
+                if ($phase -eq 'normal'  -and $isSpecial)     { continue }
+                if ($phase -eq 'special' -and -not $isSpecial) { continue }
 
                 [double[]]$compTx  = Parse-Tx ($c.GetAttribute('transform'))
-                [double[]]$bakedTx = Mul-Tx $invTxNew (Mul-Tx $origBuildTx $compTx)
+                [double[]]$bakedTx = Mul-Tx $invTxNew (Mul-Tx $origTx $compTx)
 
                 $newComp = $xml.CreateElement('component', $nsCore)
                 $newComp.SetAttribute('path',      $nsProd, $newModelPath)
@@ -206,62 +243,53 @@ for ($groupStart = 0; $groupStart + $MASTER_MERGE_COUNT -le $buildItems.Count; $
         }
     }
 
-    # Replace survivor's components
     if ($null -ne ($oldC = $groupObjs[0].SelectSingleNode('m:components', $xns))) {
         $groupObjs[0].ReplaceChild($newCompsEl, $oldC) | Out-Null
     } else {
         $groupObjs[0].AppendChild($newCompsEl) | Out-Null
     }
 
-    # Update survivor UUID to reflect new model file number
     $groupObjs[0].SetAttribute('UUID', $nsProd, (([int]$newModelNum).ToString('x8') + '-71cb-4c03-9d28-80fed5dfa1dc'))
 
     # ── model_settings.config ─────────────────────────────────────────────────
     if ($hasSettings) {
         $sSurvivor = $settObjById[$idSurvivor]
-
         if ($null -ne $sSurvivor) {
-            # Rename Assembly
+
             if ($n = $sSurvivor.SelectSingleNode('metadata[@key="name"]')) { $n.SetAttribute('value', 'Assembly') }
 
-            # Sum face_counts and append parts from all non-survivor members
             [int]$totalFaces = 0
             $fcNode = $sSurvivor.SelectSingleNode('metadata[@key="face_count"]')
             if ($null -ne $fcNode) { [int]::TryParse($fcNode.GetAttribute('value'), [ref]$totalFaces) | Out-Null }
 
-            for ($k = 1; $k -lt $MASTER_MERGE_COUNT; $k++) {
-                $memberId  = $groupItems[$k].GetAttribute('objectid')
-                $sMember   = $settObjById[$memberId]
+            for ($k = 1; $k -lt $groupSize; $k++) {
+                $memberId = $groupItems[$k].GetAttribute('objectid')
+                $sMember  = $settObjById[$memberId]
                 if ($null -eq $sMember) { continue }
 
-                # Add face_count
-                $memberFcNode = $sMember.SelectSingleNode('metadata[@key="face_count"]')
-                if ($null -ne $memberFcNode) {
+                $mfcNode = $sMember.SelectSingleNode('metadata[@key="face_count"]')
+                if ($null -ne $mfcNode) {
                     [int]$mfc = 0
-                    [int]::TryParse($memberFcNode.GetAttribute('value'), [ref]$mfc) | Out-Null
+                    [int]::TryParse($mfcNode.GetAttribute('value'), [ref]$mfc) | Out-Null
                     $totalFaces += $mfc
                 }
 
-                # Append parts
                 foreach ($p in @($sMember.SelectNodes('part'))) {
                     $sSurvivor.AppendChild($settings.ImportNode($p, $true)) | Out-Null
                 }
-
-                # Remove member settings block
                 $sMember.ParentNode.RemoveChild($sMember) | Out-Null
             }
 
             if ($null -ne $fcNode) { $fcNode.SetAttribute('value', $totalFaces.ToString()) }
 
-            # assemble_items: update survivor, delete members
             $assemble = $settings.SelectSingleNode('//assemble')
             if ($null -ne $assemble) {
-                $asmSurvivor = $assemble.SelectSingleNode("assemble_item[@object_id='$idSurvivor']")
-                if ($null -ne $asmSurvivor) {
-                    $asmSurvivor.SetAttribute('transform', "1 0 0 0 1 0 0 0 1 $($txNew[9]) $($txNew[10]) $($txNew[11])")
+                $asmSurv = $assemble.SelectSingleNode("assemble_item[@object_id='$idSurvivor']")
+                if ($null -ne $asmSurv) {
+                    $asmSurv.SetAttribute('transform', "1 0 0 0 1 0 0 0 1 $($txNew[9]) $($txNew[10]) $($txNew[11])")
                 }
-                for ($k = 1; $k -lt $MASTER_MERGE_COUNT; $k++) {
-                    $memberId = $groupItems[$k].GetAttribute('objectid')
+                for ($k = 1; $k -lt $groupSize; $k++) {
+                    $memberId  = $groupItems[$k].GetAttribute('objectid')
                     $asmMember = $assemble.SelectSingleNode("assemble_item[@object_id='$memberId']")
                     if ($null -ne $asmMember) { $assemble.RemoveChild($asmMember) | Out-Null }
                 }
@@ -270,39 +298,35 @@ for ($groupStart = 0; $groupStart + $MASTER_MERGE_COUNT -le $buildItems.Count; $
     }
 
     # ── Remove non-survivor build items and resource objects ──────────────────
-    for ($k = 1; $k -lt $MASTER_MERGE_COUNT; $k++) {
+    for ($k = 1; $k -lt $groupSize; $k++) {
         $groupItems[$k].ParentNode.RemoveChild($groupItems[$k]) | Out-Null
         $groupObjs[$k].ParentNode.RemoveChild($groupObjs[$k])   | Out-Null
     }
 
+    $report.Add("Group $($groupCount+1): size=$groupSize  survivor=$idSurvivor  centroid=[$cX, $cY, $cZ]")
     $groupCount++
 }
 
-$leftover = $buildItems.Count % $MASTER_MERGE_COUNT
-if ($leftover -ne 0) { Write-Host "Note: $leftover build item(s) left ungrouped (not a multiple of $MASTER_MERGE_COUNT)." }
-
 # ── Finalize ──────────────────────────────────────────────────────────────────
-# Collapse plate model_instances (keep only one per group — already done per
-# group above for assemble_items; the plate instances mirror that collapse)
+# Plate model_instances: keep one per surviving assembly (merged groups only;
+# lone items at the end already have their own instances and are untouched)
 if ($hasSettings -and ($plate = $settings.SelectSingleNode('//plate'))) {
     $inst = @($plate.SelectNodes('model_instance'))
-    # Keep only enough instances for surviving assemblies (one per group)
-    $survivingCount = [math]::Floor($buildItems.Count / $MASTER_MERGE_COUNT)
-    for ($j = $survivingCount; $j -lt $inst.Count; $j++) { $plate.RemoveChild($inst[$j]) | Out-Null }
+    # Instances to keep = one per merged group + lone items
+    $keepCount = $mergePlan.Count + $lone
+    for ($j = $keepCount; $j -lt $inst.Count; $j++) { $plate.RemoveChild($inst[$j]) | Out-Null }
 }
 
-# cut_information.xml: keep one entry per surviving assembly, delete rest
+# cut_information.xml: same keep count
 if (($null -ne $cutInfoPath) -and (Test-Path $cutInfoPath)) {
     [xml]$cutXml = [System.IO.File]::ReadAllText($cutInfoPath, [System.Text.Encoding]::UTF8)
-    $cutObjs = @($cutXml.SelectNodes('//*[local-name()="object"]'))
-    $survivingCount = [math]::Floor($buildItems.Count / $MASTER_MERGE_COUNT)
-    for ($j = $survivingCount; $j -lt $cutObjs.Count; $j++) { $cutObjs[$j].ParentNode.RemoveChild($cutObjs[$j]) | Out-Null }
-    $ws = New-Object System.Xml.XmlWriterSettings; $ws.Encoding = New-Object System.Text.UTF8Encoding($false); $ws.Indent = $true
+    $cutObjs   = @($cutXml.SelectNodes('//*[local-name()="object"]'))
+    $keepCount = $mergePlan.Count + $lone
+    for ($j = $keepCount; $j -lt $cutObjs.Count; $j++) { $cutObjs[$j].ParentNode.RemoveChild($cutObjs[$j]) | Out-Null }
+    $ws = New-Object System.Xml.XmlWriterSettings
+    $ws.Encoding = New-Object System.Text.UTF8Encoding($false); $ws.Indent = $true
     $w = [System.Xml.XmlWriter]::Create($cutInfoPath, $ws); $cutXml.Save($w); $w.Close()
 }
-
-# layer_heights_profile.txt: delete entirely
-if (($null -ne $layerProfPath) -and (Test-Path $layerProfPath)) { Remove-Item $layerProfPath -Force }
 
 Save-Xml $xml $modelFile
 if ($hasSettings) { Save-Xml $settings $settingsPath }
@@ -318,4 +342,8 @@ Get-ChildItem $WorkDir -Recurse -File | ForEach-Object {
     [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $rel)
 }
 $zip.Dispose()
-Write-Host "Success: $groupCount group(s) merged at N=$MASTER_MERGE_COUNT. Total input items: $($buildItems.Count)."
+
+$finalCount = $mergePlan.Count + $lone
+$report.Add("Final object count: $finalCount")
+$report | Set-Content -Path $ReportPath -Encoding UTF8
+Write-Host "Success: $groupCount group(s) merged. Final object count: $finalCount (limit: 64)."
