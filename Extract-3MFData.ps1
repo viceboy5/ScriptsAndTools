@@ -3,12 +3,20 @@ param (
     [ValidateNotNullOrEmpty()]
     [string]$InputFile,
 
-    [switch]$ConsoleOnly
+    [string]$SingleFile = "",
+
+    [switch]$ConsoleOnly,
+
+    [string]$MasterTsvPath = "",
+    [string]$IndividualTsvPath = ""
 )
 
-Write-Host "Processing $InputFile (Formatting for Google Sheets)..." -ForegroundColor Cyan
+if ($ConsoleOnly) {
+    Write-Host "Processing $InputFile (Console Output Only)..." -ForegroundColor Cyan
+} else {
+    Write-Host "Processing $InputFile (Formatting for Google Sheets)..." -ForegroundColor Cyan
+}
 
-# Define the script directory to look for the color mapping CSV
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $colorCsvPath = Join-Path $scriptDir "colorNamesCSV.csv"
 
@@ -44,7 +52,6 @@ public class GcodeAnalyzer {
                 
                 char c = line[0];
                 
-                // Track Machine Movements
                 if (c == 'G') {
                     if (line.StartsWith("G1 ") || line.StartsWith("G0 ")) {
                         int eIdx = line.IndexOf(" E");
@@ -89,7 +96,6 @@ public class GcodeAnalyzer {
                         }
                     }
                 } 
-                // Track Metadata Blocks
                 else if (c == ';') {
                     if (line.StartsWith("; FLUSH_START")) inFlush = true;
                     else if (line.StartsWith("; FLUSH_END")) inFlush = false;
@@ -100,9 +106,9 @@ public class GcodeAnalyzer {
                         else inTower = false;
                     }
                     else if (line.Contains("total estimated time:")) {
-                        int colIdx = line.IndexOf("time:");
+                        int colIdx = line.IndexOf("total estimated time:");
                         if (colIdx > -1) {
-                            string pt = line.Substring(colIdx + 5).Trim();
+                            string pt = line.Substring(colIdx + 21).Trim();
                             int semiIdx = pt.IndexOf(';');
                             if (semiIdx > -1) pt = pt.Substring(0, semiIdx).Trim();
                             this.PrintTime = pt;
@@ -118,7 +124,6 @@ public class GcodeAnalyzer {
                         }
                     }
                 } 
-                // Track Extruder Modes & Color Changes
                 else if (c == 'M') {
                     if (line.StartsWith("M83")) isRelative = true;
                     else if (line.StartsWith("M82")) isRelative = false;
@@ -133,20 +138,14 @@ public class GcodeAnalyzer {
 }
 "@
 
-if (-not ("GcodeAnalyzer" -as [type])) {
-    Add-Type -TypeDefinition $csharpCode -Language CSharp
-}
-
+if (-not ("GcodeAnalyzer" -as [type])) { Add-Type -TypeDefinition $csharpCode -Language CSharp }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 try {
     $zipArchive = [System.IO.Compression.ZipFile]::OpenRead($InputFile)
 
-    $totalGrams = 0.0
-    $totalMeters = 0.0
-    $objCount = 0
+    $totalGrams = 0.0; $totalMeters = 0.0; $objCount = 0
     
-    # Initialize array for up to 4 filaments
     $filData = @(
         @{ g = 0; color = "" }, @{ g = 0; color = "" }, 
         @{ g = 0; color = "" }, @{ g = 0; color = "" }, @{ g = 0; color = "" } 
@@ -163,7 +162,6 @@ try {
         try {
             [xml]$xml = $configContent
             
-            # Extract Filament Weights and Colors
             foreach ($i in 1..4) {
                 $node = $xml.SelectSingleNode("//filament[@id='$i']")
                 if ($node) {
@@ -176,89 +174,100 @@ try {
                         
                         if (Test-Path $colorCsvPath) {
                             $mappedName = Select-String -Path $colorCsvPath -Pattern "(?i)$hexColor" | Select-Object -First 1
-                            if ($mappedName) {
-                                $hexColor = $mappedName.Line.Split(',')[1].Trim()
-                            }
+                            if ($mappedName) { $hexColor = $mappedName.Line.Split(',')[1].Trim() }
                         }
                         $filData[$i].color = $hexColor
                     }
                 }
             }
 
-            # --- Pre-Merge Object Count Logic ---
+            # --- STRICT Pre-Merge Object Count Logic ---
             $objs = $xml.SelectNodes('//plate/object')
             if ($objs) {
                 foreach ($o in $objs) {
                     $objName = $o.name
-                    
-                    # Ignore known text/version anomalies entirely
                     if ($objName -match '(?i)text|version') { continue }
                     
-                    # Check for merged groups (e.g., "Object12") and grab the trailing number
-                    if ($objName -match '(\d+)$') {
-                        $objCount += [int]$matches[1]
-                    } else {
-                        $objCount += 1
-                    }
+                    # Only parse numbers that explicitly follow our safe "MergedGroup_" tag
+                    if ($objName -match 'MergedGroup_(\d+)$') { $objCount += [int]$matches[1] } 
+                    else { $objCount += 1 }
                 }
             }
-        } catch {
-            Write-Warning "Could not parse XML properly, some details may be blank."
-        }
+        } catch { Write-Warning "Could not parse XML properly." }
 
-        # Calculate total density for the C# engine
         $gramMatches = [regex]::Matches($configContent, 'used_g="([0-9.]+)"')
-        foreach ($match in $gramMatches) {
-            $totalGrams += [double]::Parse($match.Groups[1].Value, [System.Globalization.CultureInfo]::InvariantCulture)
-        }
+        foreach ($match in $gramMatches) { $totalGrams += [double]::Parse($match.Groups[1].Value, [System.Globalization.CultureInfo]::InvariantCulture) }
         $meterMatches = [regex]::Matches($configContent, 'used_m="([0-9.]+)"')
-        foreach ($match in $meterMatches) {
-            $totalMeters += [double]::Parse($match.Groups[1].Value, [System.Globalization.CultureInfo]::InvariantCulture)
-        }
+        foreach ($match in $meterMatches) { $totalMeters += [double]::Parse($match.Groups[1].Value, [System.Globalization.CultureInfo]::InvariantCulture) }
     }
 
     $gramsPerMm = 0.0
-    if ($totalMeters -gt 0) {
-        $gramsPerMm = $totalGrams / ($totalMeters * 1000)
-    }
+    if ($totalMeters -gt 0) { $gramsPerMm = $totalGrams / ($totalMeters * 1000) }
 
-    # --- 3. Pass the torch to C# ---
+    # --- 3. Pass the torch to C# (Full Plate) ---
     $gcodeEntry = $zipArchive.Entries | Where-Object { $_.FullName -like "*.gcode" } | Select-Object -First 1
     $analyzer = New-Object GcodeAnalyzer
-
     if ($gcodeEntry) {
         $gcodeStream = $gcodeEntry.Open()
         $analyzer.Analyze($gcodeStream, $gramsPerMm)
     }
-
     $zipArchive.Dispose()
 
     # --- 4. Crunch Final Math & Format ---
     $modelGrams = $totalGrams - $analyzer.FlushGrams - $analyzer.TowerGrams
 
-    # Parse the Print Time into Days, Hours, and Minutes
     $d = 0; $h = 0; $m = 0
     if ($analyzer.PrintTime -match '(\d+)d') { $d = [int]$matches[1] }
     if ($analyzer.PrintTime -match '(\d+)h') { $h = [int]$matches[1] }
     if ($analyzer.PrintTime -match '(\d+)m') { $m = [int]$matches[1] }
     if ($analyzer.PrintTime -match '(\d+)s' -and [int]$matches[1] -ge 30) { $m++ }
     
-    # Convert days to hours and add to the total
     $h += ($d * 24)
-
     if ($m -ge 60) { $m -= 60; $h++ }
 
-    # Calculate Time Add/Wig
+    $totalMinutes = ($h * 60) + $m
+    $actualColorSwaps = [math]::Max(0, ($analyzer.ColorChanges - 1))
+    
+    # --- 5. Extract Single Object Time (If Provided) ---
     $timeAdd = 0
-    if ($objCount -gt 0) {
-        $totalMinutes = ($h * 60) + $m
-        $timeAdd = [math]::Round($totalMinutes / $objCount, 2)
+    $singlePrintTimeStr = "N/A"
+    
+    if ($SingleFile -ne "" -and (Test-Path $SingleFile)) {
+        try {
+            $singleArchive = [System.IO.Compression.ZipFile]::OpenRead($SingleFile)
+            $singleGcode = $singleArchive.Entries | Where-Object { $_.FullName -like "*.gcode" } | Select-Object -First 1
+            $singleAnalyzer = New-Object GcodeAnalyzer
+            
+            if ($singleGcode) {
+                $singleStream = $singleGcode.Open()
+                $singleAnalyzer.Analyze($singleStream, 0)
+                $singlePrintTimeStr = $singleAnalyzer.PrintTime
+                
+                $sd = 0; $sh = 0; $sm = 0
+                if ($singleAnalyzer.PrintTime -match '(\d+)d') { $sd = [int]$matches[1] }
+                if ($singleAnalyzer.PrintTime -match '(\d+)h') { $sh = [int]$matches[1] }
+                if ($singleAnalyzer.PrintTime -match '(\d+)m') { $sm = [int]$matches[1] }
+                if ($singleAnalyzer.PrintTime -match '(\d+)s' -and [int]$matches[1] -ge 30) { $sm++ }
+                
+                $sh += ($sd * 24)
+                if ($sm -ge 60) { $sm -= 60; $sh++ }
+                
+                $singleTotalMinutes = ($sh * 60) + $sm
+                
+                if ($objCount -gt 1) {
+                    $timeAdd = [math]::Round(($totalMinutes - $singleTotalMinutes) / ($objCount - 1), 2)
+                }
+            }
+            $singleArchive.Dispose()
+        } catch {
+            Write-Warning "Failed to read Single Object file for Time Add/Wig math."
+            if ($null -ne $singleArchive) { $singleArchive.Dispose() }
+        }
     }
 
-    # Build Array of Values directly in order
     $outputValues = @(
         ((Split-Path $InputFile -Leaf) -replace '\.gcode\.3mf$', ''),
-        "", # Theme (Blank)
+        "", 
         (Get-Date).ToString("M/d/yyyy"),
         $h,
         $m,
@@ -270,33 +279,43 @@ try {
         $filData[3].color,
         $(if ($filData[4].g -gt 0) { $filData[4].g } else { 0 }),
         $filData[4].color,
-        "", # Replaced Waste Grams with a blank space for the checkbox
-        $analyzer.ColorChanges,
+        "", 
+        $actualColorSwaps,
         $objCount,
         $timeAdd,
         [math]::Round($modelGrams, 2)
     )
 
-    $tsvPath = Join-Path (Split-Path $InputFile -Parent) "ExtractionResults.tsv"
-    
-    # Bypass Export-Csv entirely, output strictly as tab-separated values without quotes
-    $tsvLine = $outputValues -join "`t"
-    Add-Content -Path $tsvPath -Value $tsvLine
-
     Write-Host "`n--- Console Output Verification ---" -ForegroundColor Green
-    Write-Host "Raw File Time:   $($analyzer.PrintTime)"
-    Write-Host "Converted Time:  $h Hours, $m Minutes"
-    Write-Host "Pre-Merge Count: $objCount Objects"
-    Write-Host "Model Filament:  $([math]::Round($modelGrams, 2))g"
+    Write-Host "Raw File Time:    $($analyzer.PrintTime)"
+    Write-Host "Single Obj Time:  $singlePrintTimeStr"
+    Write-Host "Converted Time:   $h Hours, $m Minutes"
+    Write-Host "Pre-Merge Count:  $objCount Objects"
+    Write-Host "Model Filament:   $([math]::Round($modelGrams, 2))g"
+    Write-Host "Color Swaps:      $actualColorSwaps"
+    Write-Host "Added Time/Wig:   $timeAdd Minutes"
     Write-Host "-----------------------------------"
 
     if ($ConsoleOnly) {
-        Write-Host "Data was NOT saved to the TSV file (ConsoleOnly flag used)." -ForegroundColor Yellow
+        Write-Host "Data was NOT saved to the TSV files (ConsoleOnly flag used)." -ForegroundColor Yellow
     } else {
-        $tsvPath = Join-Path (Split-Path $InputFile -Parent) "ExtractionResults.tsv"
         $tsvLine = $outputValues -join "`t"
-        Add-Content -Path $tsvPath -Value $tsvLine
-        Write-Host "Success! Formatted data appended to: $tsvPath" -ForegroundColor Green
+        
+        # Fallback if no paths are provided
+        if (-not $MasterTsvPath -and -not $IndividualTsvPath) {
+            $MasterTsvPath = Join-Path (Split-Path $InputFile -Parent) "ExtractionResults.tsv"
+        }
+
+        if ($MasterTsvPath) {
+            Add-Content -Path $MasterTsvPath -Value $tsvLine
+            Write-Host "Success! Appended to Master: $MasterTsvPath" -ForegroundColor Green
+        }
+        
+        if ($IndividualTsvPath) {
+            # Overwrite the individual file each time so it stays clean
+            Set-Content -Path $IndividualTsvPath -Value $tsvLine
+            Write-Host "Success! Saved Individual: $IndividualTsvPath" -ForegroundColor Green
+        }
     }
 
 } catch {

@@ -95,6 +95,8 @@ for /f "usebackq delims=" %%F in ("%FILELIST%") do call :process_one "%%F"
 del "%FILELIST%" 2>nul
 
 REM --- Build Final Report ---
+goto skip_report
+
 echo Generating Final Report...
 (
     echo MERGE 3MF SESSION REPORT
@@ -120,13 +122,13 @@ if exist "%FAIL_LIST%" ( type "%FAIL_LIST%" >> "%REPORT%" ) else ( echo None. >>
     echo --------------------------------------------------
     echo Succeeded: !PROCESSED! ^| Failed: !ERRORS! ^| Total: !TOTAL!
 ) >> "%REPORT%"
+:skip_report
 
 del "%SUCCESS_LIST%" 2>nul
 del "%FAIL_LIST%" 2>nul
 
 echo -------------------------------------------
 echo Done. Succeeded: !PROCESSED!   Failed: !ERRORS!
-echo Report saved to: !REPORT!
 if exist "!MASTER_DATA!" echo Master Data saved: !MASTER_DATA!
 echo -------------------------------------------
 pause
@@ -183,16 +185,12 @@ ren "!TEMPOUT!" "!INPUTNAME!"
 REM 4. --- CREATE SINGLE OBJECT (FINAL) FILE ---
 echo   Generating !FINALBASE!.3mf ^(Overwriting if exists^)...
 
-REM 1. Force-delete the old Final file if it exists to guarantee a fresh overwrite
 if exist "!FINAL_PATH!" del /f /q "!FINAL_PATH!"
-
 set "WORK_SINGLE=%TEMP%\single_work_%RANDOM%"
 mkdir "!WORK_SINGLE!" 2>nul
 
-REM 2. Extract the original pre-merged file (which is now named NESTNAME)
 powershell -NoProfile -Command "Add-Type -AssemblyName 'System.IO.Compression.FileSystem'; [System.IO.Compression.ZipFile]::ExtractToDirectory('!INPUTDIR!!NESTNAME!', '!WORK_SINGLE!')" >nul 2>&1
 
-REM 3. Run isolate script to create the Final file (Explicitly calling isolate_final_worker.ps1)
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0isolate_final_worker.ps1" -WorkDir "!WORK_SINGLE!" -OutputPath "!FINAL_PATH!"
 rmdir /s /q "!WORK_SINGLE!" 2>nul
 
@@ -207,34 +205,33 @@ set "BAMBU_GUI=C:\Program Files\Bambu Studio\bambu-studio.exe"
 set "SLICED_OUT=!INPUTDIR!!INPUTBASE!.gcode.3mf"
 set "SLICED_FINAL_TEMP=!INPUTDIR!!FINALBASE!.gcode.3mf"
 
-echo   Slicing Plate 1 ^(Merged Plate^)...
-"!BAMBU_GUI!" --debug 3 --no-check --slice 1 --min-save --export-3mf "!SLICED_OUT!" "!INPUTDIR!!INPUTNAME!" | findstr "^"
+echo   Slicing Plate 1 ^(Merged Plate^)... Please wait...
+"!BAMBU_GUI!" --debug 3 --no-check --slice 1 --min-save --export-3mf "!SLICED_OUT!" "!INPUTDIR!!INPUTNAME!" >nul 2>&1
 
 if not exist "!SLICED_OUT!" (
-    echo   WARNING: Slicing failed on merged plate. Check the live log output above.
+    echo   WARNING: Slicing failed on merged plate.
     goto skip_slicing
 )
 
-echo   Extracting design data for merged plate...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Extract-3MFData.ps1" -InputFile "!SLICED_OUT!"
+echo   Slicing Plate 1 ^(Isolated Single Object^)... Please wait...
+"!BAMBU_GUI!" --debug 3 --no-check --slice 1 --min-save --export-3mf "!SLICED_FINAL_TEMP!" "!FINAL_PATH!" >nul 2>&1
 
-echo.
-echo   Slicing Plate 1 ^(Isolated Single Object^)...
-"!BAMBU_GUI!" --debug 3 --no-check --slice 1 --min-save --export-3mf "!SLICED_FINAL_TEMP!" "!FINAL_PATH!" | findstr "^"
-
+echo   Extracting design data and calculating Added Time...
 if exist "!SLICED_FINAL_TEMP!" (
-    echo   Extracting Print Time for isolated object...
-    REM Use the -ConsoleOnly flag so it outputs to the window but NOT the TSV spreadsheet
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Extract-3MFData.ps1" -InputFile "!SLICED_FINAL_TEMP!" -ConsoleOnly
+    set "INDIVIDUAL_DATA=!INPUTDIR!!INPUTBASE!_Data.tsv"
+    
+    REM Pass BOTH files and BOTH output paths to the extractor
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Extract-3MFData.ps1" -InputFile "!SLICED_OUT!" -SingleFile "!SLICED_FINAL_TEMP!" -MasterTsvPath "!MASTER_DATA!" -IndividualTsvPath "!INDIVIDUAL_DATA!"
     
     echo   Deleting temporary Final.gcode.3mf...
     del "!SLICED_FINAL_TEMP!" /q
 ) else (
-    echo   WARNING: Slicing failed on isolated object.
+    echo   WARNING: Isolated object failed to slice. Running normal extraction...
+    set "INDIVIDUAL_DATA=!INPUTDIR!!INPUTBASE!_Data.tsv"
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Extract-3MFData.ps1" -InputFile "!SLICED_OUT!" -MasterTsvPath "!MASTER_DATA!" -IndividualTsvPath "!INDIVIDUAL_DATA!"
 )
 
 :skip_slicing
-
 REM Pluck data directly from the worker report using findstr
 set "FINAL_COUNT=Unknown"
 set "LONE_COUNT=Unknown"

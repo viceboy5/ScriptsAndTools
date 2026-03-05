@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # ════════════════════════════════════════════════════════════════════════════════
-#  merge_3mf_worker.ps1 - AUTO-PLAN N-WAY MERGE (WITH GEOMETRY PRESERVATION)
+#  merge_3mf_worker.ps1 - AUTO-PLAN N-WAY MERGE (STRICT NAMING)
 # ════════════════════════════════════════════════════════════════════════════════
 
 $nsCore = 'http://schemas.microsoft.com/3dmanufacturing/core/2015/02'
@@ -200,8 +200,10 @@ foreach ($groupSize in $mergePlan) {
         $sSurvivor = $settObjById[$idSurvivor]
         if ($null -ne $sSurvivor) {
             $nameNode = $sSurvivor.SelectSingleNode('metadata[@key="name"]')
-            $baseName = if ($null -ne $nameNode) { $nameNode.GetAttribute('value') } else { 'Object' }
-            if ($null -ne $nameNode) { $nameNode.SetAttribute('value', "$baseName$groupSize") }
+            
+            # --- STRICT RENAMING FIX ---
+            # Overwrite the name completely instead of appending the size to existing characters
+            if ($null -ne $nameNode) { $nameNode.SetAttribute('value', "MergedGroup_$groupSize") }
 
             [int]$totalFaces = 0
             $fcNode = $sSurvivor.SelectSingleNode('metadata[@key="face_count"]')
@@ -272,7 +274,8 @@ for ($li = ($mergeItems.Count - $lone); $li -lt $mergeItems.Count; $li++) {
     foreach ($c in $loneObj.SelectNodes('m:components/m:component', $xns)) { $c.SetAttribute('path', $nsProd, $newModelPath) }
     if ($hasSettings -and ($null -ne ($sLone = $settObjById[$loneId]))) {
         $loneNameNode = $sLone.SelectSingleNode('metadata[@key="name"]')
-        if ($null -ne $loneNameNode) { $loneNameNode.SetAttribute('value', "$($loneNameNode.GetAttribute('value'))1") }
+        # Prevent numbers from being tacked onto lone objects
+        if ($null -ne $loneNameNode) { $loneNameNode.SetAttribute('value', "$($loneNameNode.GetAttribute('value'))_Lone") }
     }
 }
 
