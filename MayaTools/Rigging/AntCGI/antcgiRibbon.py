@@ -2,7 +2,7 @@
 # antCGi - Ribbon Tool
 #
 # Thanks for your support!
-#           
+#
 # www.antcgi.com - www.youtube.com/antcgi
 #
 # -------------------------------------------------------------------------------------------------------------------------------------
@@ -293,7 +293,6 @@ def addRibbonDeformers(surface, ribbonDir, *args):
 # Use UV Pin Instead of Follicles
 
 def matrixConnect(surface, spans, direction, orientation, endorient, regenJoints):
-
     if regenJoints:
         globalScale = cmds.getAttr(f"{surface}.globalScaleInput")
         jointFlip = cmds.getAttr(f"{surface}.jointOrientFlip")
@@ -307,8 +306,13 @@ def matrixConnect(surface, spans, direction, orientation, endorient, regenJoints
 
     flipJnt = 3 if jointFlip else 0
 
-    for i in range(spans):
+    # get the real shape
+    surfaceShapeList = cmds.listRelatives(surface, shapes=True, type='nurbsSurface') or []
+    if not surfaceShapeList:
+        cmds.error("matrixConnect: couldn't find a NURBS shape under '{}'".format(surface))
+    surfaceShape = surfaceShapeList[0]
 
+    for i in range(spans):
         if resetJnt and i == 0:
             normalAxis = 2
             tangentAxis = 1
@@ -324,25 +328,44 @@ def matrixConnect(surface, spans, direction, orientation, endorient, regenJoints
                 tangentAxis = 5 - flipJnt
 
         jointName = '_'.join((surface, 'joint', str(i + 1).zfill(2)))
-        newJoint = cmds.joint(rad=0.15 * globalScale, n=jointName)
+        newJoint = cmds.joint(rad=0.15 * globalScale, name=jointName)
 
-        uvpin = cmds.shadingNode("uvPin", au=1, n=f"{jointName}_uvpin")
+        # create uvPin and connect. The joint's transform will be driven by outputMatrix.
+        uvpin = cmds.shadingNode("uvPin", asUtility=True, name=f"{jointName}_uvpin")
 
-        cmds.connectAttr(f"{uvpin}.outputMatrix[0]", f"{jointName}.offsetParentMatrix")
-        cmds.connectAttr(f"{surface}Shape.worldSpace", f"{uvpin}.deformedGeometry")
+        # connect uvPin output -> joint offsetParentMatrix (keeps joint transform driven by matrix)
+        cmds.connectAttr(f"{uvpin}.outputMatrix[0]", f"{jointName}.offsetParentMatrix", force=True)
+        # connect the real NURBS shape worldSpace to uvPin
+        cmds.connectAttr(f"{surfaceShape}.worldSpace[0]", f"{uvpin}.deformedGeometry", force=True)
 
-        cmds.setAttr(f"{uvpin}.coordinate[0].coordinateV", 0.5)
+        # set uvPin coordinates and axis
         cmds.setAttr(f"{uvpin}.coordinate[0].coordinateU", i / (spans - 1.0))
-
+        cmds.setAttr(f"{uvpin}.coordinate[0].coordinateV", 0.5)
         cmds.setAttr(f"{uvpin}.normalAxis", normalAxis)
         cmds.setAttr(f"{uvpin}.tangentAxis", tangentAxis)
+
+        # **Apply jointOrient (PyMEL-style)**: use the shared 'orientation' or 'endorient' values
+        orient_values = endorient if i == 0 else orientation
+        try:
+            cmds.setAttr(f"{newJoint}.jointOrientX", orient_values[0])
+            cmds.setAttr(f"{newJoint}.jointOrientY", orient_values[1])
+            cmds.setAttr(f"{newJoint}.jointOrientZ", orient_values[2])
+        except Exception:
+            cmds.setAttr(f"{newJoint}.jointOrient", orient_values, type="double3")
+
+        # zero rotate channels (we want jointOrient to drive the local orientation)
+        cmds.setAttr(f"{newJoint}.rotateX", 0)
+        cmds.setAttr(f"{newJoint}.rotateY", 0)
+        cmds.setAttr(f"{newJoint}.rotateZ", 0)
+        cmds.makeIdentity(newJoint, apply=True, r=True, t=False, s=False, n=False)
 
         if cmds.objExists("ribbon_joints"):
             cmds.parent(jointName, "ribbon_joints")
         else:
             cmds.group(jointName, n="ribbon_joints")
 
-        cmds.select(cl=1)
+        cmds.select(cl=True)
+
 
 
 # -------------------------------------------------------------------------------------------------------------------------------------
@@ -414,39 +437,65 @@ def useRibbon(*args):
 # Create Follicle Function
 
 def addFollicles(surface, spans, direction, orientation, endorient):
-
     globalScale = cmds.floatField("globalScaleInput", q=1, v=1)
+
+    # resolve the actual nurbs shape robustly
+    surfaceShapeList = cmds.listRelatives(surface, shapes=True, type='nurbsSurface') or []
+    if not surfaceShapeList:
+        cmds.error("addFollicles: couldn't find a NURBS shape under '{}'".format(surface))
+    surfaceShape = surfaceShapeList[0]
 
     for i in range(spans):
         follicleName = '_'.join((surface, 'follicle', str(i + 1).zfill(2)))
         jointName = '_'.join((surface, 'joint', str(i + 1).zfill(2)))
 
-        follicle = cmds.createNode('transform', n=follicleName)
-        follicleShape = cmds.createNode('follicle', n=f"{follicle}Shape", p=follicle)
+        # create follicle transform + shape
+        follicle = cmds.createNode('transform', name=follicleName)
+        follicleShape = cmds.createNode('follicle', name=f"{follicle}Shape", parent=follicle)
 
-        cmds.connectAttr(f"{surface}Shape.local", f"{follicleShape}.inputSurface")
-        cmds.connectAttr(f"{surface}Shape.worldMatrix[0]", f"{follicleShape}.inputWorldMatrix")
-        cmds.connectAttr(f"{follicleShape}.outRotate", f"{follicle}.rotate")
-        cmds.connectAttr(f"{follicleShape}.outTranslate", f"{follicle}.translate")
+        # connect to the actual shape node
+        cmds.connectAttr(f"{surfaceShape}.local", f"{follicleShape}.inputSurface", force=True)
+        cmds.connectAttr(f"{surfaceShape}.worldMatrix[0]", f"{follicleShape}.inputWorldMatrix", force=True)
+        cmds.connectAttr(f"{follicleShape}.outRotate", f"{follicle}.rotate", force=True)
+        cmds.connectAttr(f"{follicleShape}.outTranslate", f"{follicle}.translate", force=True)
         cmds.setAttr(f"{follicle}.inheritsTransform", 0)
 
         cmds.setAttr(f"{follicleShape}.parameterU", i / (spans - 1.0))
         cmds.setAttr(f"{follicleShape}.parameterV", 0.5)
 
-        jntPos = cmds.xform(follicle, q=True, ws=True, piv=True)
-        newJoint = cmds.joint(rad=0.05 * globalScale, p=(jntPos[0], jntPos[1], jntPos[2]), n=jointName)
+        # create the joint at the follicle's world position
+        jntPos = cmds.xform(follicle, q=True, ws=True, t=True)
+        newJoint = cmds.joint(p=(jntPos[0], jntPos[1], jntPos[2]), name=jointName, rad=0.05 * globalScale)
 
-        cmds.parent(newJoint, follicle)
-        cmds.matchTransform(newJoint, follicle, rot=True)
+        # --- APPLY ORIENTATION VIA jointOrient (PyMEL-style) ---
+        # choose which orient to use: endorient for i==0, else orientation
+        orient_values = endorient if i == 0 else orientation
 
-        if i == 0:
-            cmds.rotate(endorient[0], endorient[1], endorient[2], newJoint, r=True, os=True)
-        else:
-            cmds.rotate(orientation[0], orientation[1], orientation[2], str(newJoint), r=1, os=1, fo=1)
+        # set jointOrient explicitly (as PyMEL would)
+        try:
+            cmds.setAttr(f"{newJoint}.jointOrientX", orient_values[0])
+            cmds.setAttr(f"{newJoint}.jointOrientY", orient_values[1])
+            cmds.setAttr(f"{newJoint}.jointOrientZ", orient_values[2])
+        except Exception:
+            # fallback: set via full attribute string if needed
+            cmds.setAttr(f"{newJoint}.jointOrient", orient_values, type="double3")
 
-            # cmds.parent(str(follicle), surface.replace("_ribbon", "").lower() + "_follicles")
+        # zero the rotate channels so visual orientation is driven by jointOrient
+        cmds.setAttr(f"{newJoint}.rotateX", 0)
+        cmds.setAttr(f"{newJoint}.rotateY", 0)
+        cmds.setAttr(f"{newJoint}.rotateZ", 0)
 
-    cmds.select(cl=1)
+        # optionally freeze rotation (only the rotate channels) to keep a clean transform
+        cmds.makeIdentity(newJoint, apply=True, r=True, t=False, s=False, n=False)
+
+        # parent the joint to follicle (if not already)
+        if cmds.listRelatives(newJoint, parent=True) != [follicle]:
+            cmds.parent(newJoint, follicle)
+
+        # select clear for next loop
+        cmds.select(cl=True)
+
+
 
 
 # -------------------------------------------------------------------------------------------------------------------------------------
@@ -822,6 +871,10 @@ def custRibbon(*args):
         else:
             ribbonJointOrient = [0, -90, 0]
             endJointOrient = [0, 0, -90]
+
+    # DEBUG: show the chosen orientations that are passed into both systems
+    print("DEBUG: jointOrientMenu:", jointOrient, "jointFlip:", jointFlip)
+    print("DEBUG: ribbonJointOrient:", ribbonJointOrient, "endJointOrient:", endJointOrient)
 
     if not resetJnt:
         endJointOrient = ribbonJointOrient
