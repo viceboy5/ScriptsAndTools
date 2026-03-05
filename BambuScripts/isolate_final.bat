@@ -2,7 +2,7 @@
 setlocal EnableDelayedExpansion
 
 if "%~1"=="" (
-    echo [ERROR] Please drag and drop a .3mf file or folder onto this batch script.
+    echo [ERROR] Please drag and drop a Full.3mf file or folder onto this batch script.
     pause
     exit /b 1
 )
@@ -17,13 +17,18 @@ if "%~1"=="" goto finish
 
 if exist "%~1\" (
     echo [ Scanning Directory: %~nx1 ]
-    for /R "%~1" %%F in (*.3mf) do (
-        REM Skip files that are already Final or Gcode
-        echo "%%F" | findstr /i /v "Final\.3mf \.gcode\.3mf" >nul
-        if not errorlevel 1 call :isolate_target "%%F"
+    REM Strictly hunt for files ending in Full.3mf
+    for /R "%~1" %%F in (*Full.3mf) do (
+        call :isolate_target "%%F"
     )
 ) else (
-    call :isolate_target "%~1"
+    REM If a single file is dropped, verify it is a Full.3mf before running
+    echo "%~nx1" | findstr /i "Full\.3mf$" >nul
+    if not errorlevel 1 (
+        call :isolate_target "%~1"
+    ) else (
+        echo [!] Skipping "%~nx1" - Not a Full.3mf file.
+    )
 )
 
 shift
@@ -65,5 +70,5 @@ exit /b
 
 :finish
 echo =======================================================
-echo Finished! All files processed.
+echo Finished! All valid files processed.
 pause
