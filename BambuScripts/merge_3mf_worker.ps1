@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # ════════════════════════════════════════════════════════════════════════════════
-#  merge_3mf_worker.ps1 - AUTO-PLAN N-WAY MERGE (UINT16 & JSON BBOX FIX)
+#  merge_3mf_worker.ps1 - AUTO-PLAN N-WAY MERGE (PICK BUFFER IMAGE PURGE)
 # ════════════════════════════════════════════════════════════════════════════════
 
 $nsCore = 'http://schemas.microsoft.com/3dmanufacturing/core/2015/02'
@@ -16,6 +16,14 @@ $nsProd = 'http://schemas.microsoft.com/3dmanufacturing/production/2015/06'
 # ── Transform math ────────────────────────────────────────────────────────────
 function Parse-Tx([string]$s) { if ([string]::IsNullOrWhiteSpace($s)) { return [double[]](1,0,0, 0,1,0, 0,0,1, 0,0,0) }; return [double[]]($s.Trim() -split '\s+') }
 function Fmt-Tx([double[]]$v) { return ($v | ForEach-Object { $_.ToString('G15') }) -join ' ' }
+function Fmt-Matrix([double[]]$t) {
+    $r00 = $t[0].ToString('G15'); $r10 = $t[1].ToString('G15'); $r20 = $t[2].ToString('G15')
+    $r01 = $t[3].ToString('G15'); $r11 = $t[4].ToString('G15'); $r21 = $t[5].ToString('G15')
+    $r02 = $t[6].ToString('G15'); $r12 = $t[7].ToString('G15'); $r22 = $t[8].ToString('G15')
+    $tx  = $t[9].ToString('G15'); $ty  = $t[10].ToString('G15'); $tz = $t[11].ToString('G15')
+    return "$r00 $r01 $r02 $tx $r10 $r11 $r12 $ty $r20 $r21 $r22 $tz 0 0 0 1"
+}
+
 function Mul-Tx([double[]]$A, [double[]]$B) {
     $a00=$A[0]; $a01=$A[3]; $a02=$A[6]; $atx=$A[9]; $a10=$A[1]; $a11=$A[4]; $a12=$A[7]; $aty=$A[10]; $a20=$A[2]; $a21=$A[5]; $a22=$A[8]; $atz=$A[11]
     $b00=$B[0]; $b01=$B[3]; $b02=$B[6]; $btx=$B[9]; $b10=$B[1]; $b11=$B[4]; $b12=$B[7]; $bty=$B[10]; $b20=$B[2]; $b21=$B[5]; $b22=$B[8]; $btz=$B[11]
@@ -83,12 +91,12 @@ $majorityFc = ($fcMap.GetEnumerator() | Sort-Object Value -Descending | Select-O
 foreach ($item in $buildItems) {
     $id = $item.GetAttribute('objectid')
     $isTarget = $true
-    
+
     if ($hasSettings -and $null -ne $settObjById[$id]) {
         $fcNode = $settObjById[$id].SelectSingleNode('metadata[@face_count]')
         $fc = if ($null -ne $fcNode) { $fcNode.GetAttribute('face_count') } else { "unknown" }
         if ($fc -ne $majorityFc) { $isTarget = $false }
-        
+
         $nameNode = $settObjById[$id].SelectSingleNode('metadata[@key="name"]')
         if ($null -ne $nameNode -and $nameNode.GetAttribute('value') -match '(?i)text|version') { $isTarget = $false }
     }
@@ -99,7 +107,7 @@ foreach ($item in $buildItems) {
 function Get-MergePlan([int]$total) {
     $lone = if ($total % 2 -eq 0) { 2 } else { 1 }
     $pool = $total - $lone
-    $maxSlots = 64 - $lone - $ignoredItems.Count 
+    $maxSlots = 64 - $lone - $ignoredItems.Count
 
     if ($pool -le 0) { return @() }
 
@@ -176,7 +184,6 @@ $killedIds = New-Object System.Collections.Generic.HashSet[string]
 $survivorFaces = @{}
 $survivorNames = @{}
 
-# FIX: Start identify_id counter below UINT16 limit (0 instead of 100000)
 $identifyIdCounter = 0
 $survivorIdentifyIds = @{}
 $objUuidCounter = 1
@@ -215,15 +222,15 @@ foreach ($groupSize in $mergePlan) {
     $normalParts = @(); $specialParts = @()
 
     $compBaseSuffix = "-" + [guid]::NewGuid().ToString().Substring(9)
-    $compIndex = $objUuidCounter * 65536 
+    $compIndex = $objUuidCounter * 65536
 
     for ($k = 0; $k -lt $groupSize; $k++) {
         $obj = $groupObjs[$k]; [double[]]$origTx = $groupTxs[$k]
         $memberId = $groupItems[$k].GetAttribute('objectid')
-        
+
         $cList = $obj.SelectNodes('m:components/m:component', $xns)
         $pList = @()
-        
+
         if ($hasSettings -and $null -ne $settObjById[$memberId]) {
             $sMember = $settObjById[$memberId]
             $pList = @($sMember.SelectNodes('part'))
@@ -232,16 +239,14 @@ foreach ($groupSize in $mergePlan) {
         for ($i = 0; $i -lt $cList.Count; $i++) {
             $c = $cList[$i]
             $isSpecial = ($c.GetAttribute('objectid') -eq '40')
-            
+
             [double[]]$compTx  = Parse-Tx ($c.GetAttribute('transform'))
             [double[]]$bakedTx = Mul-Tx $invTxNew (Mul-Tx $origTx $compTx)
-            
+
             $newComp = $xml.CreateElement('component', $nsCore)
-            
-            # --- FORCE ALL COMPONENTS TO USE THE SHARED MASTER MESH ---
-            $newComp.SetAttribute('path', $nsProd, $sharedModelPath) 
+            $newComp.SetAttribute('path', $nsProd, $sharedModelPath)
             $newComp.SetAttribute('objectid', $c.GetAttribute('objectid'))
-            
+
             $compUuid = $compIndex.ToString("x8") + $compBaseSuffix
             $newComp.SetAttribute('UUID', $nsProd, $compUuid)
             $compIndex++
@@ -257,7 +262,8 @@ foreach ($groupSize in $mergePlan) {
                     $matNode.SetAttribute('key', 'matrix')
                     $newPart.AppendChild($matNode) | Out-Null
                 }
-                $matNode.SetAttribute('value', (Fmt-Tx $bakedTx))
+                # FIXED: Writes the true 16-value 4x4 format for Slicer BBox
+                $matNode.SetAttribute('value', (Fmt-Matrix $bakedTx))
             }
 
             if ($isSpecial) {
@@ -273,16 +279,16 @@ foreach ($groupSize in $mergePlan) {
     [int]$totalFaces = 0
     foreach ($p in $normalParts) {
         $pfcNode = $p.SelectSingleNode('mesh_stat')
-        if ($null -ne $pfcNode) { 
+        if ($null -ne $pfcNode) {
             [int]$pfc = 0
-            if ([int]::TryParse($pfcNode.GetAttribute('face_count'), [ref]$pfc)) { $totalFaces += $pfc } 
+            if ([int]::TryParse($pfcNode.GetAttribute('face_count'), [ref]$pfc)) { $totalFaces += $pfc }
         }
     }
     foreach ($p in $specialParts) {
         $pfcNode = $p.SelectSingleNode('mesh_stat')
-        if ($null -ne $pfcNode) { 
+        if ($null -ne $pfcNode) {
             [int]$pfc = 0
-            if ([int]::TryParse($pfcNode.GetAttribute('face_count'), [ref]$pfc)) { $totalFaces += $pfc } 
+            if ([int]::TryParse($pfcNode.GetAttribute('face_count'), [ref]$pfc)) { $totalFaces += $pfc }
         }
     }
 
@@ -291,9 +297,9 @@ foreach ($groupSize in $mergePlan) {
             $memberId = $groupItems[$k].GetAttribute('objectid')
             if ($hasSettings -and $null -ne $settObjById[$memberId]) {
                 $mfcNode = $settObjById[$memberId].SelectSingleNode('metadata[@face_count]')
-                if ($null -ne $mfcNode) { 
+                if ($null -ne $mfcNode) {
                     [int]$mfc = 0
-                    if ([int]::TryParse($mfcNode.GetAttribute('face_count'), [ref]$mfc)) { $totalFaces += $mfc } 
+                    if ([int]::TryParse($mfcNode.GetAttribute('face_count'), [ref]$mfc)) { $totalFaces += $mfc }
                 }
             }
         }
@@ -312,12 +318,12 @@ foreach ($groupSize in $mergePlan) {
     foreach ($c in $normalComps) { $newCompsEl.AppendChild($c) | Out-Null }
     foreach ($c in $specialComps) { $newCompsEl.AppendChild($c) | Out-Null }
 
-    if ($null -ne ($oldC = $groupObjs[0].SelectSingleNode('m:components', $xns))) { 
-        $groupObjs[0].ReplaceChild($newCompsEl, $oldC) | Out-Null 
-    } else { 
-        $groupObjs[0].AppendChild($newCompsEl) | Out-Null 
+    if ($null -ne ($oldC = $groupObjs[0].SelectSingleNode('m:components', $xns))) {
+        $groupObjs[0].ReplaceChild($newCompsEl, $oldC) | Out-Null
+    } else {
+        $groupObjs[0].AppendChild($newCompsEl) | Out-Null
     }
-    
+
     $objUuidStr = $objUuidCounter.ToString("x8") + "-71cb-4c03-9d28-80fed5dfa1dc"
     $groupObjs[0].SetAttribute('UUID', $nsProd, $objUuidStr)
     $objUuidCounter++
@@ -336,11 +342,11 @@ foreach ($groupSize in $mergePlan) {
             if ($null -ne $objExtNode) { $defaultExtruder = $objExtNode.GetAttribute('value') }
 
             foreach ($ep in @($sSurvivor.SelectNodes('part'))) { $ep.ParentNode.RemoveChild($ep) | Out-Null }
-            
+
             $partIdCounter = 1
             foreach ($p in $normalParts) {
                 $originalSubtype = $p.GetAttribute('subtype')
-                
+
                 $p.SetAttribute('id', $partIdCounter.ToString())
                 $p.SetAttribute('subtype', 'normal_part')
 
@@ -361,7 +367,7 @@ foreach ($groupSize in $mergePlan) {
             }
             foreach ($p in $specialParts) {
                 $originalSubtype = $p.GetAttribute('subtype')
-                
+
                 $p.SetAttribute('id', $partIdCounter.ToString())
                 $p.SetAttribute('subtype', 'normal_part')
 
@@ -383,7 +389,7 @@ foreach ($groupSize in $mergePlan) {
 
             for ($k = 1; $k -lt $groupSize; $k++) {
                 $memberId = $groupItems[$k].GetAttribute('objectid')
-                $killedIds.Add($memberId) | Out-Null 
+                $killedIds.Add($memberId) | Out-Null
                 $sMember = $settObjById[$memberId]
                 if ($null -ne $sMember) { $sMember.ParentNode.RemoveChild($sMember) | Out-Null }
             }
@@ -413,18 +419,18 @@ $loneCounter = 1
 for ($li = ($mergeItems.Count - $lone); $li -lt $mergeItems.Count; $li++) {
     $loneId = $mergeItems[$li].GetAttribute('objectid')
     $loneObj = $objById[$loneId]
-    
+
     $objUuidStr = $objUuidCounter.ToString("x8") + "-71cb-4c03-9d28-80fed5dfa1dc"
     if ($null -ne $loneObj) { $loneObj.SetAttribute('UUID', $nsProd, $objUuidStr) }
     $objUuidCounter++
 
     $identifyIdCounter += 442
     $survivorIdentifyIds[$loneId] = $identifyIdCounter
-    
+
     if ($hasSettings -and ($null -ne ($sLone = $settObjById[$loneId]))) {
         $loneNameNode = $sLone.SelectSingleNode('metadata[@key="name"]')
-        if ($null -ne $loneNameNode) { 
-            $loneNameNode.SetAttribute('value', "$($loneNameNode.GetAttribute('value'))_Lone") 
+        if ($null -ne $loneNameNode) {
+            $loneNameNode.SetAttribute('value', "$($loneNameNode.GetAttribute('value'))_Lone")
         }
     }
 
@@ -441,7 +447,7 @@ for ($li = ($mergeItems.Count - $lone); $li -lt $mergeItems.Count; $li++) {
     foreach ($c in $loneComps) {
         $c.SetAttribute('path', $nsProd, $sharedModelPath)
     }
-    
+
     $loneCounter++
 }
 
@@ -525,13 +531,13 @@ if (($null -ne $cutInfoPath) -and (Test-Path $cutInfoPath)) {
     [xml]$cutXml = [System.IO.File]::ReadAllText($cutInfoPath, [System.Text.Encoding]::UTF8)
     $cutObjs = @($cutXml.SelectNodes('//*[local-name()="object"]'))
     $survivorCount = $survivingObjects.Count
-    
+
     if ($cutObjs.Count -gt $survivorCount) {
         for ($i = $survivorCount; $i -lt $cutObjs.Count; $i++) {
             $cutObjs[$i].ParentNode.RemoveChild($cutObjs[$i]) | Out-Null
         }
     }
-    
+
     $cIdx = 1
     foreach ($co in @($cutXml.SelectNodes('//*[local-name()="object"]'))) {
         $co.SetAttribute('id', $cIdx.ToString())
@@ -546,7 +552,7 @@ if (($null -ne $cutInfoPath) -and (Test-Path $cutInfoPath)) {
 if (($null -ne $sliceInfoPath) -and (Test-Path $sliceInfoPath)) {
     [xml]$sliceXml = [System.IO.File]::ReadAllText($sliceInfoPath, [System.Text.Encoding]::UTF8)
     $sliceModified = $false
-    
+
     foreach ($sObj in @($sliceXml.SelectNodes('//*[local-name()="object"]'))) {
         $oldId = $sObj.GetAttribute('id')
         if ($killedIds.Contains($oldId)) {
@@ -556,13 +562,13 @@ if (($null -ne $sliceInfoPath) -and (Test-Path $sliceInfoPath)) {
             $newMappedId = $idMap[$oldId]
             $sObj.SetAttribute('id', $newMappedId)
             $sliceModified = $true
-            
+
             if ($survivorFaces.Contains($oldId)) {
                 $fcNode = $sObj.SelectSingleNode('*[local-name()="metadata" and @face_count]')
                 if ($null -ne $fcNode) { $fcNode.SetAttribute('face_count', $survivorFaces[$oldId].ToString()) }
                 $nameNode = $sObj.SelectSingleNode('*[local-name()="metadata" and @key="name"]')
                 if ($null -ne $nameNode) { $nameNode.SetAttribute('value', $survivorNames[$oldId]) }
-                
+
                 if ($hasSettings) {
                     $matchingSettingsObj = $settings.SelectSingleNode("//*[local-name()='object' and @id='$newMappedId']")
                     if ($null -ne $matchingSettingsObj) {
@@ -601,8 +607,6 @@ if (($null -ne $sliceInfoPath) -and (Test-Path $sliceInfoPath)) {
     if ($sliceModified) { Save-Xml $sliceXml $sliceInfoPath }
 }
 
-# FIX: Removed the plate_*.json deletion here to let Bambu regenerate or keep boundaries
-
 # --- REFRESH DICTIONARY BEFORE GC BUG FIX ---
 $objById = @{}
 foreach ($o in $xml.SelectNodes('//m:resources/m:object', $xns)) {
@@ -611,12 +615,16 @@ foreach ($o in $xml.SelectNodes('//m:resources/m:object', $xns)) {
 
 # ── GEOMETRY GARBAGE COLLECTION & RELS REBUILD ────────────────────────────────
 $allModelFiles = Get-ChildItem -Path $objectsDir -Filter '*.model'
-foreach ($f in $allModelFiles) { 
+foreach ($f in $allModelFiles) {
     $checkPath = "/3D/Objects/" + $f.Name
     if (-not $usedModelPaths.Contains($checkPath)) {
-        Remove-Item $f.FullName -Force 
+        Remove-Item $f.FullName -Force
     }
 }
+
+# ── PURGE STALE UI CACHES (The Pick Buffer Fix) ───────────────────────────────
+Get-ChildItem -Path (Join-Path $WorkDir "Metadata") -Filter "pick_*.png" -ErrorAction SilentlyContinue | Remove-Item -Force
+Get-ChildItem -Path (Join-Path $WorkDir "Metadata") -Filter "plate_*.png" -ErrorAction SilentlyContinue | Remove-Item -Force
 
 Save-Xml $xml $modelFile
 if ($hasSettings) { Save-Xml $settings $settingsPath }
