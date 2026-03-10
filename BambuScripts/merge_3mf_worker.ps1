@@ -179,7 +179,11 @@ foreach ($groupSize in $mergePlan) {
     $newDiskPath = Join-Path $objectsDir $newModelName
 
     if (-not $sourceToMasterMap.Contains($sourceRelPath)) {
-        Copy-Item -Path $sourceDiskPath -Destination $newDiskPath -Force
+        $normSource = [System.IO.Path]::GetFullPath($sourceDiskPath)
+        $normDest = [System.IO.Path]::GetFullPath($newDiskPath)
+        if ($normSource -ne $normDest) {
+            Copy-Item -Path $normSource -Destination $normDest -Force
+        }
         $sourceToMasterMap[$sourceRelPath] = $newModelPath
         $masterPathForThisGroup = $newModelPath
     } else {
@@ -380,7 +384,11 @@ for ($li = ($mergeItems.Count - $lone); $li -lt $mergeItems.Count; $li++) {
         $newDiskPath = Join-Path $objectsDir $newModelName
 
         if (-not $sourceToMasterMap.Contains($sourceRelPath)) {
-            Copy-Item -Path $sourceDiskPath -Destination $newDiskPath -Force
+            $normSource = [System.IO.Path]::GetFullPath($sourceDiskPath)
+            $normDest = [System.IO.Path]::GetFullPath($newDiskPath)
+            if ($normSource -ne $normDest) {
+                Copy-Item -Path $normSource -Destination $normDest -Force
+            }
             $sourceToMasterMap[$sourceRelPath] = $newModelPath
             $masterPathForThisGroup = $newModelPath
         } else {

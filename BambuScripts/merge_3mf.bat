@@ -180,12 +180,13 @@ if errorlevel 1 (
 )
 
 REM 2. Run Worker
-powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" -WorkDir "!WORK!" -InputPath "!INPUT!" -OutputPath "!TEMPOUT!" -ReportPath "!WORKERRPT!" -DoColors "!DO_COLORS!" >> "!WORKERLOG!" 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" -WorkDir "!WORK!" -InputPath "!INPUT!" -OutputPath "!TEMPOUT!" -ReportPath "!WORKERRPT!"
 if errorlevel 1 (
     echo   ERROR: Merge script failed.
     echo - !INPUTNAME! [Script Error] >> "%FAIL_LIST%"
     set /a ERRORS+=1
     del "!TEMPOUT!" 2>nul
+    pause
     goto cleanup
 )
 
