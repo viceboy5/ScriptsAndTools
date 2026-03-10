@@ -2,7 +2,8 @@ param(
     [string]$WorkDir,
     [string]$InputPath,
     [string]$OutputPath,
-    [string]$ReportPath
+    [string]$ReportPath,
+    [string]$DoColors = "0"
 )
 $ErrorActionPreference = 'Stop'
 

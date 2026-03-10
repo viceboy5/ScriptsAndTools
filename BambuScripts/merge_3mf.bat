@@ -90,6 +90,17 @@ if /I "!CHOICE_SLICE!"=="Y" (
 )
 echo.
 
+REM --- Prompt for Color Scanning ---
+set /p "CHOICE_COLORS=Do you want to scan and pick new colors? (Y/N): "
+if /I "!CHOICE_COLORS!"=="Y" (
+    set "DO_COLORS=1"
+    echo Color scanning and picking is ENABLED.
+) else (
+    set "DO_COLORS=0"
+    echo Color scanning and picking is DISABLED.
+)
+echo.
+
 REM --- Process each file ---
 for /f "usebackq delims=" %%F in ("%FILELIST%") do call :process_one "%%F"
 del "%FILELIST%" 2>nul
@@ -169,7 +180,7 @@ if errorlevel 1 (
 )
 
 REM 2. Run Worker
-powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" -WorkDir "!WORK!" -InputPath "!INPUT!" -OutputPath "!TEMPOUT!" -ReportPath "!WORKERRPT!" >> "!WORKERLOG!" 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" -WorkDir "!WORK!" -InputPath "!INPUT!" -OutputPath "!TEMPOUT!" -ReportPath "!WORKERRPT!" -DoColors "!DO_COLORS!" >> "!WORKERLOG!" 2>&1
 if errorlevel 1 (
     echo   ERROR: Merge script failed.
     echo - !INPUTNAME! [Script Error] >> "%FAIL_LIST%"
