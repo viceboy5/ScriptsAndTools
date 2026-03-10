@@ -282,8 +282,9 @@ try {
         "", 
         $actualColorSwaps,
         $objCount,
-        $timeAdd,
-        [math]::Round($modelGrams, 2)
+        [math]::Round($modelGrams, 2),
+        "",
+        $timeAdd
     )
 
     Write-Host "`n--- Console Output Verification ---" -ForegroundColor Green

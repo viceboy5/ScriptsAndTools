@@ -8,30 +8,34 @@ set "BAMBU_GUI=C:\Program Files\Bambu Studio\bambu-studio.exe"
 :: 1. Check if a file or folder was actually dropped
 if "%~1"=="" (
     echo [ERROR] No file or folder detected.
-    echo Please drag and drop a .gcode.3mf file or a master folder onto this batch file.
-    echo.
     pause
     exit /b
 )
 
+:: Strip trailing slash if present for consistent formatting
 set "TARGET=%~1"
+if "!TARGET:~-1!"=="\" set "TARGET=!TARGET:~0,-1!"
 
 :: 2. Determine where the Master TSV should be saved
-if exist "!TARGET!\" (
-    set "MASTER_TSV=%~f1\Master_ExtractionResults.tsv"
+if exist "%TARGET%\" (
+    set "MASTER_TSV=%TARGET%\Master_ExtractionResults.tsv"
+    set "IS_FOLDER=1"
 ) else (
     set "MASTER_TSV=%~dp1Master_ExtractionResults.tsv"
+    set "IS_FOLDER=0"
 )
 
 :: 3. Route to Processing Subroutine
-if exist "!TARGET!\" (
-    echo [INFO] Folder detected. Searching recursively for .gcode.3mf files...
+if "!IS_FOLDER!"=="1" (
+    echo [INFO] Folder detected. Searching recursively using DIR...
     echo Master TSV: !MASTER_TSV!
     echo.
-    for /r "!TARGET!" %%F in (*.gcode.3mf) do (
+
+    :: 'dir /s /b' bypasses the nasty bugs FOR /R has with spaces in variable paths
+    for /f "delims=" %%F in ('dir /s /b "%TARGET%\*.gcode.3mf" 2^>nul') do (
         set "FILE_NAME=%%~nxF"
 
-        :: Skip processing if it's a leftover "Final" file
+        :: Only process files that DO NOT contain "Final" (We only want the Full plates)
         if /I "!FILE_NAME:Final=!"=="!FILE_NAME!" (
             call :ProcessFile "%%~fF"
         )
@@ -40,7 +44,7 @@ if exist "!TARGET!\" (
     echo [INFO] Single file detected.
     echo Master TSV: !MASTER_TSV!
     echo.
-    call :ProcessFile "!TARGET!"
+    call :ProcessFile "%TARGET%"
 )
 
 echo.
@@ -67,20 +71,24 @@ set "SINGLE_GCODE_PATH=!INPUT_DIR!!INPUT_NAME:Full=Final!"
 
 :: Check if the base Final.3mf exists to slice
 if exist "!SINGLE_3MF_PATH!" (
-    echo   [ACTION] Slicing !SINGLE_3MF_NAME! for Time Add calculations...
+    echo   [FOUND] Matching isolated file: !SINGLE_3MF_NAME!
+    echo   [ACTION] Slicing for Time Add calculations... Please wait.
+
+    :: Wait for Bambu Studio to slice
     "!BAMBU_GUI!" --debug 3 --no-check --slice 1 --min-save --export-3mf "!SINGLE_GCODE_PATH!" "!SINGLE_3MF_PATH!" >nul 2>&1
 
     if exist "!SINGLE_GCODE_PATH!" (
+        echo   [SUCCESS] Slicing complete. Extracting data...
         powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Extract-3MFData.ps1" -InputFile "!INPUT_GCODE!" -SingleFile "!SINGLE_GCODE_PATH!" -MasterTsvPath "!MASTER_TSV!"
 
         echo   [CLEANUP] Deleting temporary !SINGLE_GCODE_PATH!...
         del /f /q "!SINGLE_GCODE_PATH!"
     ) else (
-        echo   [ERROR] Slicing failed. Proceeding without single-object Time Add data.
+        echo   [ERROR] Bambu Studio failed to generate the Final.gcode.3mf file.
         powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Extract-3MFData.ps1" -InputFile "!INPUT_GCODE!" -MasterTsvPath "!MASTER_TSV!"
     )
 ) else (
-    echo   [SKIP] No matching Final.3mf found. Proceeding without single-object Time Add data.
+    echo   [SKIP] No matching !SINGLE_3MF_NAME! found in directory.
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Extract-3MFData.ps1" -InputFile "!INPUT_GCODE!" -MasterTsvPath "!MASTER_TSV!"
 )
 exit /b
