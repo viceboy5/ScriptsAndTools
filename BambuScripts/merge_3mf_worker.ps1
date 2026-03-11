@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # ════════════════════════════════════════════════════════════════════════════════
-#  merge_3mf_worker.ps1 - AUTO-PLAN N-WAY MERGE (INSTANCING & UI CACHE PURGE)
+#  merge_3mf_worker.ps1 - AUTO-PLAN N-WAY MERGE (NO VLH INJECTION)
 # ════════════════════════════════════════════════════════════════════════════════
 
 $nsCore = 'http://schemas.microsoft.com/3dmanufacturing/core/2015/02'
@@ -62,25 +62,7 @@ if ($hasSettings) {
     foreach ($node in $settings.config.ChildNodes) { if ($node.LocalName -eq 'object') { $settObjById[$node.GetAttribute('id')] = $node } }
 }
 
-# ── CAPTURE MASTER VARIABLE LAYER HEIGHT DATA ─────────────────────────────────
-$vlhPath = Join-Path $WorkDir "Metadata\layer_heights_profile.txt"
-$vlhDataString = $null
-if (Test-Path $vlhPath) {
-    $vlhLines = @(Get-Content $vlhPath)
-    foreach ($line in $vlhLines) {
-        if ($line -match '\|(.+)$') {
-            $vlhDataString = $matches[1]
-            break
-        }
-    }
-}
-$masterVlhNode = $null
-if ($hasSettings) {
-    $tmpNode = $settings.SelectSingleNode('//*[local-name()="object"]/*[local-name()="layer_height_profile"]')
-    if ($null -ne $tmpNode) { $masterVlhNode = $tmpNode.CloneNode($true) }
-}
-
-# ── PURGE OFF-PLATE & ORPHANED OBJECTS (COMPLETELY) ───────────────────────────
+# ── PURGE OFF-PLATE & ORPHANED OBJECTS ────────────────────────────────────────
 $validBuildItems = @()
 $killedIds = New-Object System.Collections.Generic.HashSet[string]
 
@@ -130,11 +112,9 @@ foreach ($objId in @($objById.Keys)) {
         }
     }
 }
-# ──────────────────────────────────────────────────────────────────────────────
-
-$report = New-Object System.Collections.Generic.List[string]
 
 # ── Outlier Detection (Isolate Version Text) ──────────────────────────────────
+$report = New-Object System.Collections.Generic.List[string]
 $mergeItems   = @()
 $ignoredItems = @()
 $fcMap = @{}
@@ -484,13 +464,26 @@ if ($hasSettings -and ($plate = $settings.SelectSingleNode('//plate'))) {
     }
 }
 
-# ── GLOBAL OBJECT ID RENUMBERING ──────────────────────────────────────────────
-$survivingObjects = @($xml.SelectNodes('//m:resources/m:object', $xns)) | Sort-Object { [int]$_.GetAttribute('id') }
+# ── GLOBAL OBJECT ID RENUMBERING (FORCES PRINTABLE OBJECTS TO IDs 1 TO N) ─────
+$printableIdsSet = New-Object System.Collections.Generic.HashSet[string]
+if ($hasSettings) {
+    foreach ($obj in $settings.SelectNodes('//*[local-name()="object"]')) {
+        $printableIdsSet.Add($obj.GetAttribute('id')) | Out-Null
+    }
+}
+
+$survivingObjects = @($xml.SelectNodes('//m:resources/m:object', $xns))
+
+# Sort: Put printable objects FIRST, then sort numerically. This prevents
+# raw hidden geometry templates from stealing IDs 1 through N.
+$sortedObjects = $survivingObjects | Sort-Object `
+    @{ Expression = { if ($printableIdsSet.Contains($_.GetAttribute('id'))) { 0 } else { 1 } }; Ascending = $true }, `
+    @{ Expression = { [int]$_.GetAttribute('id') }; Ascending = $true }
 
 $idMap = @{}
-$newIdCounter = 1  # <-- Start numbering at 1 so objects align perfectly!
+$newIdCounter = 1
 
-foreach ($obj in $survivingObjects) {
+foreach ($obj in $sortedObjects) {
     $oldId = $obj.GetAttribute('id')
     $newId = $newIdCounter.ToString()
     $idMap[$oldId] = $newId
@@ -647,32 +640,6 @@ foreach ($f in $allModelFiles) {
     $checkPath = "/3D/Objects/" + $f.Name
     if (-not $usedModelPaths.Contains($checkPath)) {
         Remove-Item $f.FullName -Force
-    }
-}
-
-# ── GLOBAL VARIABLE LAYER HEIGHT SYNCHRONIZATION ──────────────────────────────
-if ($hasSettings) {
-    $allSettObjs = @($settings.SelectNodes('//*[local-name()="object"]'))
-
-    # 1. Force exact Master XML node onto EVERY object (wipes broken ones)
-    if ($null -ne $masterVlhNode) {
-        foreach ($sObj in $allSettObjs) {
-            $existingVlh = $sObj.SelectSingleNode('layer_height_profile')
-            if ($null -ne $existingVlh) {
-                $sObj.RemoveChild($existingVlh) | Out-Null
-            }
-            $sObj.AppendChild($masterVlhNode.CloneNode($true)) | Out-Null
-        }
-    }
-
-    # 2. Write the text file using the exact 1 to N loop (mimics Copy VLH.bat)
-    if ($null -ne $vlhDataString -and $null -ne $vlhPath) {
-        $newVlhLines = @()
-        $objCount = $allSettObjs.Count
-        for ($i = 1; $i -le $objCount; $i++) {
-            $newVlhLines += "object_id=$i|$vlhDataString"
-        }
-        [System.IO.File]::WriteAllText($vlhPath, ($newVlhLines -join "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
     }
 }
 
