@@ -199,6 +199,6 @@ if (Test-Path $OutputPath) { Remove-Item $OutputPath -Force }
 $zip = [System.IO.Compression.ZipFile]::Open($OutputPath, 'Create')
 Get-ChildItem $WorkDir -Recurse -File | ForEach-Object {
     $rel = $_.FullName.Substring($WorkDir.Length).TrimStart('\','/').Replace('\','/')
-    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $rel)
+    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $rel) | Out-Null
 }
 $zip.Dispose()
