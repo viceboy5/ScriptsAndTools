@@ -309,15 +309,14 @@ foreach ($groupSize in $mergePlan) {
 
             foreach ($ep in @($sSurvivor.SelectNodes('part'))) { $ep.ParentNode.RemoveChild($ep) | Out-Null }
 
-            $partIdCounter = 1
-            foreach ($p in $mergedParts) {
-                # Preserves original modifiers directly without conversion
-                $p.SetAttribute('id', $partIdCounter.ToString())
+            for ($pi = 0; $pi -lt $mergedParts.Count; $pi++) {
+                $p = $mergedParts[$pi]
+                $compObjId = $mergedComps[$pi].GetAttribute('objectid')
+                $p.SetAttribute('id', $compObjId)
 
                 $pNameNode = $p.SelectSingleNode('metadata[@key="name"]')
-                if ($null -ne $pNameNode) { $pNameNode.SetAttribute('value', "MergedPart_$partIdCounter") }
+                if ($null -ne $pNameNode) { $pNameNode.SetAttribute('value', "MergedPart_$compObjId") }
                 $sSurvivor.AppendChild($p) | Out-Null
-                $partIdCounter++
             }
 
             for ($k = 1; $k -lt $groupSize; $k++) {
@@ -594,6 +593,7 @@ $relsLines += '</Relationships>'
 # ── PURGE STALE UI CACHES (The Pick Buffer Fix) ───────────────────────────────
 Get-ChildItem -Path (Join-Path $WorkDir "Metadata") -Filter "pick_*.png" -ErrorAction SilentlyContinue | Remove-Item -Force
 Get-ChildItem -Path (Join-Path $WorkDir "Metadata") -Filter "plate_*.png" -ErrorAction SilentlyContinue | Remove-Item -Force
+Get-ChildItem -Path (Join-Path $WorkDir "Metadata") -Filter "plate_*.json" -ErrorAction SilentlyContinue | Remove-Item -Force  # <-- ADD THIS
 
 # ── Repack ────────────────────────────────────────────────────────────────────
 Add-Type -AssemblyName 'System.IO.Compression.FileSystem'
