@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # ════════════════════════════════════════════════════════════════════════════════
-#  merge_3mf_worker.ps1 - AUTO-PLAN N-WAY MERGE (ZIP COMPRESSION FIX)
+#  merge_3mf_worker.ps1 - BASELINE REVERT (PURGE & MERGE ONLY)
 # ════════════════════════════════════════════════════════════════════════════════
 
 $nsCore = 'http://schemas.microsoft.com/3dmanufacturing/core/2015/02'
@@ -45,7 +45,6 @@ $relsPath = Find-File $WorkDir '3D/_rels/3dmodel.model.rels'
 $settingsPath = Find-File $WorkDir 'Metadata/model_settings.config'
 $cutInfoPath = Find-File $WorkDir 'Metadata/cut_information.xml'
 $sliceInfoPath = Find-File $WorkDir 'Metadata/slice_info.config'
-$vlhPath = Join-Path $WorkDir "Metadata\layer_heights_profile.txt"
 
 $allModelFiles = @(Get-ChildItem -Path $objectsDir -Filter '*.model' | Sort-Object { [int]($_.BaseName -replace 'object_','') })
 
@@ -61,27 +60,6 @@ $hasSettings = ($null -ne $settingsPath) -and (Test-Path $settingsPath)
 if ($hasSettings) {
     $settings = [xml][System.IO.File]::ReadAllText($settingsPath, [System.Text.Encoding]::UTF8)
     foreach ($node in $settings.config.ChildNodes) { if ($node.LocalName -eq 'object') { $settObjById[$node.GetAttribute('id')] = $node } }
-}
-
-# ── HARVEST TRUE MASTER VLH (FREQUENCY ANALYSIS ONLY) ─────────────────────────
-$vlhDataString = $null
-if (Test-Path $vlhPath) {
-    $vlhLines = @(Get-Content $vlhPath)
-    $stringCounts = @{}
-
-    # Count how many times each unique VLH string appears in the file
-    foreach ($line in $vlhLines) {
-        if ($line -match '\|(.+)$') {
-            $val = $matches[1]
-            if (-not $stringCounts.Contains($val)) { $stringCounts[$val] = 0 }
-            $stringCounts[$val]++
-        }
-    }
-
-    # The string with the highest count mathematically MUST be the main body models
-    if ($stringCounts.Count -gt 0) {
-        $vlhDataString = ($stringCounts.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 1).Name
-    }
 }
 
 # ── PURGE OFF-PLATE & ORPHANED OBJECTS ────────────────────────────────────────
@@ -135,11 +113,16 @@ foreach ($objId in @($objById.Keys)) {
     }
 }
 
-# ── DEBUG OUTPUT ──────────────────────────────────────────────────────────────
-Write-Host "======================================" -ForegroundColor Cyan
-Write-Host "DEBUG: Killed Off-Plate IDs: $($killedIds -join ', ')" -ForegroundColor Red
-Write-Host "DEBUG: TRUE VLH String Extracted: $(if($vlhDataString){$vlhDataString.Length}else{0}) chars" -ForegroundColor Magenta
-Write-Host "======================================" -ForegroundColor Cyan
+# ── ID Diagnostic Output ────────────────────────────────────────────────────
+$survivingIds = @($buildItems | ForEach-Object { $_.GetAttribute('objectid') }) | Sort-Object { [int]$_ }
+$killedList   = @($killedIds)  | Sort-Object { [int]$_ }
+
+Write-Host ""
+Write-Host "  -- ID REPORT ----------------------------------------------------------"
+Write-Host "  Removed (off-plate and orphaned) [$($killedList.Count)]: $($killedList -join ', ')"
+Write-Host "  Surviving on-plate IDs [$($survivingIds.Count)]: $($survivingIds -join ', ')"
+Write-Host "  -----------------------------------------------------------------------"
+Write-Host ""
 
 # ── Outlier Detection (Isolate Version Text) ──────────────────────────────────
 $report = New-Object System.Collections.Generic.List[string]
@@ -436,9 +419,6 @@ for ($li = ($mergeItems.Count - $lone); $li -lt $mergeItems.Count; $li++) {
     if ($null -ne $loneObj) { $loneObj.SetAttribute('UUID', $nsProd, $objUuidStr) | Out-Null }
     $objUuidCounter++
 
-    $identifyIdCounter += 442
-    $survivorIdentifyIds[$loneId] = $identifyIdCounter
-
     if ($hasSettings -and ($null -ne ($sLone = $settObjById[$loneId]))) {
         $loneNameNode = $sLone.SelectSingleNode('metadata[@key="name"]')
         if ($null -ne $loneNameNode) {
@@ -482,7 +462,7 @@ for ($li = ($mergeItems.Count - $lone); $li -lt $mergeItems.Count; $li++) {
     $loneCounter++
 }
 
-# ── Remove killed model_instances BEFORE renumbering (avoids ID collision) ────
+# ── Clean Killed Instances From Configs (Leaves Natural IDs Alone) ────────────
 if ($hasSettings -and ($plate = $settings.SelectSingleNode('//plate'))) {
     foreach ($inst in @($plate.SelectNodes('model_instance'))) {
         $metaId = $inst.SelectSingleNode('metadata[@key="object_id"]')
@@ -492,101 +472,22 @@ if ($hasSettings -and ($plate = $settings.SelectSingleNode('//plate'))) {
     }
 }
 
-# ── GLOBAL OBJECT ID RENUMBERING (FORCES PRINTABLE OBJECTS TO IDs 1 TO N) ─────
-$printableIdsSet = New-Object System.Collections.Generic.HashSet[string]
-if ($hasSettings) {
-    foreach ($obj in $settings.SelectNodes('//*[local-name()="object"]')) {
-        $printableIdsSet.Add($obj.GetAttribute('id')) | Out-Null
-    }
-}
-
-$survivingObjects = @($xml.SelectNodes('//m:resources/m:object', $xns))
-
-# Sort: Put printable objects FIRST, then sort numerically. This prevents
-# raw hidden geometry templates from stealing IDs 1 through N.
-$sortedObjects = $survivingObjects | Sort-Object `
-    @{ Expression = { if ($printableIdsSet.Contains($_.GetAttribute('id'))) { 0 } else { 1 } }; Ascending = $true }, `
-    @{ Expression = { [int]$_.GetAttribute('id') }; Ascending = $true }
-
-$idMap = @{}
-$newIdCounter = 1
-
-foreach ($obj in $sortedObjects) {
-    $oldId = $obj.GetAttribute('id')
-    $newId = $newIdCounter.ToString()
-    $idMap[$oldId] = $newId
-    $obj.SetAttribute('id', $newId)
-    $newIdCounter++
-}
-
-foreach ($item in @($xml.SelectNodes('//m:build/m:item', $xns))) {
-    $oldId = $item.GetAttribute('objectid')
-    if ($idMap.Contains($oldId)) { $item.SetAttribute('objectid', $idMap[$oldId]) }
-}
-
-if ($hasSettings) {
-    foreach ($obj in @($settings.SelectNodes('//*[local-name()="object"]'))) {
-        $oldId = $obj.GetAttribute('id')
-        if ($idMap.Contains($oldId)) { $obj.SetAttribute('id', $idMap[$oldId]) }
-    }
-    foreach ($asm in @($settings.SelectNodes('//assemble/assemble_item'))) {
-        $oldId = $asm.GetAttribute('object_id')
-        if ($idMap.Contains($oldId)) { $asm.SetAttribute('object_id', $idMap[$oldId]) }
-    }
-    if ($plate = $settings.SelectSingleNode('//plate')) {
-        foreach ($meta in @($plate.SelectNodes('model_instance/metadata[@key="object_id"]'))) {
-            $oldId = $meta.GetAttribute('value')
-            if ($idMap.Contains($oldId)) { $meta.SetAttribute('value', $idMap[$oldId]) }
-        }
-    }
-}
-
-# ── Finalize Metadata ─────────────────────────────────────────────────────────
-if ($hasSettings -and ($plate = $settings.SelectSingleNode('//plate'))) {
-    foreach ($inst in @($plate.SelectNodes('model_instance'))) {
-        $metaId = $inst.SelectSingleNode('metadata[@key="object_id"]')
-        if ($null -ne $metaId) {
-            $instObjId = $metaId.GetAttribute('value')
-            $originalId = $null
-            foreach ($key in $idMap.Keys) { if ($idMap[$key] -eq $instObjId) { $originalId = $key; break } }
-
-            if ($null -ne $originalId) {
-                if ($killedIds.Contains($originalId)) {
-                    $inst.ParentNode.RemoveChild($inst) | Out-Null
-                } elseif ($survivorIdentifyIds.Contains($originalId)) {
-                    $identifyIdNode = $inst.SelectSingleNode('metadata[@key="identify_id"]')
-                    if ($null -ne $identifyIdNode) {
-                        $identifyIdNode.SetAttribute('value', $survivorIdentifyIds[$originalId].ToString())
-                    }
-                }
-            }
-        }
-    }
-}
-
-# --- TRIM AND RENUMBER CUT_INFORMATION.XML ARRAY (NAMESPACE COLLISION FIX) ---
+# --- TRIM KILLED IDs FROM CUT_INFORMATION.XML SAFELY ---
 if (($null -ne $cutInfoPath) -and (Test-Path $cutInfoPath)) {
     [xml]$cutXml = [System.IO.File]::ReadAllText($cutInfoPath, [System.Text.Encoding]::UTF8)
-    $cutObjs = @($cutXml.SelectNodes('//*[local-name()="object"]'))
-    $survivorCount = $survivingObjects.Count
+    $cutModified = $false
 
-    if ($cutObjs.Count -gt $survivorCount) {
-        for ($i = $survivorCount; $i -lt $cutObjs.Count; $i++) {
-            $cutObjs[$i].ParentNode.RemoveChild($cutObjs[$i]) | Out-Null
+    foreach ($co in @($cutXml.SelectNodes('//*[local-name()="object"]'))) {
+        $oldId = $co.GetAttribute('id')
+        if ($killedIds.Contains($oldId)) {
+            $co.ParentNode.RemoveChild($co) | Out-Null
+            $cutModified = $true
         }
     }
-
-    $cIdx = 1
-    foreach ($co in @($cutXml.SelectNodes('//*[local-name()="object"]'))) {
-        $co.SetAttribute('id', $cIdx.ToString())
-        $cIdx++
-    }
-
-    $ws = New-Object System.Xml.XmlWriterSettings; $ws.Encoding = New-Object System.Text.UTF8Encoding($false); $ws.Indent = $true
-    $w = [System.Xml.XmlWriter]::Create($cutInfoPath, $ws); $cutXml.Save($w); $w.Close()
+    if ($cutModified) { Save-Xml $cutXml $cutInfoPath }
 }
 
-# --- SYNCHRONIZING THE SLICE CACHE (ID MAP ONLY, NO XML INJECTION) ------------
+# --- TRIM KILLED IDs AND UPDATE FACES FROM SLICE CACHE ---
 if (($null -ne $sliceInfoPath) -and (Test-Path $sliceInfoPath)) {
     [xml]$sliceXml = [System.IO.File]::ReadAllText($sliceInfoPath, [System.Text.Encoding]::UTF8)
     $sliceModified = $false
@@ -596,30 +497,25 @@ if (($null -ne $sliceInfoPath) -and (Test-Path $sliceInfoPath)) {
         if ($killedIds.Contains($oldId)) {
             $sObj.ParentNode.RemoveChild($sObj) | Out-Null
             $sliceModified = $true
-        } elseif ($idMap.Contains($oldId)) {
-            $newMappedId = $idMap[$oldId]
-            $sObj.SetAttribute('id', $newMappedId)
-            $sliceModified = $true
+        } elseif ($survivorFaces.Contains($oldId)) {
+            $fcNode = $sObj.SelectSingleNode('*[local-name()="metadata" and @face_count]')
+            if ($null -ne $fcNode) { $fcNode.SetAttribute('face_count', $survivorFaces[$oldId].ToString()) }
+            $nameNode = $sObj.SelectSingleNode('*[local-name()="metadata" and @key="name"]')
+            if ($null -ne $nameNode) { $nameNode.SetAttribute('value', $survivorNames[$oldId]) }
 
-            if ($survivorFaces.Contains($oldId)) {
-                $fcNode = $sObj.SelectSingleNode('*[local-name()="metadata" and @face_count]')
-                if ($null -ne $fcNode) { $fcNode.SetAttribute('face_count', $survivorFaces[$oldId].ToString()) }
-                $nameNode = $sObj.SelectSingleNode('*[local-name()="metadata" and @key="name"]')
-                if ($null -ne $nameNode) { $nameNode.SetAttribute('value', $survivorNames[$oldId]) }
-
-                if ($hasSettings) {
-                    $matchingSettingsObj = $settings.SelectSingleNode("//*[local-name()='object' and @id='$newMappedId']")
-                    if ($null -ne $matchingSettingsObj) {
-                        foreach ($sp in @($sObj.SelectNodes('*[local-name()="part"]'))) {
-                            $sp.ParentNode.RemoveChild($sp) | Out-Null
-                        }
-                        foreach ($mp in @($matchingSettingsObj.SelectNodes('*[local-name()="part"]'))) {
-                            $importedPart = $sliceXml.ImportNode($mp, $true)
-                            $sObj.AppendChild($importedPart) | Out-Null
-                        }
+            if ($hasSettings) {
+                $matchingSettingsObj = $settings.SelectSingleNode("//*[local-name()='object' and @id='$oldId']")
+                if ($null -ne $matchingSettingsObj) {
+                    foreach ($sp in @($sObj.SelectNodes('*[local-name()="part"]'))) {
+                        $sp.ParentNode.RemoveChild($sp) | Out-Null
+                    }
+                    foreach ($mp in @($matchingSettingsObj.SelectNodes('*[local-name()="part"]'))) {
+                        $importedPart = $sliceXml.ImportNode($mp, $true)
+                        $sObj.AppendChild($importedPart) | Out-Null
                     }
                 }
             }
+            $sliceModified = $true
         }
     }
 
@@ -630,25 +526,10 @@ if (($null -ne $sliceInfoPath) -and (Test-Path $sliceInfoPath)) {
             if ($killedIds.Contains($oldId)) {
                 $inst.ParentNode.RemoveChild($inst) | Out-Null
                 $sliceModified = $true
-            } elseif ($idMap.Contains($oldId)) {
-                $metaId.SetAttribute('value', $idMap[$oldId])
-                $sliceModified = $true
-                if ($survivorIdentifyIds.Contains($oldId)) {
-                    $identifyIdNode = $inst.SelectSingleNode('*[local-name()="metadata" and @key="identify_id"]')
-                    if ($null -ne $identifyIdNode) {
-                        $identifyIdNode.SetAttribute('value', $survivorIdentifyIds[$oldId].ToString())
-                    }
-                }
             }
         }
     }
     if ($sliceModified) { Save-Xml $sliceXml $sliceInfoPath }
-}
-
-# --- REFRESH DICTIONARY BEFORE GC BUG FIX ---
-$objById = @{}
-foreach ($o in $xml.SelectNodes('//m:resources/m:object', $xns)) {
-    $objById[$o.GetAttribute('id')] = $o
 }
 
 # ── GEOMETRY GARBAGE COLLECTION & RELS REBUILD ────────────────────────────────
@@ -671,26 +552,85 @@ foreach ($f in $allModelFiles) {
     }
 }
 
-# ── GLOBAL VARIABLE LAYER HEIGHT PURE TEXT OVERWRITE ──────────────────────────
-if ($hasSettings -and $null -ne $vlhDataString -and $null -ne $vlhPath) {
-    $allSettObjs = @($settings.SelectNodes('//*[local-name()="object"]'))
-    $printableIds = New-Object System.Collections.Generic.List[int]
+# ── Renumber build-item IDs to 1..N and write VLH 1..N ──────────────────────
+# Bambu maps VLH by the model_settings object_id values.
+# Working files always have consecutive IDs starting at 1.
+# Renumber all surviving build items + their settings entries to 1..N,
+# then write VLH for object_id=1 through object_id=N.
 
-    foreach ($sObj in $allSettObjs) {
-        $printableIds.Add([int]($sObj.GetAttribute('id')))
+$n = 0
+$idRemap = @{}  # old objectid -> new sequential id string
+
+foreach ($item in $buildItems) {
+    $n++
+    $oldId = $item.GetAttribute('objectid')
+    $newId = "$n"
+    $idRemap[$oldId] = $newId
+}
+
+if ($n -gt 0) {
+    # --- Remap in 3dmodel.model ---
+    # Build items
+    foreach ($item in $buildItems) {
+        $item.SetAttribute('objectid', $idRemap[$item.GetAttribute('objectid')])
+    }
+    # Resource objects (top-level wrappers, same IDs as build items)
+    foreach ($obj in $xml.SelectNodes('//m:resources/m:object', $xns)) {
+        $oid = $obj.GetAttribute('id')
+        if ($idRemap.ContainsKey($oid)) {
+            $obj.SetAttribute('id', $idRemap[$oid])
+        }
     }
 
-    $printableIds.Sort()
-    $newVlhLines = New-Object System.Collections.Generic.List[string]
-
-    # Perfectly mirrors your Copy VLH.bat file using the True Math string
-    foreach ($fid in $printableIds) {
-        $newVlhLines.Add("object_id=$fid|$vlhDataString")
+    # --- Remap in model_settings.config ---
+    if ($hasSettings) {
+        # <object id="X">
+        foreach ($obj in $settings.SelectNodes('//object')) {
+            $oid = $obj.GetAttribute('id')
+            if ($idRemap.ContainsKey($oid)) { $obj.SetAttribute('id', $idRemap[$oid]) }
+        }
+        # <assemble_item object_id="X">
+        foreach ($ai in $settings.SelectNodes('//assemble_item')) {
+            $oid = $ai.GetAttribute('object_id')
+            if ($idRemap.ContainsKey($oid)) { $ai.SetAttribute('object_id', $idRemap[$oid]) }
+        }
+        # <metadata key="object_id" value="X"> inside model_instance
+        foreach ($meta in $settings.SelectNodes("//metadata[@key='object_id']")) {
+            $oid = $meta.GetAttribute('value')
+            if ($idRemap.ContainsKey($oid)) { $meta.SetAttribute('value', $idRemap[$oid]) }
+        }
     }
 
-    [System.IO.File]::WriteAllText($vlhPath, ($newVlhLines -join "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
-} elseif (Test-Path $vlhPath) {
-    Remove-Item $vlhPath -Force
+    Write-Host "  Renumbered $n build-item IDs to 1..$n"
+
+    # --- Rebuild $objById with new IDs so VLH component lookup works ---
+    $objById = @{}
+    foreach ($obj in $xml.SelectNodes('//m:resources/m:object', $xns)) {
+        $objById[$obj.GetAttribute('id')] = $obj
+    }
+
+    # --- Write VLH for object_id=1..N (majority-vote profile) ---
+    $vlhPath = Join-Path $WorkDir "Metadata\layer_heights_profile.txt"
+    if (Test-Path $vlhPath) {
+        $vlhRaw = [System.IO.File]::ReadAllLines($vlhPath, [System.Text.Encoding]::UTF8)
+        $dataCounts = @{}
+        foreach ($line in $vlhRaw) {
+            if ($line -match '\|(.+)$') {
+                $ds = $Matches[1].Trim()
+                if ($dataCounts.ContainsKey($ds)) { $dataCounts[$ds]++ } else { $dataCounts[$ds] = 1 }
+            }
+        }
+        if ($dataCounts.Count -gt 0) {
+            $masterVlhData = ($dataCounts.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 1).Key
+            $newVlhLines = 1..$n | ForEach-Object { "object_id=$_|$masterVlhData" }
+            [System.IO.File]::WriteAllText(
+                $vlhPath,
+                ($newVlhLines -join "`r`n"),
+                (New-Object System.Text.UTF8Encoding($false))
+            )
+            Write-Host "  VLH sync: wrote $n entries for object_id=1..$n"
+        }
+    }
 }
 
 Save-Xml $xml $modelFile
@@ -707,28 +647,15 @@ foreach ($path in $usedModelPaths) {
 $relsLines += '</Relationships>'
 [System.IO.File]::WriteAllText($relsPath, ($relsLines -join "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
 
-# ── PURGE STALE UI CACHES (The Pick Buffer Fix) ───────────────────────────────
-Get-ChildItem -Path (Join-Path $WorkDir "Metadata") -Filter "pick_*.png" -ErrorAction SilentlyContinue | Remove-Item -Force
-Get-ChildItem -Path (Join-Path $WorkDir "Metadata") -Filter "plate_*.png" -ErrorAction SilentlyContinue | Remove-Item -Force
-Get-ChildItem -Path (Join-Path $WorkDir "Metadata") -Filter "plate_*.json" -ErrorAction SilentlyContinue | Remove-Item -Force
-
-# ── Repack Using Native Windows Tar (FORCES .ZIP COMPRESSION) ─────────────────
+# ── Repack Using Original Method (NO BACKSLASHES) ─────────────────────────────
+Add-Type -AssemblyName 'System.IO.Compression.FileSystem'
 if (Test-Path $OutputPath) { Remove-Item $OutputPath -Force }
-
-# 1. Create a temporary string that explicitly ends in .zip
-$tempZipPath = Join-Path (Split-Path $OutputPath) "temp_bambu_repack_$PID.zip"
-if (Test-Path $tempZipPath) { Remove-Item $tempZipPath -Force }
-
-$currentDir = Get-Location
-Set-Location -Path $WorkDir
-
-# 2. Execute tar.exe using the .zip extension so it actually compresses the files!
-cmd.exe /c "tar.exe -a -cf `"$tempZipPath`" *"
-
-Set-Location -Path $currentDir
-
-# 3. Rename the properly compressed .zip file to the final .3mf file
-Move-Item -Path $tempZipPath -Destination $OutputPath -Force
+$zip = [System.IO.Compression.ZipFile]::Open($OutputPath, 'Create')
+Get-ChildItem $WorkDir -Recurse -File | ForEach-Object {
+    $rel = $_.FullName.Substring($WorkDir.Length).TrimStart('\','/').Replace('\','/')
+    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $rel) | Out-Null
+}
+$zip.Dispose()
 
 $finalCount = $mergePlan.Count + $lone
 $report.Add("Final object count: $finalCount")
@@ -737,5 +664,4 @@ if ($ReportPath -ne "nul" -and -not [string]::IsNullOrWhiteSpace($ReportPath)) {
 }
 Write-Host "Success! Ignored: $($ignoredItems.Count). Merged: $groupCount groups. Final Target Count: $finalCount."
 
-# Delay to guarantee Windows Defender/Antivirus completely lets go of the file before the batch script feeds it to Bambu Studio
-Start-Sleep -Seconds 1
+Start-Sleep -Milliseconds 500
