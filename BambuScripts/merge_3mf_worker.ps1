@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # ════════════════════════════════════════════════════════════════════════════════
-#  merge_3mf_worker.ps1 - AUTO-PLAN N-WAY MERGE (NO VLH INJECTION)
+#  merge_3mf_worker.ps1 - AUTO-PLAN N-WAY MERGE (ZIP COMPRESSION FIX)
 # ════════════════════════════════════════════════════════════════════════════════
 
 $nsCore = 'http://schemas.microsoft.com/3dmanufacturing/core/2015/02'
@@ -45,6 +45,7 @@ $relsPath = Find-File $WorkDir '3D/_rels/3dmodel.model.rels'
 $settingsPath = Find-File $WorkDir 'Metadata/model_settings.config'
 $cutInfoPath = Find-File $WorkDir 'Metadata/cut_information.xml'
 $sliceInfoPath = Find-File $WorkDir 'Metadata/slice_info.config'
+$vlhPath = Join-Path $WorkDir "Metadata\layer_heights_profile.txt"
 
 $allModelFiles = @(Get-ChildItem -Path $objectsDir -Filter '*.model' | Sort-Object { [int]($_.BaseName -replace 'object_','') })
 
@@ -60,6 +61,27 @@ $hasSettings = ($null -ne $settingsPath) -and (Test-Path $settingsPath)
 if ($hasSettings) {
     $settings = [xml][System.IO.File]::ReadAllText($settingsPath, [System.Text.Encoding]::UTF8)
     foreach ($node in $settings.config.ChildNodes) { if ($node.LocalName -eq 'object') { $settObjById[$node.GetAttribute('id')] = $node } }
+}
+
+# ── HARVEST TRUE MASTER VLH (FREQUENCY ANALYSIS ONLY) ─────────────────────────
+$vlhDataString = $null
+if (Test-Path $vlhPath) {
+    $vlhLines = @(Get-Content $vlhPath)
+    $stringCounts = @{}
+
+    # Count how many times each unique VLH string appears in the file
+    foreach ($line in $vlhLines) {
+        if ($line -match '\|(.+)$') {
+            $val = $matches[1]
+            if (-not $stringCounts.Contains($val)) { $stringCounts[$val] = 0 }
+            $stringCounts[$val]++
+        }
+    }
+
+    # The string with the highest count mathematically MUST be the main body models
+    if ($stringCounts.Count -gt 0) {
+        $vlhDataString = ($stringCounts.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 1).Name
+    }
 }
 
 # ── PURGE OFF-PLATE & ORPHANED OBJECTS ────────────────────────────────────────
@@ -112,6 +134,12 @@ foreach ($objId in @($objById.Keys)) {
         }
     }
 }
+
+# ── DEBUG OUTPUT ──────────────────────────────────────────────────────────────
+Write-Host "======================================" -ForegroundColor Cyan
+Write-Host "DEBUG: Killed Off-Plate IDs: $($killedIds -join ', ')" -ForegroundColor Red
+Write-Host "DEBUG: TRUE VLH String Extracted: $(if($vlhDataString){$vlhDataString.Length}else{0}) chars" -ForegroundColor Magenta
+Write-Host "======================================" -ForegroundColor Cyan
 
 # ── Outlier Detection (Isolate Version Text) ──────────────────────────────────
 $report = New-Object System.Collections.Generic.List[string]
@@ -558,7 +586,7 @@ if (($null -ne $cutInfoPath) -and (Test-Path $cutInfoPath)) {
     $w = [System.Xml.XmlWriter]::Create($cutInfoPath, $ws); $cutXml.Save($w); $w.Close()
 }
 
-# --- SYNCHRONIZING THE SLICE CACHE ---
+# --- SYNCHRONIZING THE SLICE CACHE (ID MAP ONLY, NO XML INJECTION) ------------
 if (($null -ne $sliceInfoPath) -and (Test-Path $sliceInfoPath)) {
     [xml]$sliceXml = [System.IO.File]::ReadAllText($sliceInfoPath, [System.Text.Encoding]::UTF8)
     $sliceModified = $false
@@ -643,6 +671,28 @@ foreach ($f in $allModelFiles) {
     }
 }
 
+# ── GLOBAL VARIABLE LAYER HEIGHT PURE TEXT OVERWRITE ──────────────────────────
+if ($hasSettings -and $null -ne $vlhDataString -and $null -ne $vlhPath) {
+    $allSettObjs = @($settings.SelectNodes('//*[local-name()="object"]'))
+    $printableIds = New-Object System.Collections.Generic.List[int]
+
+    foreach ($sObj in $allSettObjs) {
+        $printableIds.Add([int]($sObj.GetAttribute('id')))
+    }
+
+    $printableIds.Sort()
+    $newVlhLines = New-Object System.Collections.Generic.List[string]
+
+    # Perfectly mirrors your Copy VLH.bat file using the True Math string
+    foreach ($fid in $printableIds) {
+        $newVlhLines.Add("object_id=$fid|$vlhDataString")
+    }
+
+    [System.IO.File]::WriteAllText($vlhPath, ($newVlhLines -join "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
+} elseif (Test-Path $vlhPath) {
+    Remove-Item $vlhPath -Force
+}
+
 Save-Xml $xml $modelFile
 if ($hasSettings) { Save-Xml $settings $settingsPath }
 
@@ -662,15 +712,23 @@ Get-ChildItem -Path (Join-Path $WorkDir "Metadata") -Filter "pick_*.png" -ErrorA
 Get-ChildItem -Path (Join-Path $WorkDir "Metadata") -Filter "plate_*.png" -ErrorAction SilentlyContinue | Remove-Item -Force
 Get-ChildItem -Path (Join-Path $WorkDir "Metadata") -Filter "plate_*.json" -ErrorAction SilentlyContinue | Remove-Item -Force
 
-# ── Repack ────────────────────────────────────────────────────────────────────
-Add-Type -AssemblyName 'System.IO.Compression.FileSystem'
+# ── Repack Using Native Windows Tar (FORCES .ZIP COMPRESSION) ─────────────────
 if (Test-Path $OutputPath) { Remove-Item $OutputPath -Force }
-$zip = [System.IO.Compression.ZipFile]::Open($OutputPath, 'Create')
-Get-ChildItem $WorkDir -Recurse -File | ForEach-Object {
-    $rel = $_.FullName.Substring($WorkDir.Length).TrimStart('\','/').Replace('\','/')
-    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $rel) | Out-Null
-}
-$zip.Dispose()
+
+# 1. Create a temporary string that explicitly ends in .zip
+$tempZipPath = Join-Path (Split-Path $OutputPath) "temp_bambu_repack_$PID.zip"
+if (Test-Path $tempZipPath) { Remove-Item $tempZipPath -Force }
+
+$currentDir = Get-Location
+Set-Location -Path $WorkDir
+
+# 2. Execute tar.exe using the .zip extension so it actually compresses the files!
+cmd.exe /c "tar.exe -a -cf `"$tempZipPath`" *"
+
+Set-Location -Path $currentDir
+
+# 3. Rename the properly compressed .zip file to the final .3mf file
+Move-Item -Path $tempZipPath -Destination $OutputPath -Force
 
 $finalCount = $mergePlan.Count + $lone
 $report.Add("Final object count: $finalCount")
@@ -678,3 +736,6 @@ if ($ReportPath -ne "nul" -and -not [string]::IsNullOrWhiteSpace($ReportPath)) {
     $report | Set-Content -Path $ReportPath -Encoding UTF8
 }
 Write-Host "Success! Ignored: $($ignoredItems.Count). Merged: $groupCount groups. Final Target Count: $finalCount."
+
+# Delay to guarantee Windows Defender/Antivirus completely lets go of the file before the batch script feeds it to Bambu Studio
+Start-Sleep -Seconds 1
