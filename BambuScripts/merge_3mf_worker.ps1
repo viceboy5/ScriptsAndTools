@@ -62,6 +62,76 @@ if ($hasSettings) {
     foreach ($node in $settings.config.ChildNodes) { if ($node.LocalName -eq 'object') { $settObjById[$node.GetAttribute('id')] = $node } }
 }
 
+# ── CAPTURE MASTER VARIABLE LAYER HEIGHT DATA ─────────────────────────────────
+$vlhPath = Join-Path $WorkDir "Metadata\layer_heights_profile.txt"
+$vlhDataString = $null
+if (Test-Path $vlhPath) {
+    $vlhLines = @(Get-Content $vlhPath)
+    foreach ($line in $vlhLines) {
+        if ($line -match '\|(.+)$') {
+            $vlhDataString = $matches[1]
+            break
+        }
+    }
+}
+$masterVlhNode = $null
+if ($hasSettings) {
+    $tmpNode = $settings.SelectSingleNode('//*[local-name()="object"]/*[local-name()="layer_height_profile"]')
+    if ($null -ne $tmpNode) { $masterVlhNode = $tmpNode.CloneNode($true) }
+}
+
+# ── PURGE OFF-PLATE & ORPHANED OBJECTS (COMPLETELY) ───────────────────────────
+$validBuildItems = @()
+$killedIds = New-Object System.Collections.Generic.HashSet[string]
+
+foreach ($item in $buildItems) {
+    $id = $item.GetAttribute('objectid')
+    [double[]]$tx = Parse-Tx ($item.GetAttribute('transform'))
+    $x = $tx[9]; $y = $tx[10]
+
+    if ($x -lt -50 -or $x -gt 300 -or $y -lt -50 -or $y -gt 300) {
+        $item.ParentNode.RemoveChild($item) | Out-Null
+    } else {
+        $validBuildItems += $item
+    }
+}
+$buildItems = $validBuildItems
+
+$protectedIds = New-Object System.Collections.Generic.HashSet[string]
+foreach ($item in $buildItems) { $protectedIds.Add($item.GetAttribute('objectid')) | Out-Null }
+
+$added = $true
+while ($added) {
+    $added = $false
+    foreach ($id in @($protectedIds)) {
+        $obj = $objById[$id]
+        if ($null -ne $obj) {
+            foreach ($comp in $obj.SelectNodes('.//m:component', $xns)) {
+                if ($protectedIds.Add($comp.GetAttribute('objectid'))) { $added = $true }
+            }
+        }
+    }
+}
+
+foreach ($objId in @($objById.Keys)) {
+    if (-not $protectedIds.Contains($objId)) {
+        $killedIds.Add($objId) | Out-Null
+        $obj = $objById[$objId]
+        $obj.ParentNode.RemoveChild($obj) | Out-Null
+        $objById.Remove($objId)
+
+        if ($hasSettings) {
+            if ($null -ne $settObjById[$objId]) {
+                $settObjById[$objId].ParentNode.RemoveChild($settObjById[$objId]) | Out-Null
+            }
+            foreach ($node in $settings.SelectNodes("//*[@object_id='$objId']")) {
+                $node.ParentNode.RemoveChild($node) | Out-Null
+            }
+        }
+    }
+}
+# ──────────────────────────────────────────────────────────────────────────────
+
 $report = New-Object System.Collections.Generic.List[string]
 
 # ── Outlier Detection (Isolate Version Text) ──────────────────────────────────
@@ -138,7 +208,7 @@ $report.Add("Items to merge: $totalItems")
 $report.Add("Lone (untouched) target items: $lone")
 $report.Add("Merge plan: $($mergePlan -join ', ') ($($mergePlan.Count) groups)")
 
-# ── DYNAMIC MESH FILE TRACKER (Handles multiple different source models safely)
+# ── DYNAMIC MESH FILE TRACKER ─────────────────────────────────────────────────
 $emptyShell = "<?xml version=`"1.0`" encoding=`"UTF-8`"?>`n<model unit=`"millimeter`" xml:lang=`"en-US`" xmlns=`"http://schemas.microsoft.com/3dmanufacturing/core/2015/02`" xmlns:p=`"http://schemas.microsoft.com/3dmanufacturing/production/2015/06`" requiredextensions=`"p`">`n  <metadata name=`"BambuStudio:3mfVersion`">1</metadata>`n  <resources>`n  </resources>`n  <build/>`n</model>"
 
 $sourceToMasterMap = @{}
@@ -147,7 +217,6 @@ $modelFileCounter = 1
 
 # ── Dynamic Merge Loop ────────────────────────────────────────────────────────
 $cursor = 0; $groupCount = 1
-$killedIds = New-Object System.Collections.Generic.HashSet[string]
 $survivorFaces = @{}
 $survivorNames = @{}
 
@@ -228,11 +297,11 @@ foreach ($groupSize in $mergePlan) {
             [double[]]$bakedTx = Mul-Tx $invTxNew (Mul-Tx $origTx $compTx)
 
             $newComp = $xml.CreateElement('component', $nsCore)
-            $newComp.SetAttribute('path', $nsProd, $masterPathForThisGroup)
+            $newComp.SetAttribute('path', $nsProd, $masterPathForThisGroup) | Out-Null
             $newComp.SetAttribute('objectid', $c.GetAttribute('objectid'))
 
             $compUuid = $compIndex.ToString("x8") + $compBaseSuffix
-            $newComp.SetAttribute('UUID', $nsProd, $compUuid)
+            $newComp.SetAttribute('UUID', $nsProd, $compUuid) | Out-Null
             $compIndex++
 
             $newComp.SetAttribute('transform', (Fmt-Tx $bakedTx))
@@ -295,7 +364,7 @@ foreach ($groupSize in $mergePlan) {
     }
 
     $objUuidStr = $objUuidCounter.ToString("x8") + "-71cb-4c03-9d28-80fed5dfa1dc"
-    $groupObjs[0].SetAttribute('UUID', $nsProd, $objUuidStr)
+    $groupObjs[0].SetAttribute('UUID', $nsProd, $objUuidStr) | Out-Null
     $objUuidCounter++
 
     if ($hasSettings) {
@@ -356,7 +425,7 @@ for ($li = ($mergeItems.Count - $lone); $li -lt $mergeItems.Count; $li++) {
     $loneObj = $objById[$loneId]
 
     $objUuidStr = $objUuidCounter.ToString("x8") + "-71cb-4c03-9d28-80fed5dfa1dc"
-    if ($null -ne $loneObj) { $loneObj.SetAttribute('UUID', $nsProd, $objUuidStr) }
+    if ($null -ne $loneObj) { $loneObj.SetAttribute('UUID', $nsProd, $objUuidStr) | Out-Null }
     $objUuidCounter++
 
     $identifyIdCounter += 442
@@ -398,7 +467,7 @@ for ($li = ($mergeItems.Count - $lone); $li -lt $mergeItems.Count; $li++) {
         $modelFileCounter++
 
         foreach ($c in $loneComps) {
-            $c.SetAttribute('path', $nsProd, $masterPathForThisGroup)
+            $c.SetAttribute('path', $nsProd, $masterPathForThisGroup) | Out-Null
         }
     }
 
@@ -418,14 +487,8 @@ if ($hasSettings -and ($plate = $settings.SelectSingleNode('//plate'))) {
 # ── GLOBAL OBJECT ID RENUMBERING ──────────────────────────────────────────────
 $survivingObjects = @($xml.SelectNodes('//m:resources/m:object', $xns)) | Sort-Object { [int]$_.GetAttribute('id') }
 
-$minId = 999999
-foreach ($obj in $survivingObjects) {
-    $curr = [int]$obj.GetAttribute('id')
-    if ($curr -lt $minId) { $minId = $curr }
-}
-
 $idMap = @{}
-$newIdCounter = $minId
+$newIdCounter = 1  # <-- Start numbering at 1 so objects align perfectly!
 
 foreach ($obj in $survivingObjects) {
     $oldId = $obj.GetAttribute('id')
@@ -568,11 +631,48 @@ foreach ($o in $xml.SelectNodes('//m:resources/m:object', $xns)) {
 }
 
 # ── GEOMETRY GARBAGE COLLECTION & RELS REBUILD ────────────────────────────────
+# FINAL SWEEP: Protect ANY file still referenced anywhere in the XML
+foreach ($node in $xml.SelectNodes('//*[@*[local-name()="path"]]', $xns)) {
+    $relPath = $node.GetAttribute('path', $nsProd)
+    if ([string]::IsNullOrWhiteSpace($relPath)) { $relPath = $node.GetAttribute('p:path') }
+    if ([string]::IsNullOrWhiteSpace($relPath)) { $relPath = $node.GetAttribute('path') }
+    if (-not [string]::IsNullOrWhiteSpace($relPath)) {
+        if (-not $relPath.StartsWith('/')) { $relPath = '/' + $relPath }
+        $usedModelPaths.Add($relPath) | Out-Null
+    }
+}
+
 $allModelFiles = Get-ChildItem -Path $objectsDir -Filter '*.model'
 foreach ($f in $allModelFiles) {
     $checkPath = "/3D/Objects/" + $f.Name
     if (-not $usedModelPaths.Contains($checkPath)) {
         Remove-Item $f.FullName -Force
+    }
+}
+
+# ── GLOBAL VARIABLE LAYER HEIGHT SYNCHRONIZATION ──────────────────────────────
+if ($hasSettings) {
+    $allSettObjs = @($settings.SelectNodes('//*[local-name()="object"]'))
+
+    # 1. Force exact Master XML node onto EVERY object (wipes broken ones)
+    if ($null -ne $masterVlhNode) {
+        foreach ($sObj in $allSettObjs) {
+            $existingVlh = $sObj.SelectSingleNode('layer_height_profile')
+            if ($null -ne $existingVlh) {
+                $sObj.RemoveChild($existingVlh) | Out-Null
+            }
+            $sObj.AppendChild($masterVlhNode.CloneNode($true)) | Out-Null
+        }
+    }
+
+    # 2. Write the text file using the exact 1 to N loop (mimics Copy VLH.bat)
+    if ($null -ne $vlhDataString -and $null -ne $vlhPath) {
+        $newVlhLines = @()
+        $objCount = $allSettObjs.Count
+        for ($i = 1; $i -le $objCount; $i++) {
+            $newVlhLines += "object_id=$i|$vlhDataString"
+        }
+        [System.IO.File]::WriteAllText($vlhPath, ($newVlhLines -join "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
     }
 }
 
@@ -593,7 +693,7 @@ $relsLines += '</Relationships>'
 # ── PURGE STALE UI CACHES (The Pick Buffer Fix) ───────────────────────────────
 Get-ChildItem -Path (Join-Path $WorkDir "Metadata") -Filter "pick_*.png" -ErrorAction SilentlyContinue | Remove-Item -Force
 Get-ChildItem -Path (Join-Path $WorkDir "Metadata") -Filter "plate_*.png" -ErrorAction SilentlyContinue | Remove-Item -Force
-Get-ChildItem -Path (Join-Path $WorkDir "Metadata") -Filter "plate_*.json" -ErrorAction SilentlyContinue | Remove-Item -Force  # <-- ADD THIS
+Get-ChildItem -Path (Join-Path $WorkDir "Metadata") -Filter "plate_*.json" -ErrorAction SilentlyContinue | Remove-Item -Force
 
 # ── Repack ────────────────────────────────────────────────────────────────────
 Add-Type -AssemblyName 'System.IO.Compression.FileSystem'
@@ -601,11 +701,13 @@ if (Test-Path $OutputPath) { Remove-Item $OutputPath -Force }
 $zip = [System.IO.Compression.ZipFile]::Open($OutputPath, 'Create')
 Get-ChildItem $WorkDir -Recurse -File | ForEach-Object {
     $rel = $_.FullName.Substring($WorkDir.Length).TrimStart('\','/').Replace('\','/')
-    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $rel)
+    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $rel) | Out-Null
 }
 $zip.Dispose()
 
 $finalCount = $mergePlan.Count + $lone
 $report.Add("Final object count: $finalCount")
-$report | Set-Content -Path $ReportPath -Encoding UTF8
+if ($ReportPath -ne "nul" -and -not [string]::IsNullOrWhiteSpace($ReportPath)) {
+    $report | Set-Content -Path $ReportPath -Encoding UTF8
+}
 Write-Host "Success! Ignored: $($ignoredItems.Count). Merged: $groupCount groups. Final Target Count: $finalCount."
