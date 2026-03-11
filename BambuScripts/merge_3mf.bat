@@ -104,6 +104,8 @@ set "SLICED_OUT=!INPUTDIR!!INPUTBASE!.gcode.3mf"
 set "SLICED_FINAL_TEMP=!INPUTDIR!!FINALBASE!.gcode.3mf"
 
 echo   Slicing Merged Plate...
+timeout /t 3 /nobreak > nul
+
 "!BAMBU_GUI!" --debug 3 --no-check --slice 1 --min-save --export-3mf "!SLICED_OUT!" "!INPUTDIR!!INPUTNAME!" > "%TEMP%\slice_log.txt" 2>&1
 if not exist "!SLICED_OUT!" (
     echo   WARNING: Slicing failed. Here is the error from Bambu Studio:
