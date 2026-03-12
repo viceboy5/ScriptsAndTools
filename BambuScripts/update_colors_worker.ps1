@@ -41,11 +41,8 @@ $projPath = Join-Path $WorkDir "Metadata\project_settings.config"
 if (Test-Path $projPath) {
     $projContent = [System.IO.File]::ReadAllText($projPath, [System.Text.Encoding]::UTF8)
 
-    # Isolate strictly the filament_colour array (ignores extruder_colour entirely)
     if ($projContent -match '(?is)"filament_colou?r"\s*:\s*\[(.*?)\]') {
         $arrayContent = $matches[1]
-
-        # Extract each hex color inside the brackets in order
         $hexMatches = [regex]::Matches($arrayContent, '#[0-9a-fA-F]{6,8}')
         $slotIndex = 1
 
@@ -67,26 +64,23 @@ if (Test-Path $projPath) {
 
 # 3.5. ROBUST DETECTOR: Find exactly which slots are actively used
 $UsedSlots = New-Object System.Collections.Generic.HashSet[string]
-$UsedSlots.Add("1") | Out-Null # Slot 1 is always the fallback default
+$UsedSlots.Add("1") | Out-Null
 
 $modSetPath = Join-Path $WorkDir "Metadata\model_settings.config"
 if (Test-Path $modSetPath) {
     try {
-        # Use a true XML parser so we don't trip over attribute formatting/ordering
         [xml]$modXml = [System.IO.File]::ReadAllText($modSetPath, [System.Text.Encoding]::UTF8)
         foreach ($node in $modXml.SelectNodes('//metadata[contains(@key, "extruder")]')) {
             $val = $node.GetAttribute('value')
             if (-not [string]::IsNullOrWhiteSpace($val)) { $UsedSlots.Add($val) | Out-Null }
         }
     } catch {
-        # Failsafe broad regex just in case the XML is technically malformed
         $modContent = [System.IO.File]::ReadAllText($modSetPath, [System.Text.Encoding]::UTF8)
         $extMatches = [regex]::Matches($modContent, '(?i)extruder[^>]*?"(\d+)"')
         foreach ($m in $extMatches) { $UsedSlots.Add($m.Groups[1].Value) | Out-Null }
     }
 }
 
-# Also scan the core 3D mesh file to catch any complex multi-color painted components
 $modelFile = (Get-ChildItem -Path $WorkDir -Filter '3dmodel.model' -Recurse | Select-Object -First 1).FullName
 if ($modelFile -and (Test-Path $modelFile)) {
     try {
@@ -96,7 +90,6 @@ if ($modelFile -and (Test-Path $modelFile)) {
     } catch {}
 }
 
-# Filter down to only the slots that are actually in use on the plate
 $ActiveSlotMap = [ordered]@{}
 foreach ($hex in $SlotMap.Keys) {
     if ($UsedSlots.Contains($SlotMap[$hex])) {
@@ -109,22 +102,27 @@ if ($ActiveSlotMap.Count -eq 0) {
     exit
 }
 
-# 4. UI Function
+# 4. UPGRADED UI FUNCTION
 function Show-ColorPicker([string]$UnknownHex, [string]$SlotId) {
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Mapping Colors: $FileName"
-    $form.Size = New-Object System.Drawing.Size(400, 240)
+    $form.Size = New-Object System.Drawing.Size(550, 320)
+    $form.MinimumSize = New-Object System.Drawing.Size(450, 280)
     $form.StartPosition = 'CenterScreen'
     $form.TopMost = $true
-    $form.FormBorderStyle = 'FixedDialog'
-    $form.MaximizeBox = $false
+
+    # Enable resizing
+    $form.FormBorderStyle = 'Sizable'
 
     $slotText = if ([string]::IsNullOrWhiteSpace($SlotId)) { "(Unknown Slot)" } else { "(Filament Slot $SlotId)" }
 
     $label = New-Object System.Windows.Forms.Label
-    $label.Text = "File: $FileName`n`nRogue Hex: $UnknownHex $slotText`nPlease map this to a color from your library:"
-    $label.Location = New-Object System.Drawing.Point(15, 10)
+    $label.Text = "File: $FileName`n`nRogue Hex: $UnknownHex $slotText`nPlease select or type a color from your library:"
+    $label.Location = New-Object System.Drawing.Point(15, 15)
+    # Removing fixed size and using AutoSize so the bigger font doesn't get cut off
     $label.AutoSize = $true
+    $label.Anchor = 'Top, Left, Right'
+    $label.Font = New-Object System.Drawing.Font("Segoe UI", 10)
     $form.Controls.Add($label)
 
     $FormatHex = {
@@ -135,60 +133,88 @@ function Show-ColorPicker([string]$UnknownHex, [string]$SlotId) {
 
     $lblOrig = New-Object System.Windows.Forms.Label
     $lblOrig.Text = "Original:"
-    $lblOrig.Location = New-Object System.Drawing.Point(15, 75)
+    $lblOrig.Location = New-Object System.Drawing.Point(15, 95)
     $lblOrig.AutoSize = $true
+    $lblOrig.Font = New-Object System.Drawing.Font("Segoe UI", 10)
     $form.Controls.Add($lblOrig)
 
     $swatchOrig = New-Object System.Windows.Forms.Panel
-    $swatchOrig.Location = New-Object System.Drawing.Point(15, 95)
-    $swatchOrig.Size = New-Object System.Drawing.Size(40, 40)
+    $swatchOrig.Location = New-Object System.Drawing.Point(15, 120)
+    $swatchOrig.Size = New-Object System.Drawing.Size(55, 55)
     $swatchOrig.BorderStyle = 'Fixed3D'
     try { $swatchOrig.BackColor = [System.Drawing.ColorTranslator]::FromHtml((&$FormatHex $UnknownHex)) } catch {}
     $form.Controls.Add($swatchOrig)
 
     $combo = New-Object System.Windows.Forms.ComboBox
-    $combo.Location = New-Object System.Drawing.Point(70, 105)
-    $combo.Size = New-Object System.Drawing.Size(200, 20)
-    $combo.DropDownStyle = 'DropDownList'
+    $combo.Location = New-Object System.Drawing.Point(85, 135)
+    $combo.Size = New-Object System.Drawing.Size(320, 28)
+    $combo.Anchor = 'Top, Left, Right'
+    $combo.Font = New-Object System.Drawing.Font("Segoe UI", 11)
+
+    # UI Upgrades: Tall dropdown list, Type-to-search enabled
+    $combo.MaxDropDownItems = 25
+    $combo.DropDownStyle = 'DropDown'
+    $combo.AutoCompleteMode = 'SuggestAppend'
+    $combo.AutoCompleteSource = 'ListItems'
+
     foreach ($key in $LibraryColors.Keys) { $combo.Items.Add($key) | Out-Null }
     $form.Controls.Add($combo)
 
     $lblNew = New-Object System.Windows.Forms.Label
     $lblNew.Text = "New:"
-    $lblNew.Location = New-Object System.Drawing.Point(285, 75)
+    $lblNew.Location = New-Object System.Drawing.Point(425, 95)
     $lblNew.AutoSize = $true
+    $lblNew.Anchor = 'Top, Right'
+    $lblNew.Font = New-Object System.Drawing.Font("Segoe UI", 10)
     $form.Controls.Add($lblNew)
 
     $swatchNew = New-Object System.Windows.Forms.Panel
-    $swatchNew.Location = New-Object System.Drawing.Point(285, 95)
-    $swatchNew.Size = New-Object System.Drawing.Size(40, 40)
+    $swatchNew.Location = New-Object System.Drawing.Point(425, 120)
+    $swatchNew.Size = New-Object System.Drawing.Size(55, 55)
     $swatchNew.BorderStyle = 'Fixed3D'
+    $swatchNew.Anchor = 'Top, Right'
     $form.Controls.Add($swatchNew)
 
-    $combo.add_SelectedIndexChanged({
-        $selHex = $LibraryColors[$combo.SelectedItem]
-        try { $swatchNew.BackColor = [System.Drawing.ColorTranslator]::FromHtml((&$FormatHex $selHex)) } catch {}
+    # Dynamic color update as you type
+    $combo.add_TextChanged({
+        if ($LibraryColors.Contains($combo.Text)) {
+            $selHex = $LibraryColors[$combo.Text]
+            try { $swatchNew.BackColor = [System.Drawing.ColorTranslator]::FromHtml((&$FormatHex $selHex)) } catch {}
+        } else {
+            # FIX: Correctly pull the default Windows gray background so it doesn't crash on invalid text
+            $swatchNew.BackColor = [System.Drawing.SystemColors]::Control
+        }
     })
 
     if ($combo.Items.Count -gt 0) { $combo.SelectedIndex = 0 }
 
     $btn = New-Object System.Windows.Forms.Button
     $btn.Text = "Map Color"
-    $btn.Location = New-Object System.Drawing.Point(235, 155)
-    $btn.Size = New-Object System.Drawing.Size(100, 25)
-    $btn.DialogResult = 'OK'
+    $btn.Location = New-Object System.Drawing.Point(380, 220)
+    $btn.Size = New-Object System.Drawing.Size(130, 35)
+    $btn.Anchor = 'Bottom, Right'
+    $btn.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
     $form.Controls.Add($btn)
     $form.AcceptButton = $btn
 
-    if ($form.ShowDialog() -eq 'OK' -and $null -ne $combo.SelectedItem) {
-        return $LibraryColors[$combo.SelectedItem].ToUpper()
+    # Validate the typed text on click
+    $btn.add_Click({
+        if ($LibraryColors.Contains($combo.Text)) {
+            $form.DialogResult = 'OK'
+            $form.Close()
+        } else {
+            [System.Windows.Forms.MessageBox]::Show("Please select or type a valid color name from the list.", "Invalid Color", 'OK', 'Warning')
+        }
+    })
+
+    if ($form.ShowDialog() -eq 'OK') {
+        return $LibraryColors[$combo.Text].ToUpper()
     }
     return $UnknownHex.ToUpper()
 }
 
 # 5. Trigger UI for unmapped, ACTIVE colors ONLY
 foreach ($hex in @($ActiveSlotMap.Keys)) {
-    # Check both 7-char and 9-char variations against the cache
     $checkHex = $hex
     if ($checkHex.Length -eq 7) { $checkHex += "FF" }
 
@@ -223,10 +249,8 @@ try {
         }
 
         if ($modified) {
-            # Update the extracted file for the merge worker
             [System.IO.File]::WriteAllText($file.FullName, $content, (New-Object System.Text.UTF8Encoding($false)))
 
-            # Update the original .3mf archive so the colors survive a revert
             if ($null -ne $zip) {
                 $relPath = $file.FullName.Substring($WorkDir.Length).TrimStart('\','/').Replace('\','/')
                 $entry = $zip.GetEntry($relPath)
@@ -243,7 +267,6 @@ try {
         }
     }
 } finally {
-    # Destroy the file lock so the batch script can safely rename the file
     if ($null -ne $zip) { $zip.Dispose() }
     $zip = $null
     Remove-Variable zip -ErrorAction SilentlyContinue
