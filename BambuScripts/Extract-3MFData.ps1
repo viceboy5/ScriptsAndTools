@@ -20,7 +20,30 @@ if ($ConsoleOnly) {
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $colorCsvPath = Join-Path $scriptDir "colorNamesCSV.csv"
 
-# --- 1. Define the Native C# Engine ---
+# --- 1. Load the Reverse-Lookup Color Dictionary ---
+$LibraryNames = @{}
+if (Test-Path $colorCsvPath) {
+    # Import CSV assuming columns: Hex, Name, R, G, B
+    $csvData = Import-Csv -Path $colorCsvPath -Header @("Hex", "Name", "R", "G", "B")
+    foreach ($row in $csvData) {
+        $name = if ($null -ne $row.Name) { $row.Name.Trim() } else { "" }
+        $hex = if ($null -ne $row.Hex) { $row.Hex.Trim() } else { "" }
+
+        # Skip invalid rows
+        if ([string]::IsNullOrWhiteSpace($name) -or $name -eq "N/A") { continue }
+
+        # Normalize hex to 8-character (plus the #)
+        if ($hex -match '^#[0-9a-fA-F]{6}$') { $hex += "FF" }
+
+        if ($hex -match '^#[0-9a-fA-F]{8}$') {
+            $LibraryNames[$hex.ToUpper()] = $name
+        }
+    }
+} else {
+    Write-Warning "Could not find colorNamesCSV.csv for reverse lookup."
+}
+
+# --- 2. Define the Native C# Engine ---
 $csharpCode = @"
 using System;
 using System.IO;
@@ -42,16 +65,16 @@ public class GcodeAnalyzer {
             bool isRelative = false;
             double currentE = 0;
             double maxE = 0;
-            
+
             this.PrintTime = "Not found";
             this.ColorChanges = 0;
 
             while ((line = reader.ReadLine()) != null) {
                 line = line.TrimStart();
                 if (line.Length == 0) continue;
-                
+
                 char c = line[0];
-                
+
                 if (c == 'G') {
                     if (line.StartsWith("G1 ") || line.StartsWith("G0 ")) {
                         int eIdx = line.IndexOf(" E");
@@ -60,9 +83,9 @@ public class GcodeAnalyzer {
                             int endIdx = line.IndexOf(' ', startIdx);
                             if (endIdx == -1) endIdx = line.IndexOf(';', startIdx);
                             if (endIdx == -1) endIdx = line.Length;
-                            
+
                             string eStr = line.Substring(startIdx, endIdx - startIdx);
-                            double eVal; 
+                            double eVal;
                             if (double.TryParse(eStr, NumberStyles.Any, CultureInfo.InvariantCulture, out eVal)) {
                                 if (isRelative) currentE += eVal;
                                 else currentE = eVal;
@@ -75,7 +98,7 @@ public class GcodeAnalyzer {
                                 }
                             }
                         }
-                    } 
+                    }
                     else if (line.StartsWith("G92")) {
                         int eIdx = line.IndexOf(" E");
                         if (eIdx > -1) {
@@ -83,9 +106,9 @@ public class GcodeAnalyzer {
                             int endIdx = line.IndexOf(' ', startIdx);
                             if (endIdx == -1) endIdx = line.IndexOf(';', startIdx);
                             if (endIdx == -1) endIdx = line.Length;
-                            
+
                             string eStr = line.Substring(startIdx, endIdx - startIdx);
-                            double eVal; 
+                            double eVal;
                             if (double.TryParse(eStr, NumberStyles.Any, CultureInfo.InvariantCulture, out eVal)) {
                                 currentE = eVal;
                                 maxE = currentE;
@@ -95,7 +118,7 @@ public class GcodeAnalyzer {
                             maxE = 0;
                         }
                     }
-                } 
+                }
                 else if (c == ';') {
                     if (line.StartsWith("; FLUSH_START")) inFlush = true;
                     else if (line.StartsWith("; FLUSH_END")) inFlush = false;
@@ -123,14 +146,14 @@ public class GcodeAnalyzer {
                             this.PrintTime = pt;
                         }
                     }
-                } 
+                }
                 else if (c == 'M') {
                     if (line.StartsWith("M83")) isRelative = true;
                     else if (line.StartsWith("M82")) isRelative = false;
                     else if (line.StartsWith("M620 S")) this.ColorChanges++;
                 }
             }
-            
+
             this.FlushGrams = flushE * gramsPerMm;
             this.TowerGrams = towerE * gramsPerMm;
         }
@@ -145,38 +168,42 @@ try {
     $zipArchive = [System.IO.Compression.ZipFile]::OpenRead($InputFile)
 
     $totalGrams = 0.0; $totalMeters = 0.0; $objCount = 0
-    
+
     $filData = @(
-        @{ g = 0; color = "" }, @{ g = 0; color = "" }, 
-        @{ g = 0; color = "" }, @{ g = 0; color = "" }, @{ g = 0; color = "" } 
+        @{ g = 0; color = "" }, @{ g = 0; color = "" },
+        @{ g = 0; color = "" }, @{ g = 0; color = "" }, @{ g = 0; color = "" }
     )
 
-    # --- 2. Extract Metadata (XML) ---
+    # --- 3. Extract Metadata (XML) ---
     $configEntry = $zipArchive.Entries | Where-Object { $_.FullName -replace '\\', '/' -match "Metadata/slice_info\.config$" }
     if ($configEntry) {
         $configStream = $configEntry.Open()
         $configReader = [System.IO.StreamReader]::new($configStream)
         $configContent = $configReader.ReadToEnd()
         $configReader.Close()
-        
+
         try {
             [xml]$xml = $configContent
-            
+
             foreach ($i in 1..4) {
                 $node = $xml.SelectSingleNode("//filament[@id='$i']")
                 if ($node) {
                     $weight = 0.0
                     [double]::TryParse($node.used_g, [System.Globalization.NumberStyles]::Any, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$weight) | Out-Null
-                    
+
                     if ($weight -gt 0) {
                         $filData[$i].g = [math]::Round($weight, 2)
-                        $hexColor = $node.color
-                        
-                        if (Test-Path $colorCsvPath) {
-                            $mappedName = Select-String -Path $colorCsvPath -Pattern "(?i)$hexColor" | Select-Object -First 1
-                            if ($mappedName) { $hexColor = $mappedName.Line.Split(',')[1].Trim() }
+
+                        # Normalize hex code to guarantee reverse lookup matches
+                        $hexColor = $node.color.ToUpper()
+                        if ($hexColor.Length -eq 7) { $hexColor += "FF" }
+
+                        if ($LibraryNames.Contains($hexColor)) {
+                            $filData[$i].color = $LibraryNames[$hexColor]
+                        } else {
+                            # Fallback to the raw hex if it's completely missing from your CSV
+                            $filData[$i].color = $hexColor
                         }
-                        $filData[$i].color = $hexColor
                     }
                 }
             }
@@ -187,9 +214,9 @@ try {
                 foreach ($o in $objs) {
                     $objName = $o.name
                     if ($objName -match '(?i)text|version') { continue }
-                    
+
                     # Only parse numbers that explicitly follow our safe "MergedGroup_" tag
-                    if ($objName -match 'MergedGroup_(\d+)$') { $objCount += [int]$matches[1] } 
+                    if ($objName -match 'MergedGroup_(\d+)$') { $objCount += [int]$matches[1] }
                     else { $objCount += 1 }
                 }
             }
@@ -204,7 +231,7 @@ try {
     $gramsPerMm = 0.0
     if ($totalMeters -gt 0) { $gramsPerMm = $totalGrams / ($totalMeters * 1000) }
 
-    # --- 3. Pass the torch to C# (Full Plate) ---
+    # --- 4. Pass the torch to C# (Full Plate) ---
     $gcodeEntry = $zipArchive.Entries | Where-Object { $_.FullName -like "*.gcode" } | Select-Object -First 1
     $analyzer = New-Object GcodeAnalyzer
     if ($gcodeEntry) {
@@ -213,7 +240,7 @@ try {
     }
     $zipArchive.Dispose()
 
-    # --- 4. Crunch Final Math & Format ---
+    # --- 5. Crunch Final Math & Format ---
     $modelGrams = $totalGrams - $analyzer.FlushGrams - $analyzer.TowerGrams
 
     $d = 0; $h = 0; $m = 0
@@ -221,14 +248,14 @@ try {
     if ($analyzer.PrintTime -match '(\d+)h') { $h = [int]$matches[1] }
     if ($analyzer.PrintTime -match '(\d+)m') { $m = [int]$matches[1] }
     if ($analyzer.PrintTime -match '(\d+)s' -and [int]$matches[1] -ge 30) { $m++ }
-    
+
     $h += ($d * 24)
     if ($m -ge 60) { $m -= 60; $h++ }
 
     $totalMinutes = ($h * 60) + $m
     $actualColorSwaps = [math]::Max(0, ($analyzer.ColorChanges - 1))
-    
-    # --- 5. Extract Single Object Time (If Provided) ---
+
+    # --- 6. Extract Single Object Time (If Provided) ---
     $timeAdd = 0
     $singlePrintTimeStr = "N/A"
     
