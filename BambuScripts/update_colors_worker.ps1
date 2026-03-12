@@ -32,7 +32,7 @@ if (Test-Path $colorCsvPath) {
 $SessionCache = @{}
 foreach ($val in $LibraryColors.Values) { $SessionCache[$val.ToUpper()] = $val.ToUpper() }
 
-# 3. Target project_settings.config as the absolute Source of Truth
+# 3. Target project_settings.config as the absolute Source of Truth for the Palette
 $SlotMap = [ordered]@{}
 $projPath = Join-Path $WorkDir "Metadata\project_settings.config"
 
@@ -49,8 +49,6 @@ if (Test-Path $projPath) {
 
         foreach ($m in $hexMatches) {
             $hexColor = $m.Value.ToUpper()
-
-            # Record the color and its 1-based Slot Index
             if (-not $SlotMap.Contains($hexColor)) {
                 $SlotMap[$hexColor] = $slotIndex.ToString()
             }
@@ -65,12 +63,51 @@ if (Test-Path $projPath) {
     exit
 }
 
-if ($SlotMap.Count -eq 0) {
-    Write-Host "No filament colors found to process." -ForegroundColor Yellow
+# 3.5. ROBUST DETECTOR: Find exactly which slots are actively used
+$UsedSlots = New-Object System.Collections.Generic.HashSet[string]
+$UsedSlots.Add("1") | Out-Null # Slot 1 is always the fallback default
+
+$modSetPath = Join-Path $WorkDir "Metadata\model_settings.config"
+if (Test-Path $modSetPath) {
+    try {
+        # Use a true XML parser so we don't trip over attribute formatting/ordering
+        [xml]$modXml = [System.IO.File]::ReadAllText($modSetPath, [System.Text.Encoding]::UTF8)
+        foreach ($node in $modXml.SelectNodes('//metadata[contains(@key, "extruder")]')) {
+            $val = $node.GetAttribute('value')
+            if (-not [string]::IsNullOrWhiteSpace($val)) { $UsedSlots.Add($val) | Out-Null }
+        }
+    } catch {
+        # Failsafe broad regex just in case the XML is technically malformed
+        $modContent = [System.IO.File]::ReadAllText($modSetPath, [System.Text.Encoding]::UTF8)
+        $extMatches = [regex]::Matches($modContent, '(?i)extruder[^>]*?"(\d+)"')
+        foreach ($m in $extMatches) { $UsedSlots.Add($m.Groups[1].Value) | Out-Null }
+    }
+}
+
+# Also scan the core 3D mesh file to catch any complex multi-color painted components
+$modelFile = (Get-ChildItem -Path $WorkDir -Filter '3dmodel.model' -Recurse | Select-Object -First 1).FullName
+if ($modelFile -and (Test-Path $modelFile)) {
+    try {
+        $modelContent = [System.IO.File]::ReadAllText($modelFile)
+        $matMatches = [regex]::Matches($modelContent, '(?i)materialid="(\d+)"')
+        foreach ($m in $matMatches) { $UsedSlots.Add($m.Groups[1].Value) | Out-Null }
+    } catch {}
+}
+
+# Filter down to only the slots that are actually in use on the plate
+$ActiveSlotMap = [ordered]@{}
+foreach ($hex in $SlotMap.Keys) {
+    if ($UsedSlots.Contains($SlotMap[$hex])) {
+        $ActiveSlotMap[$hex] = $SlotMap[$hex]
+    }
+}
+
+if ($ActiveSlotMap.Count -eq 0) {
+    Write-Host "No active filament colors found to process." -ForegroundColor Yellow
     exit
 }
 
-# 4. UI Function (Now larger and displays the Filename)
+# 4. UI Function
 function Show-ColorPicker([string]$UnknownHex, [string]$SlotId) {
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Mapping Colors: $FileName"
@@ -147,29 +184,28 @@ function Show-ColorPicker([string]$UnknownHex, [string]$SlotId) {
     return $UnknownHex.ToUpper()
 }
 
-# 5. Trigger UI for unmapped colors
-foreach ($hex in @($SlotMap.Keys)) {
+# 5. Trigger UI for unmapped, ACTIVE colors ONLY
+foreach ($hex in @($ActiveSlotMap.Keys)) {
     # Check both 7-char and 9-char variations against the cache
     $checkHex = $hex
     if ($checkHex.Length -eq 7) { $checkHex += "FF" }
 
     if (-not $SessionCache.Contains($checkHex) -and -not $SessionCache.Contains($hex)) {
-        $mappedHex = Show-ColorPicker -UnknownHex $hex -SlotId $SlotMap[$hex]
+        $mappedHex = Show-ColorPicker -UnknownHex $hex -SlotId $ActiveSlotMap[$hex]
         $SessionCache[$hex] = $mappedHex
     }
 }
 
-# 6. Apply Replacements safely across all files
+# 6. Apply Replacements safely across all files (Only touches verified active colors)
 $allTextFiles = Get-ChildItem -Path $WorkDir -Recurse -File | Where-Object { $_.Name -match '\.(xml|model|config|json)$' }
 foreach ($file in $allTextFiles) {
     $content = [System.IO.File]::ReadAllText($file.FullName, [System.Text.Encoding]::UTF8)
     $modified = $false
 
-    foreach ($oldHex in $SlotMap.Keys) {
+    foreach ($oldHex in $ActiveSlotMap.Keys) {
         $newHex = if ($SessionCache.Contains($oldHex)) { $SessionCache[$oldHex] } else { $SessionCache[$oldHex + "FF"] }
 
         if ($null -ne $newHex -and $newHex -ne $oldHex) {
-            # Only trigger a replacement and save if the document actually contains the string
             if ($content -match "(?i)$oldHex") {
                 $content = $content -ireplace [regex]::Escape($oldHex), $newHex
                 $modified = $true
