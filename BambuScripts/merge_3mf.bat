@@ -2,8 +2,10 @@
 setlocal EnableDelayedExpansion
 
 set "SCRIPT=%~dp0merge_3mf_worker.ps1"
-set "ERRORS=0"
-set "PROCESSED=0"
+set "PREP_ERRORS=0"
+set "PREP_PROCESSED=0"
+set "SLICE_ERRORS=0"
+set "SLICE_PROCESSED=0"
 set "TOTAL=0"
 
 if "%~1"=="" exit /b 1
@@ -51,16 +53,32 @@ set /p "CHOICE_COLORS=Scan and pick new colors? (Y/N): "
 if /I "!CHOICE_COLORS!"=="Y" ( set "DO_COLORS=1" ) else ( set "DO_COLORS=0" )
 echo.
 
-for /f "usebackq delims=" %%F in ("%FILELIST%") do call :process_one "%%F"
+echo ==============================================================
+echo PHASE 1: PREPARATION ^& COLOR MAPPING (Requires User Input)
+echo ==============================================================
+for /f "usebackq delims=" %%F in ("%FILELIST%") do call :prepare_file "%%F"
+
+if "!DO_SLICE!"=="0" goto skip_slicing_phase
+
+echo.
+echo ==============================================================
+echo PHASE 2: SLICING ^& DATA EXTRACTION (Unattended)
+echo ==============================================================
+for /f "usebackq delims=" %%F in ("%FILELIST%") do call :slice_file "%%F"
+
+:skip_slicing_phase
 del "%FILELIST%" 2>nul
 
 echo -------------------------------------------
-echo Done. Succeeded: !PROCESSED!   Failed: !ERRORS!
+echo Done.
+echo Prepped: !PREP_PROCESSED! / Failed: !PREP_ERRORS!
+if "!DO_SLICE!"=="1" echo Sliced:  !SLICE_PROCESSED! / Failed: !SLICE_ERRORS!
 echo -------------------------------------------
 pause
 exit /b
 
-:process_one
+
+:prepare_file
 set "INPUT=%~1"
 set "INPUTDIR=%~dp1"
 set "INPUTNAME=%~nx1"
@@ -74,12 +92,12 @@ set "FINAL_PATH=!INPUTDIR!!FINALBASE!.3mf"
 
 for /f %%T in ('powershell -NoProfile -Command "[System.IO.Path]::GetRandomFileName()"') do set "WORK=%TEMP%\merge_work_%%T"
 
-set /a _IDX=PROCESSED+ERRORS+1
-echo [!_IDX!/!TOTAL!] Processing: !INPUTNAME!
+set /a _IDX=PREP_PROCESSED+PREP_ERRORS+1
+echo [!_IDX!/!TOTAL!] Preparing: !INPUTNAME!
 mkdir "!WORK!" 2>nul
 
 powershell -NoProfile -Command "Add-Type -AssemblyName 'System.IO.Compression.FileSystem'; [System.IO.Compression.ZipFile]::ExtractToDirectory('!INPUT!', '!WORK!')" >nul 2>&1
-if errorlevel 1 ( echo   ERROR: Extract failed. & set /a ERRORS+=1 & goto cleanup )
+if errorlevel 1 ( echo   ERROR: Extract failed. & set /a PREP_ERRORS+=1 & goto cleanup_prep )
 
 if "!DO_COLORS!"=="1" (
     echo   Checking/Updating Colors...
@@ -87,7 +105,7 @@ if "!DO_COLORS!"=="1" (
 )
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" -WorkDir "!WORK!" -InputPath "!INPUT!" -OutputPath "!TEMPOUT!" -ReportPath "nul"
-if errorlevel 1 ( echo   ERROR: Merge script failed. & set /a ERRORS+=1 & del "!TEMPOUT!" 2>nul & goto cleanup )
+if errorlevel 1 ( echo   ERROR: Merge script failed. & set /a PREP_ERRORS+=1 & del "!TEMPOUT!" 2>nul & goto cleanup_prep )
 
 ren "!INPUT!" "!NESTNAME!"
 ren "!TEMPOUT!" "!INPUTNAME!"
@@ -102,13 +120,28 @@ rmdir /s /q "!WORK_SINGLE!" 2>nul
 
 if not exist "!FINAL_PATH!" echo   [!] WARNING: Final.3mf failed to generate.
 
-if "!DO_SLICE!"=="0" goto skip_slicing
+set /a PREP_PROCESSED+=1
 
+:cleanup_prep
+rmdir /s /q "!WORK!" 2>nul
+goto :eof
+
+
+:slice_file
+set "INPUT=%~1"
+set "INPUTDIR=%~dp1"
+set "INPUTNAME=%~nx1"
+set "INPUTBASE=%~n1"
+set "FINALBASE=!INPUTBASE:~0,-4!Final"
+set "FINAL_PATH=!INPUTDIR!!FINALBASE!.3mf"
 set "BAMBU_GUI=C:\Program Files\Bambu Studio\bambu-studio.exe"
 set "SLICED_OUT=!INPUTDIR!!INPUTBASE!.gcode.3mf"
 set "SLICED_FINAL_TEMP=!INPUTDIR!!FINALBASE!.gcode.3mf"
 
-echo   Slicing Merged Plate...
+set /a _SIDX=SLICE_PROCESSED+SLICE_ERRORS+1
+echo [!_SIDX!/!TOTAL!] Slicing: !INPUTNAME!
+
+:: Delay to ensure Synology isn't holding the file
 timeout /t 3 /nobreak > nul
 
 "!BAMBU_GUI!" --debug 3 --no-check --slice 1 --min-save --export-3mf "!SLICED_OUT!" "!INPUTDIR!!INPUTNAME!" > "%TEMP%\slice_log.txt" 2>&1
@@ -118,7 +151,8 @@ if not exist "!SLICED_OUT!" (
     type "%TEMP%\slice_log.txt"
     echo   ======================================================================
     del "%TEMP%\slice_log.txt" 2>nul
-    goto skip_slicing
+    set /a SLICE_ERRORS+=1
+    goto :eof
 )
 del "%TEMP%\slice_log.txt" 2>nul
 
@@ -134,10 +168,6 @@ if exist "!SLICED_FINAL_TEMP!" (
 )
 del "%TEMP%\slice_log.txt" 2>nul
 
-:skip_slicing
 echo   OK --^> Success.
-set /a PROCESSED+=1
-
-:cleanup
-rmdir /s /q "!WORK!" 2>nul
+set /a SLICE_PROCESSED+=1
 goto :eof
