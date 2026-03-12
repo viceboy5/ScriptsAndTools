@@ -60,8 +60,14 @@ if /I "!CHOICE_SLICE!"=="Y" ( set "DO_SLICE=1" ) else ( set "DO_SLICE=0" )
 
 set /p "CHOICE_COLORS=Scan and pick new colors? (Y/N): "
 if /I "!CHOICE_COLORS!"=="Y" ( set "DO_COLORS=1" ) else ( set "DO_COLORS=0" )
-echo.
 
+:: --- NEW IMAGE PROMPT ---
+set /p "CHOICE_IMAGE=Generate composite image cards? (Y/N): "
+set "GEN_IMAGE_SWITCH="
+if /I "!CHOICE_IMAGE!"=="Y" ( set "GEN_IMAGE_SWITCH=-GenerateImage" )
+:: ------------------------
+
+echo.
 echo ==============================================================
 echo PHASE 1: PREPARATION ^& COLOR MAPPING (Requires User Input)
 echo ==============================================================
@@ -109,6 +115,35 @@ set "NEST_PATH=!INPUTDIR!!NESTNAME!"
 set /a _IDX=PREP_PROCESSED+PREP_ERRORS+PREP_SKIPPED+1
 echo.
 echo [!_IDX!/!TOTAL!] Preparing: !INPUTNAME!
+
+:: --- NEW PHASE 1 IMAGE CHECK ---
+if not "!GEN_IMAGE_SWITCH!"=="" (
+    set "FOUND_PNG="
+    for %%P in ("!INPUTDIR!*.png") do (
+        if /I not "%%~nxP"=="!INPUTBASE!.png" set "FOUND_PNG=%%P"
+    )
+
+    if "!FOUND_PNG!"=="" (
+        echo   [!] No custom image found for !INPUTNAME!
+        set /p "DROPPED_IMG=      Drag and drop an image here and press Enter (or press Enter to skip): "
+
+        if not "!DROPPED_IMG!"=="" (
+            :: Strip out the quotes Windows adds during drag-and-drop
+            set "DROPPED_IMG=!DROPPED_IMG:"=!"
+            if exist "!DROPPED_IMG!" (
+                copy /Y "!DROPPED_IMG!" "!INPUTDIR!" >nul
+                echo   [+] Image accepted and copied.
+            ) else (
+                echo   [-] Invalid path. Will use internal thumbnail later.
+            )
+        ) else (
+            echo   [*] Skipped. Will use internal thumbnail later.
+        )
+    ) else (
+        echo   [+] Found custom image: %%~nxFOUND_PNG%%
+    )
+)
+:: -------------------------------
 
 :: --- PRE-FLIGHT REVERT CHECK ---
 if exist "!NEST_PATH!" (
@@ -183,11 +218,11 @@ if errorlevel 1 (
 )
 
 if exist "!SLICED_FINAL_TEMP!" (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Extract-3MFData.ps1" -InputFile "!SLICED_OUT!" -SingleFile "!SLICED_FINAL_TEMP!" -MasterTsvPath "!MASTER_DATA!" -IndividualTsvPath "!INPUTDIR!!INPUTBASE!_Data.tsv"
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Extract-3MFData.ps1" -InputFile "!SLICED_OUT!" -SingleFile "!SLICED_FINAL_TEMP!" -MasterTsvPath "!MASTER_DATA!" -IndividualTsvPath "!INPUTDIR!!INPUTBASE!_Data.tsv" !GEN_IMAGE_SWITCH!
     del "!SLICED_FINAL_TEMP!" /q
 ) else (
     echo   [!] WARNING: Isolated object failed to slice.
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Extract-3MFData.ps1" -InputFile "!SLICED_OUT!" -MasterTsvPath "!MASTER_DATA!" -IndividualTsvPath "!INPUTDIR!!INPUTBASE!_Data.tsv"
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Extract-3MFData.ps1" -InputFile "!SLICED_OUT!" -MasterTsvPath "!MASTER_DATA!" -IndividualTsvPath "!INPUTDIR!!INPUTBASE!_Data.tsv" !GEN_IMAGE_SWITCH!
 )
 
 echo   OK --^> Success.

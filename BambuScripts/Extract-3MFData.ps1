@@ -8,7 +8,9 @@ param (
     [switch]$ConsoleOnly,
 
     [string]$MasterTsvPath = "",
-    [string]$IndividualTsvPath = ""
+    [string]$IndividualTsvPath = "",
+
+    [switch]$GenerateImage # <--- Add this new parameter
 )
 
 if ($ConsoleOnly) {
@@ -329,6 +331,7 @@ try {
         $timeAdd
     )
 # --- 7. AUTO-GENERATE COMPOSITE IMAGE ---
+if ($GenerateImage) {
     try {
         $pyScript = Join-Path $scriptDir "generate_image_worker.py"
         if (Test-Path $pyScript) {
@@ -337,27 +340,32 @@ try {
             $inputFolder = Split-Path $InputFile -Parent
             $outImg = Join-Path $inputFolder "$projectName.png"
             $sourceImg = ""
+            $isTemp = $false
 
-            # 1. Search the folder for a custom PNG (excluding the output file name)
+            # 1. Search the folder for a custom PNG (Phase 1 should have put one here if you provided it)
             $customPng = Get-ChildItem -Path $inputFolder -Filter "*.png" |
                          Where-Object { $_.Name -ne "$projectName.png" } |
                          Select-Object -First 1
 
             if ($customPng) {
-                # Use the image you manually placed in the folder
                 $sourceImg = $customPng.FullName
-                $isTemp = $false
             } else {
-                # Fallback: Extract plate_1.png from the archive
+                # 2. SILENT FALLBACK to internal plate_1.png (No prompts!)
                 $sourceImg = Join-Path $env:TEMP "$projectName_plate_1.png"
                 $isTemp = $true
                 $archive = [System.IO.Compression.ZipFile]::OpenRead($InputFile)
                 $plateEntry = $archive.Entries | Where-Object { $_.FullName -replace '\\', '/' -match "(?i)Metadata/plate_1\.png$" } | Select-Object -First 1
-                if ($plateEntry) { [System.IO.Compression.ZipFileExtensions]::ExtractToFile($plateEntry, $sourceImg, $true) }
+
+                if ($plateEntry) {
+                    [System.IO.Compression.ZipFileExtensions]::ExtractToFile($plateEntry, $sourceImg, $true)
+                } else {
+                    $sourceImg = "" # Failsafe
+                }
                 $archive.Dispose()
             }
 
             if (Test-Path $sourceImg) {
+                # Build Python arguments
                 $pyArgs = @($pyScript, "--name", "`"$projectName`"", "--time", "`"$timeAdd`"", "--img", "`"$sourceImg`"", "--out", "`"$outImg`"", "--colors")
                 foreach ($i in 1..4) {
                     if ($filData[$i].g -gt 0) {
@@ -366,24 +374,35 @@ try {
                 }
 
                 $pyLog = Join-Path $env:TEMP "python_error.log"
-                # Update "python" to the specific path/alias you confirmed works in your environment
+                # Call Python to build the image
                 $proc = Start-Process -FilePath "python" -ArgumentList $pyArgs -Wait -NoNewWindow -PassThru -RedirectStandardError $pyLog
 
                 if (Test-Path $outImg) {
                     Write-Host "[DONE]" -ForegroundColor Green
+                    Remove-Item $pyLog -Force -ErrorAction SilentlyContinue
                 } else {
                     Write-Host "[FAILED]" -ForegroundColor Red
+                    # Print the exact error so we can see what went wrong
+                    if (Test-Path $pyLog) {
+                        Write-Host "      PYTHON ERROR:" -ForegroundColor Yellow
+                        Get-Content $pyLog | Write-Host -ForegroundColor DarkRed
+                        Remove-Item $pyLog -Force -ErrorAction SilentlyContinue
+                    }
                 }
 
                 # Only delete the image if it was the temporary one we extracted
                 if ($isTemp) { Remove-Item $sourceImg -Force -ErrorAction SilentlyContinue }
-                Remove-Item $pyLog -Force -ErrorAction SilentlyContinue
-            } else { Write-Host "[SKIPPED - No Image Found]" -ForegroundColor DarkGray }
+            } else {
+                Write-Host "[SKIPPED - No Image Found]" -ForegroundColor DarkGray
+            }
         }
     } catch {
         Write-Host "[CRASHED]" -ForegroundColor Red
         Write-Host "     POWERSHELL EXCEPTION: $_" -ForegroundColor Yellow
     }
+} else {
+    # Write-Host "  -> Image generation skipped." -ForegroundColor DarkGray
+}
 
     Write-Host "`n--- Console Output Verification ---" -ForegroundColor Green
     Write-Host "Raw File Time:    $($analyzer.PrintTime)"

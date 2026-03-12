@@ -119,7 +119,7 @@ def main():
             draw_text_with_outline(draw, (box_x - 10 - mass_w, y + 30), mass_txt, font=font_mass, fill=(200, 200, 200))
 
     # --- 5. DRAW SKIP TIME ---
-    time_text = f"Skip Time: {args.time} min"
+    time_text = f"Skip Time: {round(float(args.time))} min"
     draw_text_with_outline(draw, (MARGIN, CANVAS_SIZE - MARGIN - 40), time_text, load_font(38), (255, 255, 255))
 
     canvas.save(args.out)
