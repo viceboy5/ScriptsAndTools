@@ -179,8 +179,8 @@ try {
     $totalGrams = 0.0; $totalMeters = 0.0; $objCount = 0
 
     $filData = @(
-        @{ g = 0; color = "" }, @{ g = 0; color = "" },
-        @{ g = 0; color = "" }, @{ g = 0; color = "" }, @{ g = 0; color = "" }
+        @{ g = 0; color = ""; rawHex = "" }, @{ g = 0; color = ""; rawHex = "" },
+        @{ g = 0; color = ""; rawHex = "" }, @{ g = 0; color = ""; rawHex = "" }, @{ g = 0; color = ""; rawHex = "" }
     )
 
     # --- 3. Extract Metadata (XML) ---
@@ -208,6 +208,8 @@ try {
                         if ($rawHex.StartsWith('#')) { $rawHex = $rawHex.Substring(1) }
 
                         if ($rawHex.Length -eq 6) { $rawHex += "FF" }
+
+                        $filData[$i].rawHex = "#" + $rawHex # <--- ADD THIS LINE HERE
 
                         if ($LibraryNames.Contains($rawHex)) {
                             $filData[$i].color = $LibraryNames[$rawHex]
@@ -326,6 +328,51 @@ try {
         "",
         $timeAdd
     )
+# --- 7. AUTO-GENERATE COMPOSITE IMAGE ---
+    try {
+        $pyScript = Join-Path $scriptDir "generate_image_worker.py"
+        if (Test-Path $pyScript) {
+            Write-Host "  -> Generating Composite Card... " -ForegroundColor Cyan -NoNewline
+
+            $tempImg = Join-Path $env:TEMP "$projectName_plate_1.png"
+            $outImg = Join-Path (Split-Path $InputFile -Parent) "$projectName.png"
+
+            # Extract plate_1.png directly from the archive
+            $archive = [System.IO.Compression.ZipFile]::OpenRead($InputFile)
+            $plateEntry = $archive.Entries | Where-Object { $_.FullName -replace '\\', '/' -match "(?i)Metadata/plate_1\.png$" } | Select-Object -First 1
+            if ($plateEntry) { [System.IO.Compression.ZipFileExtensions]::ExtractToFile($plateEntry, $tempImg, $true) }
+            $archive.Dispose()
+
+            if (Test-Path $tempImg) {
+                $pyArgs = @($pyScript, "--name", "`"$projectName`"", "--time", "`"$timeAdd`"", "--img", "`"$tempImg`"", "--out", "`"$outImg`"", "--colors")
+                foreach ($i in 1..4) {
+                    if ($filData[$i].g -gt 0) {
+                        $pyArgs += "`"$($filData[$i].color)|$($filData[$i].rawHex)|$($filData[$i].g)`""
+                    }
+                }
+
+                # Run Python and capture any background errors
+                $pyLog = Join-Path $env:TEMP "python_error.log"
+                $proc = Start-Process -FilePath "python" -ArgumentList $pyArgs -Wait -NoNewWindow -PassThru -RedirectStandardError $pyLog
+
+                if (Test-Path $outImg) {
+                    Write-Host "[DONE]" -ForegroundColor Green
+                } else {
+                    Write-Host "[FAILED]" -ForegroundColor Red
+                    if (Test-Path $pyLog) {
+                        Write-Host "     PYTHON EXCEPTION:" -ForegroundColor Yellow
+                        Get-Content $pyLog | Select-Object -Last 10 | Write-Host -ForegroundColor DarkGray
+                    }
+                }
+                Remove-Item $tempImg -Force -ErrorAction SilentlyContinue
+                Remove-Item $pyLog -Force -ErrorAction SilentlyContinue
+            } else { Write-Host "[SKIPPED - No Thumbnail Found]" -ForegroundColor DarkGray }
+        }
+    } catch {
+        Write-Host "[CRASHED]" -ForegroundColor Red
+        Write-Host "     POWERSHELL EXCEPTION: $_" -ForegroundColor Yellow
+        if ($null -ne $archive) { $archive.Dispose() }
+    }
 
     Write-Host "`n--- Console Output Verification ---" -ForegroundColor Green
     Write-Host "Raw File Time:    $($analyzer.PrintTime)"
