@@ -334,44 +334,55 @@ try {
         if (Test-Path $pyScript) {
             Write-Host "  -> Generating Composite Card... " -ForegroundColor Cyan -NoNewline
 
-            $tempImg = Join-Path $env:TEMP "$projectName_plate_1.png"
-            $outImg = Join-Path (Split-Path $InputFile -Parent) "$projectName.png"
+            $inputFolder = Split-Path $InputFile -Parent
+            $outImg = Join-Path $inputFolder "$projectName.png"
+            $sourceImg = ""
 
-            # Extract plate_1.png directly from the archive
-            $archive = [System.IO.Compression.ZipFile]::OpenRead($InputFile)
-            $plateEntry = $archive.Entries | Where-Object { $_.FullName -replace '\\', '/' -match "(?i)Metadata/plate_1\.png$" } | Select-Object -First 1
-            if ($plateEntry) { [System.IO.Compression.ZipFileExtensions]::ExtractToFile($plateEntry, $tempImg, $true) }
-            $archive.Dispose()
+            # 1. Search the folder for a custom PNG (excluding the output file name)
+            $customPng = Get-ChildItem -Path $inputFolder -Filter "*.png" |
+                         Where-Object { $_.Name -ne "$projectName.png" } |
+                         Select-Object -First 1
 
-            if (Test-Path $tempImg) {
-                $pyArgs = @($pyScript, "--name", "`"$projectName`"", "--time", "`"$timeAdd`"", "--img", "`"$tempImg`"", "--out", "`"$outImg`"", "--colors")
+            if ($customPng) {
+                # Use the image you manually placed in the folder
+                $sourceImg = $customPng.FullName
+                $isTemp = $false
+            } else {
+                # Fallback: Extract plate_1.png from the archive
+                $sourceImg = Join-Path $env:TEMP "$projectName_plate_1.png"
+                $isTemp = $true
+                $archive = [System.IO.Compression.ZipFile]::OpenRead($InputFile)
+                $plateEntry = $archive.Entries | Where-Object { $_.FullName -replace '\\', '/' -match "(?i)Metadata/plate_1\.png$" } | Select-Object -First 1
+                if ($plateEntry) { [System.IO.Compression.ZipFileExtensions]::ExtractToFile($plateEntry, $sourceImg, $true) }
+                $archive.Dispose()
+            }
+
+            if (Test-Path $sourceImg) {
+                $pyArgs = @($pyScript, "--name", "`"$projectName`"", "--time", "`"$timeAdd`"", "--img", "`"$sourceImg`"", "--out", "`"$outImg`"", "--colors")
                 foreach ($i in 1..4) {
                     if ($filData[$i].g -gt 0) {
                         $pyArgs += "`"$($filData[$i].color)|$($filData[$i].rawHex)|$($filData[$i].g)`""
                     }
                 }
 
-                # Run Python and capture any background errors
                 $pyLog = Join-Path $env:TEMP "python_error.log"
+                # Update "python" to the specific path/alias you confirmed works in your environment
                 $proc = Start-Process -FilePath "python" -ArgumentList $pyArgs -Wait -NoNewWindow -PassThru -RedirectStandardError $pyLog
 
                 if (Test-Path $outImg) {
                     Write-Host "[DONE]" -ForegroundColor Green
                 } else {
                     Write-Host "[FAILED]" -ForegroundColor Red
-                    if (Test-Path $pyLog) {
-                        Write-Host "     PYTHON EXCEPTION:" -ForegroundColor Yellow
-                        Get-Content $pyLog | Select-Object -Last 10 | Write-Host -ForegroundColor DarkGray
-                    }
                 }
-                Remove-Item $tempImg -Force -ErrorAction SilentlyContinue
+
+                # Only delete the image if it was the temporary one we extracted
+                if ($isTemp) { Remove-Item $sourceImg -Force -ErrorAction SilentlyContinue }
                 Remove-Item $pyLog -Force -ErrorAction SilentlyContinue
-            } else { Write-Host "[SKIPPED - No Thumbnail Found]" -ForegroundColor DarkGray }
+            } else { Write-Host "[SKIPPED - No Image Found]" -ForegroundColor DarkGray }
         }
     } catch {
         Write-Host "[CRASHED]" -ForegroundColor Red
         Write-Host "     POWERSHELL EXCEPTION: $_" -ForegroundColor Yellow
-        if ($null -ne $archive) { $archive.Dispose() }
     }
 
     Write-Host "`n--- Console Output Verification ---" -ForegroundColor Green
