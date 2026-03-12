@@ -4,6 +4,7 @@ setlocal EnableDelayedExpansion
 set "SCRIPT=%~dp0merge_3mf_worker.ps1"
 set "PREP_ERRORS=0"
 set "PREP_PROCESSED=0"
+set "PREP_SKIPPED=0"
 set "SLICE_ERRORS=0"
 set "SLICE_PROCESSED=0"
 set "TOTAL=0"
@@ -18,11 +19,14 @@ set "TARGET_NAME=!TARGET_NAME:.3MF=!"
 if exist "%~1\" ( set "REPORT_DIR=%~f1\" ) else ( set "REPORT_DIR=%~dp1" )
 set "MASTER_DATA=!REPORT_DIR!!TARGET_NAME!_Design_Data.tsv"
 set "FILELIST=%TEMP%\merge_3mf_list_%RANDOM%.txt"
+set "SLICELIST=%TEMP%\slice_3mf_list_%RANDOM%.txt"
 
 :: Silent Cleanup
 for /d /r "%~dp1" %%d in (temp_3mf_extract) do ( if exist "%%d" rmdir /s /q "%%d" 2>nul )
 
 if exist "%FILELIST%" del "%FILELIST%"
+if exist "%SLICELIST%" del "%SLICELIST%"
+
 :collect_loop
 if "%~1"=="" goto begin_process
 if exist "%~1\" (
@@ -64,14 +68,19 @@ echo.
 echo ==============================================================
 echo PHASE 2: SLICING ^& DATA EXTRACTION (Unattended)
 echo ==============================================================
-for /f "usebackq delims=" %%F in ("%FILELIST%") do call :slice_file "%%F"
+if exist "%SLICELIST%" (
+    for /f "usebackq delims=" %%F in ("%SLICELIST%") do call :slice_file "%%F"
+) else (
+    echo No files queued for slicing.
+)
 
 :skip_slicing_phase
 del "%FILELIST%" 2>nul
+del "%SLICELIST%" 2>nul
 
 echo -------------------------------------------
 echo Done.
-echo Prepped: !PREP_PROCESSED! / Failed: !PREP_ERRORS!
+echo Prepped: !PREP_PROCESSED! / Skipped: !PREP_SKIPPED! / Failed: !PREP_ERRORS!
 if "!DO_SLICE!"=="1" echo Sliced:  !SLICE_PROCESSED! / Failed: !SLICE_ERRORS!
 echo -------------------------------------------
 pause
@@ -85,15 +94,33 @@ set "INPUTNAME=%~nx1"
 set "INPUTBASE=%~n1"
 set "TEMPOUT=%~dp1%~n1_merged_temp.3mf"
 
+:: The ~0,-4 math gracefully handles spaces, periods, and underscores
 set "NESTBASE=!INPUTBASE:~0,-4!Nest"
 set "FINALBASE=!INPUTBASE:~0,-4!Final"
 set "NESTNAME=!NESTBASE!.3mf"
 set "FINAL_PATH=!INPUTDIR!!FINALBASE!.3mf"
+set "NEST_PATH=!INPUTDIR!!NESTNAME!"
+
+set /a _IDX=PREP_PROCESSED+PREP_ERRORS+PREP_SKIPPED+1
+echo.
+echo [!_IDX!/!TOTAL!] Preparing: !INPUTNAME!
+
+:: --- PRE-FLIGHT REVERT CHECK ---
+if exist "!NEST_PATH!" (
+    echo   [!] PREVIOUS MERGE DETECTED.
+    choice /C YN /M "      Do you want to REVERT this file and re-process it"
+    if errorlevel 2 (
+        echo   [-] Skipping !INPUTNAME!.
+        set /a PREP_SKIPPED+=1
+        goto :eof
+    )
+    echo   [+] Calling Revert Worker...
+    set "WORKER_MODE=1"
+    call "%~dp0RevertMerge.bat" "!NEST_PATH!"
+    set "WORKER_MODE=0"
+)
 
 for /f %%T in ('powershell -NoProfile -Command "[System.IO.Path]::GetRandomFileName()"') do set "WORK=%TEMP%\merge_work_%%T"
-
-set /a _IDX=PREP_PROCESSED+PREP_ERRORS+1
-echo [!_IDX!/!TOTAL!] Preparing: !INPUTNAME!
 mkdir "!WORK!" 2>nul
 
 powershell -NoProfile -Command "Add-Type -AssemblyName 'System.IO.Compression.FileSystem'; [System.IO.Compression.ZipFile]::ExtractToDirectory('!INPUT!', '!WORK!')" >nul 2>&1
@@ -120,7 +147,9 @@ rmdir /s /q "!WORK_SINGLE!" 2>nul
 
 if not exist "!FINAL_PATH!" echo   [!] WARNING: Final.3mf failed to generate.
 
+:: Add successfully prepared files to the Slicing Queue
 set /a PREP_PROCESSED+=1
+echo !INPUT!>> "%SLICELIST%"
 
 :cleanup_prep
 rmdir /s /q "!WORK!" 2>nul
@@ -134,39 +163,27 @@ set "INPUTNAME=%~nx1"
 set "INPUTBASE=%~n1"
 set "FINALBASE=!INPUTBASE:~0,-4!Final"
 set "FINAL_PATH=!INPUTDIR!!FINALBASE!.3mf"
-set "BAMBU_GUI=C:\Program Files\Bambu Studio\bambu-studio.exe"
+
 set "SLICED_OUT=!INPUTDIR!!INPUTBASE!.gcode.3mf"
 set "SLICED_FINAL_TEMP=!INPUTDIR!!FINALBASE!.gcode.3mf"
 
 set /a _SIDX=SLICE_PROCESSED+SLICE_ERRORS+1
-echo [!_SIDX!/!TOTAL!] Slicing: !INPUTNAME!
+echo [!_SIDX!/!PREP_PROCESSED!] Slicing: !INPUTNAME!
 
-:: Delay to ensure Synology isn't holding the file
-timeout /t 3 /nobreak > nul
-
-"!BAMBU_GUI!" --debug 3 --no-check --slice 1 --min-save --export-3mf "!SLICED_OUT!" "!INPUTDIR!!INPUTNAME!" > "%TEMP%\slice_log.txt" 2>&1
-if not exist "!SLICED_OUT!" (
-    echo   WARNING: Slicing failed. Here is the error from Bambu Studio:
-    echo   ======================================================================
-    type "%TEMP%\slice_log.txt"
-    echo   ======================================================================
-    del "%TEMP%\slice_log.txt" 2>nul
+:: 1. Call the new Slicer Worker
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0slicer_automation_worker.ps1" -InputPath "!INPUT!" -IsolatedPath "!FINAL_PATH!"
+if errorlevel 1 (
     set /a SLICE_ERRORS+=1
     goto :eof
 )
-del "%TEMP%\slice_log.txt" 2>nul
 
-echo   Slicing Isolated Object...
-"!BAMBU_GUI!" --debug 3 --no-check --slice 1 --min-save --export-3mf "!SLICED_FINAL_TEMP!" "!FINAL_PATH!" > "%TEMP%\slice_log.txt" 2>&1
-
+:: 2. Call the Data Extraction Worker
 if exist "!SLICED_FINAL_TEMP!" (
     powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Extract-3MFData.ps1" -InputFile "!SLICED_OUT!" -SingleFile "!SLICED_FINAL_TEMP!" -MasterTsvPath "!MASTER_DATA!" >nul 2>&1
     del "!SLICED_FINAL_TEMP!" /q
 ) else (
-    echo   [!] WARNING: Isolated object failed to slice.
     powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Extract-3MFData.ps1" -InputFile "!SLICED_OUT!" -MasterTsvPath "!MASTER_DATA!" >nul 2>&1
 )
-del "%TEMP%\slice_log.txt" 2>nul
 
 echo   OK --^> Success.
 set /a SLICE_PROCESSED+=1

@@ -1,24 +1,28 @@
 @echo off
 setlocal EnableDelayedExpansion
 
+set "PAUSE_AT_END=1"
+if "!WORKER_MODE!"=="1" set "PAUSE_AT_END=0"
+
 if "%~1"=="" (
     echo [ERROR] Please drag and drop a processed file or a folder onto this script.
-    pause
+    if !PAUSE_AT_END!==1 pause
     exit /b 1
 )
 
-echo ==========================================
-echo          3MF PIPELINE REVERTER
-echo ==========================================
-echo.
+if !PAUSE_AT_END!==1 (
+    echo ==========================================
+    echo          3MF PIPELINE REVERTER
+    echo ==========================================
+    echo.
+)
 
 :process_loop
 if "%~1"=="" goto finish
 
 REM Check if the dropped item is a folder (the trailing \ tests for a directory)
 if exist "%~1\" (
-    echo [ Scanning Directory and Subfolders: %~nx1 ]
-    echo.
+    if !PAUSE_AT_END!==1 echo [ Scanning Directory and Subfolders: %~nx1 ] & echo.
     REM Using *Nest.3mf acts as a wildcard, catching _Nest, .Nest, and " Nest"
     for /R "%~1" %%F in (*Nest.3mf) do (
         call :revert_target "%%F"
@@ -80,10 +84,12 @@ if exist "!INPUTDIR!!NESTBASE!.3mf" (
 ) else (
     echo   [!] Could not find !NESTBASE!.3mf to restore.
 )
-echo.
 exit /b
 
 :finish
-echo ==========================================
-echo Revert complete! Your Full.3mf files are restored.
-pause
+if !PAUSE_AT_END!==1 (
+    echo ==========================================
+    echo Revert complete! Your Full.3mf files are restored.
+    pause
+)
+exit /b
