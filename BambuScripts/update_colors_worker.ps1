@@ -1,11 +1,13 @@
 param(
     [string]$WorkDir,
-    [string]$FileName = "Unknown File"
+    [string]$FileName = "Unknown File",
+    [string]$OriginalZip = ""
 )
 $ErrorActionPreference = 'Stop'
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $colorCsvPath = Join-Path $scriptDir "colorNamesCSV.csv"
@@ -196,23 +198,55 @@ foreach ($hex in @($ActiveSlotMap.Keys)) {
     }
 }
 
-# 6. Apply Replacements safely across all files (Only touches verified active colors)
+# 6. Apply Replacements safely across both the extracted folder AND the original zip
 $allTextFiles = Get-ChildItem -Path $WorkDir -Recurse -File | Where-Object { $_.Name -match '\.(xml|model|config|json)$' }
-foreach ($file in $allTextFiles) {
-    $content = [System.IO.File]::ReadAllText($file.FullName, [System.Text.Encoding]::UTF8)
-    $modified = $false
+$zip = $null
 
-    foreach ($oldHex in $ActiveSlotMap.Keys) {
-        $newHex = if ($SessionCache.Contains($oldHex)) { $SessionCache[$oldHex] } else { $SessionCache[$oldHex + "FF"] }
+try {
+    if ($OriginalZip -ne "" -and (Test-Path $OriginalZip)) {
+        $zip = [System.IO.Compression.ZipFile]::Open($OriginalZip, 'Update')
+    }
 
-        if ($null -ne $newHex -and $newHex -ne $oldHex) {
-            if ($content -match "(?i)$oldHex") {
-                $content = $content -ireplace [regex]::Escape($oldHex), $newHex
-                $modified = $true
+    foreach ($file in $allTextFiles) {
+        $content = [System.IO.File]::ReadAllText($file.FullName, [System.Text.Encoding]::UTF8)
+        $modified = $false
+
+        foreach ($oldHex in $ActiveSlotMap.Keys) {
+            $newHex = if ($SessionCache.Contains($oldHex)) { $SessionCache[$oldHex] } else { $SessionCache[$oldHex + "FF"] }
+
+            if ($null -ne $newHex -and $newHex -ne $oldHex) {
+                if ($content -match "(?i)$oldHex") {
+                    $content = $content -ireplace [regex]::Escape($oldHex), $newHex
+                    $modified = $true
+                }
+            }
+        }
+
+        if ($modified) {
+            # Update the extracted file for the merge worker
+            [System.IO.File]::WriteAllText($file.FullName, $content, (New-Object System.Text.UTF8Encoding($false)))
+
+            # Update the original .3mf archive so the colors survive a revert
+            if ($null -ne $zip) {
+                $relPath = $file.FullName.Substring($WorkDir.Length).TrimStart('\','/').Replace('\','/')
+                $entry = $zip.GetEntry($relPath)
+                if ($null -ne $entry) { $entry.Delete() }
+
+                $newEntry = $zip.CreateEntry($relPath)
+                $stream = $newEntry.Open()
+                $writer = New-Object System.IO.StreamWriter($stream, (New-Object System.Text.UTF8Encoding($false)))
+                $writer.Write($content)
+                $writer.Flush()
+                $writer.Close()
+                $stream.Close()
             }
         }
     }
-    if ($modified) {
-        [System.IO.File]::WriteAllText($file.FullName, $content, (New-Object System.Text.UTF8Encoding($false)))
-    }
+} finally {
+    # Destroy the file lock so the batch script can safely rename the file
+    if ($null -ne $zip) { $zip.Dispose() }
+    $zip = $null
+    Remove-Variable zip -ErrorAction SilentlyContinue
+    [System.GC]::Collect()
+    [System.GC]::WaitForPendingFinalizers()
 }
