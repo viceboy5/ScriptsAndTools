@@ -19,8 +19,8 @@ REM Check if the dropped item is a folder (the trailing \ tests for a directory)
 if exist "%~1\" (
     echo [ Scanning Directory and Subfolders: %~nx1 ]
     echo.
-    REM Recursively hunt for any _Nest.3mf files in this folder and below
-    for /R "%~1" %%F in (*_Nest.3mf) do (
+    REM Using *Nest.3mf acts as a wildcard, catching _Nest, .Nest, and " Nest"
+    for /R "%~1" %%F in (*Nest.3mf) do (
         call :revert_target "%%F"
     )
 ) else (
@@ -36,35 +36,49 @@ set "FILE_PATH=%~1"
 set "INPUTDIR=%~dp1"
 set "INPUTBASE=%~n1"
 
-REM Extract the core project name
-set "CORE=!INPUTBASE:_Full=!"
-set "CORE=!CORE:_Nest=!"
-set "CORE=!CORE:_Final=!"
+REM Dynamically extract the separator (e.g., _, ., or Space) and the core name
+set "SEP=!INPUTBASE:~-5,1!"
+set "BASE_PREFIX=!INPUTBASE:~0,-5!"
 
-echo [ Reverting: !CORE! ]
+REM Rebuild the file names using the detected separator
+set "FULLBASE=!BASE_PREFIX!!SEP!Full"
+set "NESTBASE=!BASE_PREFIX!!SEP!Nest"
+set "FINALBASE=!BASE_PREFIX!!SEP!Final"
 
-REM 1. Delete the generated junk
-if exist "!INPUTDIR!!CORE!_Full.gcode.3mf" (
-    echo   [-] Deleting !CORE!_Full.gcode.3mf...
-    del /f /q "!INPUTDIR!!CORE!_Full.gcode.3mf"
+echo [ Reverting: !FULLBASE! ]
+
+REM 1. Delete the generated junk files
+if exist "!INPUTDIR!!FULLBASE!.gcode.3mf" (
+    echo   [-] Deleting !FULLBASE!.gcode.3mf...
+    del /f /q "!INPUTDIR!!FULLBASE!.gcode.3mf"
 )
 
-if exist "!INPUTDIR!!CORE!_Full.3mf" (
-    echo   [-] Deleting generated !CORE!_Full.3mf...
-    del /f /q "!INPUTDIR!!CORE!_Full.3mf"
+if exist "!INPUTDIR!!FULLBASE!.3mf" (
+    echo   [-] Deleting generated !FULLBASE!.3mf...
+    del /f /q "!INPUTDIR!!FULLBASE!.3mf"
 )
 
-if exist "!INPUTDIR!!CORE!_Full_Data.tsv" (
-    echo   [-] Deleting !CORE!_Full_Data.tsv...
-    del /f /q "!INPUTDIR!!CORE!_Full_Data.tsv"
+if exist "!INPUTDIR!!FULLBASE!_Data.tsv" (
+    echo   [-] Deleting !FULLBASE!_Data.tsv...
+    del /f /q "!INPUTDIR!!FULLBASE!_Data.tsv"
+)
+
+if exist "!INPUTDIR!!FINALBASE!.3mf" (
+    echo   [-] Deleting !FINALBASE!.3mf...
+    del /f /q "!INPUTDIR!!FINALBASE!.3mf"
+)
+
+if exist "!INPUTDIR!!FINALBASE!.gcode.3mf" (
+    echo   [-] Deleting !FINALBASE!.gcode.3mf...
+    del /f /q "!INPUTDIR!!FINALBASE!.gcode.3mf"
 )
 
 REM 2. Restore the original file
-if exist "!INPUTDIR!!CORE!_Nest.3mf" (
-    echo   [+] Restoring !CORE!_Nest.3mf to !CORE!_Full.3mf...
-    ren "!INPUTDIR!!CORE!_Nest.3mf" "!CORE!_Full.3mf"
+if exist "!INPUTDIR!!NESTBASE!.3mf" (
+    echo   [+] Restoring !NESTBASE!.3mf to !FULLBASE!.3mf...
+    ren "!INPUTDIR!!NESTBASE!.3mf" "!FULLBASE!.3mf"
 ) else (
-    echo   [!] Could not find !CORE!_Nest.3mf to restore.
+    echo   [!] Could not find !NESTBASE!.3mf to restore.
 )
 echo.
 exit /b
