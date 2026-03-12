@@ -83,7 +83,7 @@ if errorlevel 1 ( echo   ERROR: Extract failed. & set /a ERRORS+=1 & goto cleanu
 
 if "!DO_COLORS!"=="1" (
     echo   Checking/Updating Colors...
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0update_colors_worker.ps1" -WorkDir "!WORK!"
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0update_colors_worker.ps1" -WorkDir "!WORK!" -FileName "!INPUTNAME!"
 )
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" -WorkDir "!WORK!" -InputPath "!INPUT!" -OutputPath "!TEMPOUT!" -ReportPath "nul"

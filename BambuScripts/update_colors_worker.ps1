@@ -1,5 +1,6 @@
 param(
-    [string]$WorkDir
+    [string]$WorkDir,
+    [string]$FileName = "Unknown File"
 )
 $ErrorActionPreference = 'Stop'
 
@@ -69,11 +70,11 @@ if ($SlotMap.Count -eq 0) {
     exit
 }
 
-# 4. Exact Original UI Function
+# 4. UI Function (Now larger and displays the Filename)
 function Show-ColorPicker([string]$UnknownHex, [string]$SlotId) {
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = "Color Standardization Required"
-    $form.Size = New-Object System.Drawing.Size(380, 220)
+    $form.Text = "Mapping Colors: $FileName"
+    $form.Size = New-Object System.Drawing.Size(400, 240)
     $form.StartPosition = 'CenterScreen'
     $form.TopMost = $true
     $form.FormBorderStyle = 'FixedDialog'
@@ -82,8 +83,8 @@ function Show-ColorPicker([string]$UnknownHex, [string]$SlotId) {
     $slotText = if ([string]::IsNullOrWhiteSpace($SlotId)) { "(Unknown Slot)" } else { "(Filament Slot $SlotId)" }
 
     $label = New-Object System.Windows.Forms.Label
-    $label.Text = "Rogue Hex: $UnknownHex $slotText`nPlease map this to a color from your library:"
-    $label.Location = New-Object System.Drawing.Point(15, 15)
+    $label.Text = "File: $FileName`n`nRogue Hex: $UnknownHex $slotText`nPlease map this to a color from your library:"
+    $label.Location = New-Object System.Drawing.Point(15, 10)
     $label.AutoSize = $true
     $form.Controls.Add($label)
 
@@ -95,19 +96,19 @@ function Show-ColorPicker([string]$UnknownHex, [string]$SlotId) {
 
     $lblOrig = New-Object System.Windows.Forms.Label
     $lblOrig.Text = "Original:"
-    $lblOrig.Location = New-Object System.Drawing.Point(15, 60)
+    $lblOrig.Location = New-Object System.Drawing.Point(15, 75)
     $lblOrig.AutoSize = $true
     $form.Controls.Add($lblOrig)
 
     $swatchOrig = New-Object System.Windows.Forms.Panel
-    $swatchOrig.Location = New-Object System.Drawing.Point(15, 80)
+    $swatchOrig.Location = New-Object System.Drawing.Point(15, 95)
     $swatchOrig.Size = New-Object System.Drawing.Size(40, 40)
     $swatchOrig.BorderStyle = 'Fixed3D'
     try { $swatchOrig.BackColor = [System.Drawing.ColorTranslator]::FromHtml((&$FormatHex $UnknownHex)) } catch {}
     $form.Controls.Add($swatchOrig)
 
     $combo = New-Object System.Windows.Forms.ComboBox
-    $combo.Location = New-Object System.Drawing.Point(70, 90)
+    $combo.Location = New-Object System.Drawing.Point(70, 105)
     $combo.Size = New-Object System.Drawing.Size(200, 20)
     $combo.DropDownStyle = 'DropDownList'
     foreach ($key in $LibraryColors.Keys) { $combo.Items.Add($key) | Out-Null }
@@ -115,12 +116,12 @@ function Show-ColorPicker([string]$UnknownHex, [string]$SlotId) {
 
     $lblNew = New-Object System.Windows.Forms.Label
     $lblNew.Text = "New:"
-    $lblNew.Location = New-Object System.Drawing.Point(285, 60)
+    $lblNew.Location = New-Object System.Drawing.Point(285, 75)
     $lblNew.AutoSize = $true
     $form.Controls.Add($lblNew)
 
     $swatchNew = New-Object System.Windows.Forms.Panel
-    $swatchNew.Location = New-Object System.Drawing.Point(285, 80)
+    $swatchNew.Location = New-Object System.Drawing.Point(285, 95)
     $swatchNew.Size = New-Object System.Drawing.Size(40, 40)
     $swatchNew.BorderStyle = 'Fixed3D'
     $form.Controls.Add($swatchNew)
@@ -134,7 +135,7 @@ function Show-ColorPicker([string]$UnknownHex, [string]$SlotId) {
 
     $btn = New-Object System.Windows.Forms.Button
     $btn.Text = "Map Color"
-    $btn.Location = New-Object System.Drawing.Point(235, 140)
+    $btn.Location = New-Object System.Drawing.Point(235, 155)
     $btn.Size = New-Object System.Drawing.Size(100, 25)
     $btn.DialogResult = 'OK'
     $form.Controls.Add($btn)
