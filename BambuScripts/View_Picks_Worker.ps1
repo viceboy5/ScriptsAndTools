@@ -3,6 +3,9 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 # Create a clean temporary directory for the images
 $tempDir = Join-Path $env:TEMP "BambuPicks"
+
+# Clean out images from previous runs so you only see the current batch
+if (Test-Path $tempDir) { Remove-Item -Path "$tempDir\*" -Force -Recurse }
 if (-not (Test-Path $tempDir)) { New-Item -ItemType Directory -Path $tempDir -Force | Out-Null }
 
 $filesToProcess = @()
@@ -24,6 +27,8 @@ if ($filesToProcess.Count -eq 0) {
     return
 }
 
+$extractedCount = 0
+
 # Process the files
 foreach ($file in $filesToProcess) {
     $zip = $null
@@ -34,15 +39,20 @@ foreach ($file in $filesToProcess) {
         $entry = $zip.Entries | Where-Object { $_.FullName -match '(?i)pick_1\.png$' }
 
         if ($entry) {
-            # Add a random 4-character suffix so Windows Photo Viewer doesn't lock the file on repeat runs
-            $safeName = $file.BaseName + "_" + [guid]::NewGuid().ToString().Substring(0,4) + "_pick.png"
+            # Name the image after the 3MF file so you know which is which
+            $safeName = $file.BaseName + "_pick.png"
             $outDest = Join-Path $tempDir $safeName
+
+            # If by some chance the exact same filename exists, append a random string
+            if (Test-Path $outDest) {
+                $safeName = $file.BaseName + "_" + [guid]::NewGuid().ToString().Substring(0,4) + "_pick.png"
+                $outDest = Join-Path $tempDir $safeName
+            }
 
             [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $outDest, $true)
 
-            Write-Host "Opened: $safeName" -ForegroundColor Green
-            # This triggers Windows to instantly open the image in your default photo viewer
-            Invoke-Item $outDest
+            Write-Host "Extracted: $safeName" -ForegroundColor Green
+            $extractedCount++
         } else {
             Write-Host "Skipped: No pick_1.png found in $($file.Name)" -ForegroundColor DarkGray
         }
@@ -51,4 +61,10 @@ foreach ($file in $filesToProcess) {
     } finally {
         if ($null -ne $zip) { $zip.Dispose() }
     }
+}
+
+# Open the folder once at the end if we successfully extracted anything
+if ($extractedCount -gt 0) {
+    Write-Host "`nOpening folder containing $extractedCount images..." -ForegroundColor Cyan
+    Invoke-Item $tempDir
 }
