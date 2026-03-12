@@ -20,29 +20,31 @@ if ($ConsoleOnly) {
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $colorCsvPath = Join-Path $scriptDir "colorNamesCSV.csv"
 
-# --- 1. Load the Reverse-Lookup Color Dictionary (BULLETPROOF EDITION) ---
+# --- 1. Load the Reverse-Lookup Color Dictionary (RGB EDITION) ---
 $LibraryNames = @{}
 if (Test-Path $colorCsvPath) {
-    # Use raw Get-Content so we don't trip over Import-Csv header injection or quoting bugs
     $csvLines = Get-Content -Path $colorCsvPath
     foreach ($line in $csvLines) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         $parts = $line -split ','
-        if ($parts.Count -ge 2) {
-            $rawHex = $parts[0].Replace('"','').Trim().ToUpper()
-            $name = $parts[1].Replace('"','').Trim()
+
+        # Ensure we have at least Name, R, G, B
+        if ($parts.Count -ge 4) {
+            $name = $parts[0].Replace('"','').Trim()
 
             # Skip the header row if it exists
             if ($name -match '(?i)^name$' -or $name -eq "N/A" -or $name -eq "") { continue }
 
-            # Strip the '#' symbol so we are comparing pure alphanumeric strings
-            if ($rawHex.StartsWith('#')) { $rawHex = $rawHex.Substring(1) }
+            try {
+                $r = [int]$parts[1].Replace('"','').Trim()
+                $g = [int]$parts[2].Replace('"','').Trim()
+                $b = [int]$parts[3].Replace('"','').Trim()
 
-            # Force 8-character (Alpha) compliance
-            if ($rawHex.Length -eq 6) { $rawHex += "FF" }
-
-            if ($rawHex.Length -eq 8) {
+                # Format exactly as 8-character alphanumeric for the dictionary match
+                $rawHex = "{0:X2}{1:X2}{2:X2}FF" -f $r, $g, $b
                 $LibraryNames[$rawHex] = $name
+            } catch {
+                continue
             }
         }
     }

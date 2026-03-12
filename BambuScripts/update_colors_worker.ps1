@@ -12,17 +12,28 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $colorCsvPath = Join-Path $scriptDir "colorNamesCSV.csv"
 
-# 1. Dynamically Load the Official Library from your CSV
+# 1. Dynamically Load the Official Library from your CSV (RGB EDITION)
 $LibraryColors = [ordered]@{}
 if (Test-Path $colorCsvPath) {
-    $csvData = Import-Csv -Path $colorCsvPath -Header @("Hex", "Name", "R", "G", "B")
+    # Notice the new headers: Name, R, G, B
+    $csvData = Import-Csv -Path $colorCsvPath -Header @("Name", "R", "G", "B")
     foreach ($row in $csvData) {
         $name = if ($null -ne $row.Name) { $row.Name.Trim() } else { "" }
-        $hex = if ($null -ne $row.Hex) { $row.Hex.Trim() } else { "" }
 
-        if ([string]::IsNullOrWhiteSpace($name) -or $name -eq "N/A") { continue }
-        if ($hex -match '^#[0-9a-fA-F]{6}$') { $hex += "FF" }
-        if ($hex -match '^#[0-9a-fA-F]{8}$') { $LibraryColors[$name] = $hex.ToUpper() }
+        # Skip invalid or header rows
+        if ([string]::IsNullOrWhiteSpace($name) -or $name -match '(?i)^name$' -or $name -eq "N/A") { continue }
+
+        try {
+            $r = [int]$row.R
+            $g = [int]$row.G
+            $b = [int]$row.B
+            # {0:X2} converts the number to a 2-digit uppercase Hex value
+            $hex = "#{0:X2}{1:X2}{2:X2}FF" -f $r, $g, $b
+            $LibraryColors[$name] = $hex
+        } catch {
+            # Quietly skip rows with broken/missing RGB numbers
+            continue
+        }
     }
 } else {
     Write-Warning "Could not find colorNamesCSV.csv. Using fallback colors."
