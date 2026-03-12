@@ -3,9 +3,6 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-# ════════════════════════════════════════════════════════════════════════════════
-#  COLOR STANDARDIZATION INTERCEPTOR (EXACT ORIGINAL WORKING CODE)
-# ════════════════════════════════════════════════════════════════════════════════
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
@@ -15,21 +12,14 @@ $colorCsvPath = Join-Path $scriptDir "colorNamesCSV.csv"
 # 1. Dynamically Load the Official Library from your CSV
 $LibraryColors = [ordered]@{}
 if (Test-Path $colorCsvPath) {
-    # Import CSV assuming columns: Hex, Name, R, G, B
     $csvData = Import-Csv -Path $colorCsvPath -Header @("Hex", "Name", "R", "G", "B")
     foreach ($row in $csvData) {
         $name = if ($null -ne $row.Name) { $row.Name.Trim() } else { "" }
         $hex = if ($null -ne $row.Hex) { $row.Hex.Trim() } else { "" }
 
-        # Skip invalid or N/A rows
         if ([string]::IsNullOrWhiteSpace($name) -or $name -eq "N/A") { continue }
-
-        # Auto-Append 'FF' alpha channel for Bambu Studio if it's a standard 6-char hex
         if ($hex -match '^#[0-9a-fA-F]{6}$') { $hex += "FF" }
-
-        if ($hex -match '^#[0-9a-fA-F]{8}$') {
-            $LibraryColors[$name] = $hex.ToUpper()
-        }
+        if ($hex -match '^#[0-9a-fA-F]{8}$') { $LibraryColors[$name] = $hex.ToUpper() }
     }
 } else {
     Write-Warning "Could not find colorNamesCSV.csv. Using fallback colors."
@@ -37,43 +27,49 @@ if (Test-Path $colorCsvPath) {
     $LibraryColors["Fallback White"] = "#FFFFFFFF"
 }
 
-# 2. Session-only memory cache (wipes clean after this run)
+# 2. Session-only memory cache auto-populated with known library colors
 $SessionCache = @{}
-
-# Auto-add library colors to session cache so they pass validation silently
 foreach ($val in $LibraryColors.Values) { $SessionCache[$val.ToUpper()] = $val.ToUpper() }
 
-# 3. Pre-scan XML configs to map Hex Codes to their Filament Slot IDs
-$SlotMap = @{}
+# 3. Target project_settings.config as the absolute Source of Truth
+$SlotMap = [ordered]@{}
+$projPath = Join-Path $WorkDir "Metadata\project_settings.config"
 
-$setPath = Join-Path $WorkDir "Metadata\model_settings.config"
-if (Test-Path $setPath) {
-    try {
-        [xml]$cfg = [System.IO.File]::ReadAllText($setPath)
-        foreach ($f in $cfg.SelectNodes('//filament')) {
-            $id = $f.GetAttribute('id')
-            $c = $f.SelectSingleNode('metadata[@key="color"]')
-            if ($null -ne $id -and $null -ne $c) {
-                $SlotMap[$c.GetAttribute('value').ToUpper()] = $id
+if (Test-Path $projPath) {
+    $projContent = [System.IO.File]::ReadAllText($projPath, [System.Text.Encoding]::UTF8)
+
+    # Isolate strictly the filament_colour array (ignores extruder_colour entirely)
+    if ($projContent -match '(?is)"filament_colou?r"\s*:\s*\[(.*?)\]') {
+        $arrayContent = $matches[1]
+
+        # Extract each hex color inside the brackets in order
+        $hexMatches = [regex]::Matches($arrayContent, '#[0-9a-fA-F]{6,8}')
+        $slotIndex = 1
+
+        foreach ($m in $hexMatches) {
+            $hexColor = $m.Value.ToUpper()
+
+            # Record the color and its 1-based Slot Index
+            if (-not $SlotMap.Contains($hexColor)) {
+                $SlotMap[$hexColor] = $slotIndex.ToString()
             }
+            $slotIndex++
         }
-    } catch {}
+    } else {
+        Write-Host "Could not find 'filament_colour' array in project_settings.config!" -ForegroundColor Yellow
+        exit
+    }
+} else {
+    Write-Host "Could not find project_settings.config in the Metadata folder!" -ForegroundColor Red
+    exit
 }
 
-$slcPath = Join-Path $WorkDir "Metadata\slice_info.config"
-if (Test-Path $slcPath) {
-    try {
-        [xml]$cfg = [System.IO.File]::ReadAllText($slcPath)
-        foreach ($f in $cfg.SelectNodes('//filament')) {
-            $id = $f.GetAttribute('id')
-            $c = $f.GetAttribute('color')
-            if ($null -ne $id -and $null -ne $c) {
-                $SlotMap[$c.ToUpper()] = $id
-            }
-        }
-    } catch {}
+if ($SlotMap.Count -eq 0) {
+    Write-Host "No filament colors found to process." -ForegroundColor Yellow
+    exit
 }
 
+# 4. Exact Original UI Function
 function Show-ColorPicker([string]$UnknownHex, [string]$SlotId) {
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Color Standardization Required"
@@ -91,14 +87,12 @@ function Show-ColorPicker([string]$UnknownHex, [string]$SlotId) {
     $label.AutoSize = $true
     $form.Controls.Add($label)
 
-    # Helper: Convert Bambu #RRGGBBAA to standard #AARRGGBB for WinForms UI
     $FormatHex = {
         param([string]$h)
         if ($h.Length -eq 9) { return "#" + $h.Substring(7,2) + $h.Substring(1,6) }
         return $h
     }
 
-    # --- ORIGINAL COLOR SWATCH ---
     $lblOrig = New-Object System.Windows.Forms.Label
     $lblOrig.Text = "Original:"
     $lblOrig.Location = New-Object System.Drawing.Point(15, 60)
@@ -112,7 +106,6 @@ function Show-ColorPicker([string]$UnknownHex, [string]$SlotId) {
     try { $swatchOrig.BackColor = [System.Drawing.ColorTranslator]::FromHtml((&$FormatHex $UnknownHex)) } catch {}
     $form.Controls.Add($swatchOrig)
 
-    # --- DROPDOWN MENU ---
     $combo = New-Object System.Windows.Forms.ComboBox
     $combo.Location = New-Object System.Drawing.Point(70, 90)
     $combo.Size = New-Object System.Drawing.Size(200, 20)
@@ -120,7 +113,6 @@ function Show-ColorPicker([string]$UnknownHex, [string]$SlotId) {
     foreach ($key in $LibraryColors.Keys) { $combo.Items.Add($key) | Out-Null }
     $form.Controls.Add($combo)
 
-    # --- DYNAMIC NEW COLOR SWATCH ---
     $lblNew = New-Object System.Windows.Forms.Label
     $lblNew.Text = "New:"
     $lblNew.Location = New-Object System.Drawing.Point(285, 60)
@@ -133,13 +125,12 @@ function Show-ColorPicker([string]$UnknownHex, [string]$SlotId) {
     $swatchNew.BorderStyle = 'Fixed3D'
     $form.Controls.Add($swatchNew)
 
-    # Event Listener: Update 'New' swatch dynamically when dropdown is changed
     $combo.add_SelectedIndexChanged({
         $selHex = $LibraryColors[$combo.SelectedItem]
         try { $swatchNew.BackColor = [System.Drawing.ColorTranslator]::FromHtml((&$FormatHex $selHex)) } catch {}
     })
 
-    if ($combo.Items.Count -gt 0) { $combo.SelectedIndex = 0 } # Force first selection
+    if ($combo.Items.Count -gt 0) { $combo.SelectedIndex = 0 }
 
     $btn = New-Object System.Windows.Forms.Button
     $btn.Text = "Map Color"
@@ -155,34 +146,35 @@ function Show-ColorPicker([string]$UnknownHex, [string]$SlotId) {
     return $UnknownHex.ToUpper()
 }
 
-# 4. Scan & Clean files BEFORE the rest of the script loads the XML DOM
-$colorFiles = Get-ChildItem -Path $WorkDir -Recurse -File | Where-Object { $_.Name -match '\.(xml|model|config)$' }
+# 5. Trigger UI for unmapped colors
+foreach ($hex in @($SlotMap.Keys)) {
+    # Check both 7-char and 9-char variations against the cache
+    $checkHex = $hex
+    if ($checkHex.Length -eq 7) { $checkHex += "FF" }
 
-foreach ($file in $colorFiles) {
+    if (-not $SessionCache.Contains($checkHex) -and -not $SessionCache.Contains($hex)) {
+        $mappedHex = Show-ColorPicker -UnknownHex $hex -SlotId $SlotMap[$hex]
+        $SessionCache[$hex] = $mappedHex
+    }
+}
+
+# 6. Apply Replacements safely across all files
+$allTextFiles = Get-ChildItem -Path $WorkDir -Recurse -File | Where-Object { $_.Name -match '\.(xml|model|config|json)$' }
+foreach ($file in $allTextFiles) {
     $content = [System.IO.File]::ReadAllText($file.FullName, [System.Text.Encoding]::UTF8)
     $modified = $false
 
-    # Search for all Bambu hex strings
-    $matches = [regex]::Matches($content, '#[0-9a-fA-F]{6,8}\b')
-    $uniqueHexes = $matches.Value | Select-Object -Unique
+    foreach ($oldHex in $SlotMap.Keys) {
+        $newHex = if ($SessionCache.Contains($oldHex)) { $SessionCache[$oldHex] } else { $SessionCache[$oldHex + "FF"] }
 
-    foreach ($hex in $uniqueHexes) {
-        $upperHex = $hex.ToUpper()
-
-        # If completely unknown, prompt the UI
-        if (-not $SessionCache.Contains($upperHex)) {
-            $slot = if ($SlotMap.Contains($upperHex)) { $SlotMap[$upperHex] } else { "" }
-            $mappedHex = Show-ColorPicker -UnknownHex $upperHex -SlotId $slot
-            $SessionCache[$upperHex] = $mappedHex
-        }
-
-        # If session cache dictates an update, perform exact string replacement
-        if ($SessionCache[$upperHex] -ne $upperHex) {
-            $content = $content -ireplace [regex]::Escape($hex), $SessionCache[$upperHex]
-            $modified = $true
+        if ($null -ne $newHex -and $newHex -ne $oldHex) {
+            # Only trigger a replacement and save if the document actually contains the string
+            if ($content -match "(?i)$oldHex") {
+                $content = $content -ireplace [regex]::Escape($oldHex), $newHex
+                $modified = $true
+            }
         }
     }
-
     if ($modified) {
         [System.IO.File]::WriteAllText($file.FullName, $content, (New-Object System.Text.UTF8Encoding($false)))
     }
