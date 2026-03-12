@@ -20,23 +20,30 @@ if ($ConsoleOnly) {
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $colorCsvPath = Join-Path $scriptDir "colorNamesCSV.csv"
 
-# --- 1. Load the Reverse-Lookup Color Dictionary ---
+# --- 1. Load the Reverse-Lookup Color Dictionary (BULLETPROOF EDITION) ---
 $LibraryNames = @{}
 if (Test-Path $colorCsvPath) {
-    # Import CSV assuming columns: Hex, Name, R, G, B
-    $csvData = Import-Csv -Path $colorCsvPath -Header @("Hex", "Name", "R", "G", "B")
-    foreach ($row in $csvData) {
-        $name = if ($null -ne $row.Name) { $row.Name.Trim() } else { "" }
-        $hex = if ($null -ne $row.Hex) { $row.Hex.Trim() } else { "" }
+    # Use raw Get-Content so we don't trip over Import-Csv header injection or quoting bugs
+    $csvLines = Get-Content -Path $colorCsvPath
+    foreach ($line in $csvLines) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $parts = $line -split ','
+        if ($parts.Count -ge 2) {
+            $rawHex = $parts[0].Replace('"','').Trim().ToUpper()
+            $name = $parts[1].Replace('"','').Trim()
 
-        # Skip invalid rows
-        if ([string]::IsNullOrWhiteSpace($name) -or $name -eq "N/A") { continue }
+            # Skip the header row if it exists
+            if ($name -match '(?i)^name$' -or $name -eq "N/A" -or $name -eq "") { continue }
 
-        # Normalize hex to 8-character (plus the #)
-        if ($hex -match '^#[0-9a-fA-F]{6}$') { $hex += "FF" }
+            # Strip the '#' symbol so we are comparing pure alphanumeric strings
+            if ($rawHex.StartsWith('#')) { $rawHex = $rawHex.Substring(1) }
 
-        if ($hex -match '^#[0-9a-fA-F]{8}$') {
-            $LibraryNames[$hex.ToUpper()] = $name
+            # Force 8-character (Alpha) compliance
+            if ($rawHex.Length -eq 6) { $rawHex += "FF" }
+
+            if ($rawHex.Length -eq 8) {
+                $LibraryNames[$rawHex] = $name
+            }
         }
     }
 } else {
@@ -194,15 +201,17 @@ try {
                     if ($weight -gt 0) {
                         $filData[$i].g = [math]::Round($weight, 2)
 
-                        # Normalize hex code to guarantee reverse lookup matches
-                        $hexColor = $node.color.ToUpper()
-                        if ($hexColor.Length -eq 7) { $hexColor += "FF" }
+                        # Normalize hex code to pure alphanumeric for the dictionary match
+                        $rawHex = $node.color.Replace('"','').Trim().ToUpper()
+                        if ($rawHex.StartsWith('#')) { $rawHex = $rawHex.Substring(1) }
 
-                        if ($LibraryNames.Contains($hexColor)) {
-                            $filData[$i].color = $LibraryNames[$hexColor]
+                        if ($rawHex.Length -eq 6) { $rawHex += "FF" }
+
+                        if ($LibraryNames.Contains($rawHex)) {
+                            $filData[$i].color = $LibraryNames[$rawHex]
                         } else {
-                            # Fallback to the raw hex if it's completely missing from your CSV
-                            $filData[$i].color = $hexColor
+                            # Fallback to the raw hex with the # put back so it looks normal in Sheets
+                            $filData[$i].color = "#" + $rawHex
                         }
                     }
                 }
@@ -258,29 +267,29 @@ try {
     # --- 6. Extract Single Object Time (If Provided) ---
     $timeAdd = 0
     $singlePrintTimeStr = "N/A"
-    
+
     if ($SingleFile -ne "" -and (Test-Path $SingleFile)) {
         try {
             $singleArchive = [System.IO.Compression.ZipFile]::OpenRead($SingleFile)
             $singleGcode = $singleArchive.Entries | Where-Object { $_.FullName -like "*.gcode" } | Select-Object -First 1
             $singleAnalyzer = New-Object GcodeAnalyzer
-            
+
             if ($singleGcode) {
                 $singleStream = $singleGcode.Open()
                 $singleAnalyzer.Analyze($singleStream, 0)
                 $singlePrintTimeStr = $singleAnalyzer.PrintTime
-                
+
                 $sd = 0; $sh = 0; $sm = 0
                 if ($singleAnalyzer.PrintTime -match '(\d+)d') { $sd = [int]$matches[1] }
                 if ($singleAnalyzer.PrintTime -match '(\d+)h') { $sh = [int]$matches[1] }
                 if ($singleAnalyzer.PrintTime -match '(\d+)m') { $sm = [int]$matches[1] }
                 if ($singleAnalyzer.PrintTime -match '(\d+)s' -and [int]$matches[1] -ge 30) { $sm++ }
-                
+
                 $sh += ($sd * 24)
                 if ($sm -ge 60) { $sm -= 60; $sh++ }
-                
+
                 $singleTotalMinutes = ($sh * 60) + $sm
-                
+
                 if ($objCount -gt 1) {
                     $timeAdd = [math]::Round(($totalMinutes - $singleTotalMinutes) / ($objCount - 1), 2)
                 }
@@ -292,9 +301,11 @@ try {
         }
     }
 
+    $projectName = ((Split-Path $InputFile -Leaf) -replace '\.gcode\.3mf$', '')
+
     $outputValues = @(
-        ((Split-Path $InputFile -Leaf) -replace '\.gcode\.3mf$', ''),
-        "", 
+        $projectName,
+        "",
         (Get-Date).ToString("M/d/yyyy"),
         $h,
         $m,
@@ -306,7 +317,7 @@ try {
         $filData[3].color,
         $(if ($filData[4].g -gt 0) { $filData[4].g } else { 0 }),
         $filData[4].color,
-        "", 
+        "",
         $actualColorSwaps,
         $objCount,
         [math]::Round($modelGrams, 2),
@@ -328,19 +339,40 @@ try {
         Write-Host "Data was NOT saved to the TSV files (ConsoleOnly flag used)." -ForegroundColor Yellow
     } else {
         $tsvLine = $outputValues -join "`t"
-        
+
         # Fallback if no paths are provided
         if (-not $MasterTsvPath -and -not $IndividualTsvPath) {
             $MasterTsvPath = Join-Path (Split-Path $InputFile -Parent) "ExtractionResults.tsv"
         }
 
+        # --- UPSERT LOGIC FOR MASTER TSV ---
         if ($MasterTsvPath) {
-            Add-Content -Path $MasterTsvPath -Value $tsvLine
-            Write-Host "Success! Appended to Master: $MasterTsvPath" -ForegroundColor Green
+            if (Test-Path $MasterTsvPath) {
+                # Read all existing lines
+                $lines = @(Get-Content $MasterTsvPath)
+                $found = $false
+
+                # Scan for an exact match of the Project Name in the first column
+                for ($i = 0; $i -lt $lines.Count; $i++) {
+                    if ($lines[$i] -match "^$([regex]::Escape($projectName))\t") {
+                        $lines[$i] = $tsvLine
+                        $found = $true
+                        break
+                    }
+                }
+
+                # If not found, append to the bottom
+                if (-not $found) { $lines += $tsvLine }
+
+                Set-Content -Path $MasterTsvPath -Value $lines
+            } else {
+                Set-Content -Path $MasterTsvPath -Value $tsvLine
+            }
+            Write-Host "Success! Upserted to Master: $MasterTsvPath" -ForegroundColor Green
         }
-        
+
+        # --- STRICT OVERWRITE FOR INDIVIDUAL TSV ---
         if ($IndividualTsvPath) {
-            # Overwrite the individual file each time so it stays clean
             Set-Content -Path $IndividualTsvPath -Value $tsvLine
             Write-Host "Success! Saved Individual: $IndividualTsvPath" -ForegroundColor Green
         }
