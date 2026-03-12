@@ -21,6 +21,11 @@ set "MASTER_DATA=!REPORT_DIR!!TARGET_NAME!_Design_Data.tsv"
 set "FILELIST=%TEMP%\merge_3mf_list_%RANDOM%.txt"
 set "SLICELIST=%TEMP%\slice_3mf_list_%RANDOM%.txt"
 
+:: --- PRE-FLIGHT CLEANUP WORKER ---
+:: We strip the trailing backslash so it doesn't accidentally escape the quote mark!
+set "CLEAN_DIR=!REPORT_DIR:~0,-1!"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0cleanup_old_worker.ps1" -TargetDir "!CLEAN_DIR!"
+
 :: Silent Cleanup
 for /d /r "%~dp1" %%d in (temp_3mf_extract) do ( if exist "%%d" rmdir /s /q "%%d" 2>nul )
 
