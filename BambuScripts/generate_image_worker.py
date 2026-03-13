@@ -67,7 +67,7 @@ def main():
 
     # Create the specific output filename for the Batch script to find
     # Example: "MyModel_Full.gcode.3mf" -> "MyModel_slicePreview.png"
-    base_filename = re.sub(r'(?i)[._-]Full(\.gcode)?\.3mf$', '', original_name)
+    base_filename = re.sub(r'(?i)[._-]Full(\.gcode(\.3mf)?)?$', '', original_name)
     output_filename = f"{base_filename}_slicePreview.png"
     output_path = os.path.join(os.path.dirname(args.out), output_filename)
 

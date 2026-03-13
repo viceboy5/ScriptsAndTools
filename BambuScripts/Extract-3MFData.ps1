@@ -372,17 +372,15 @@ if ($GenerateImage) {
             Write-Host "  -> Generating Composite Card... " -ForegroundColor Cyan -NoNewline
 
             $inputFolder = Split-Path $InputFile -Parent
-            $outImg = Join-Path $inputFolder "$projectName.png"
 
-            # Python strips [._-]Full from the name and appends _slicePreview.png
-            # e.g. projectName "Bat.Full" -> pyBaseName "Bat" -> "Bat_slicePreview.png"
-            $pyBaseName = $projectName -replace '(?i)[._-]Full$', ''
+            # Compute exact filename Python will write - prevents stray files in script dir
+            $pyBaseName  = $projectName -replace '(?i)[._-]Full$', ''
             $expectedPng = Join-Path $inputFolder "${pyBaseName}_slicePreview.png"
 
             $sourceImg = ""
             $isTemp = $false
 
-            # 1. Search the folder for a custom PNG (never pick up a previously generated slicePreview)
+            # 1. Search the folder for a custom PNG (exclude previously generated previews)
             $customPng = Get-ChildItem -Path $inputFolder -Filter "*.png" |
                          Where-Object { $_.Name -ne "$projectName.png" -and $_.Name -notlike "*_slicePreview.png" } |
                          Select-Object -First 1
@@ -412,7 +410,8 @@ if ($GenerateImage) {
 
             if (Test-Path $sourceImg) {
                 # Build Python arguments
-                $pyArgs = @($pyScript, "--name", "`"$projectName`"", "--time", "`"$timeAdd`"", "--img", "`"$sourceImg`"", "--out", "`"$outImg`"", "--colors")
+                # Pass $expectedPng as --out so Python's os.path.dirname() resolves correctly
+                $pyArgs = @($pyScript, "--name", "`"$projectName`"", "--time", "`"$timeAdd`"", "--img", "`"$sourceImg`"", "--out", "`"$expectedPng`"", "--colors")
                 foreach ($i in 1..4) {
                     if ($filData[$i].g -gt 0) {
                         $pyArgs += "`"$($filData[$i].color)|$($filData[$i].rawHex)|$($filData[$i].g)`""
@@ -421,7 +420,12 @@ if ($GenerateImage) {
 
                 $pyLog = Join-Path $env:TEMP "python_error.log"
                 # Call Python to build the image
-                $proc = Start-Process -FilePath "python" -ArgumentList $pyArgs -Wait -NoNewWindow -PassThru -RedirectStandardError $pyLog
+                $proc = Start-Process -FilePath "python" -ArgumentList $pyArgs -NoNewWindow -PassThru -RedirectStandardError $pyLog
+                # Poll instead of -Wait so the GUI stays responsive during Python's collision detection
+                while (-not $proc.HasExited) {
+                    [System.Windows.Forms.Application]::DoEvents()
+                    Start-Sleep -Milliseconds 100
+                }
 
                 if (Test-Path $expectedPng) {
                     Write-Host "[DONE]" -ForegroundColor Green
