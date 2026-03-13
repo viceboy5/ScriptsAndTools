@@ -58,15 +58,38 @@ def main():
     canvas = Image.new("RGBA", (CANVAS_SIZE, CANVAS_SIZE), (75, 75, 80, 255))
     draw = ImageDraw.Draw(canvas)
 
-    # --- 2. DRAW CHARACTER IMAGE ---
+    # --- 2. DRAW CHARACTER IMAGE (AUTO-CROP & SAFE ZONE SCALING) ---
     if os.path.exists(args.img):
         char_img = Image.open(args.img).convert("RGBA")
-        max_width = int(CANVAS_SIZE * IMAGE_LEFT_RATIO)
-        max_height = CANVAS_SIZE - MARGIN * 2
-        char_img.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
-        x = MARGIN
-        y = (CANVAS_SIZE - char_img.height) // 2
-        canvas.paste(char_img, (x, y), char_img)
+
+        # Auto-Crop: Remove excess transparent pixels around the model
+        bbox = char_img.getbbox()
+        if bbox:
+            char_img = char_img.crop(bbox)
+
+        # Define the Safe Zone for a 512x512 Canvas (MAXIMIZED)
+        safe_x_start = 10  # Pushed almost to the absolute left edge
+        safe_y_start = 65  # Snug right up under the Title
+        safe_max_width = 275  # Expanded right, stopping just short of filament names
+        safe_max_height = 380  # Pushed down, stopping just millimeters above "Skip Time"
+
+        # Calculate the perfect scale factor
+        width_ratio = safe_max_width / char_img.width
+        height_ratio = safe_max_height / char_img.height
+        scale_factor = min(width_ratio, height_ratio)
+
+        new_width = int(char_img.width * scale_factor)
+        new_height = int(char_img.height * scale_factor)
+
+        # Resize smoothly
+        char_img = char_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+        # Center the image within the invisible Safe Zone box
+        paste_x = safe_x_start + (safe_max_width - new_width) // 2
+        paste_y = safe_y_start + (safe_max_height - new_height) // 2
+
+        # Paste using itself as the transparency mask
+        canvas.paste(char_img, (paste_x, paste_y), char_img)
 
     # --- 3. DYNAMIC FONT SCALING FOR NAME ---
     current_font_size = 46
