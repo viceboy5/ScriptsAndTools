@@ -201,7 +201,6 @@ $btnStart.Add_Click({
     $txtLog.Clear()
     Write-Log "=== AUTOMATION ENGINE ENGAGED ===" "Cyan"
     Write-Log "Target: $targetDir" "DarkGray"
-
     # ---------------------------------------------------------
     # ROUTE A: REVERT MODE
     # ---------------------------------------------------------
@@ -214,12 +213,18 @@ $btnStart.Add_Click({
         $nestFiles = Get-ChildItem -Path $targetDir -Filter "*Nest.3mf"
         if ($nestFiles.Count -eq 0) { Write-Log "[-] No Nest files found to revert." "Red" }
 
+        # This variable natively tells RevertMerge.bat to skip its 'pause' commands!
+        $env:WORKER_MODE = "1"
+
         foreach ($file in $nestFiles) {
             if ($script:cancelRun) { Write-Log "`n>>> OPERATION ABORTED <<<" "Red"; break }
             Write-Log "`n=== Reverting: $($file.Name) ===" "Orange"
 
             try {
-                $command = "& `"$scriptDir\RevertMerge.bat`" `"$($file.FullName)`" *>&1"
+                # Standard clean call, exactly like the other standalone workers
+                $batPath = Join-Path $scriptDir "RevertMerge.bat"
+                $command = "& `"$batPath`" `"$($file.FullName)`" *>&1"
+
                 Invoke-Expression $command | ForEach-Object {
                     Write-Log "     $_" "LightGray"
                     [System.Windows.Forms.Application]::DoEvents()
@@ -289,10 +294,16 @@ $btnStart.Add_Click({
             # ------------------------------
 
             # ---------------------------------------------------------
+            # --- CORRECTED BASE NAME MATH ---
+            # $baseName is "Bat.Full". We strip the last 4 chars to get "Bat."
+            $basePrefix = $baseName.Substring(0, $baseName.Length - 4)
+            $nestBase   = $basePrefix + "Nest"
+            $finalBase  = $basePrefix + "Final"
+
+            # ---------------------------------------------------------
             # PHASE 1: PREP, COLORS, AND MERGE
             # ---------------------------------------------------------
             if ($doColors -or $doMerge) {
-                # Setup Temp Working Directory
                 $tempWork = Join-Path $env:TEMP ("merge_work_" + [System.IO.Path]::GetRandomFileName())
                 New-Item -ItemType Directory -Path $tempWork | Out-Null
 
@@ -302,7 +313,7 @@ $btnStart.Add_Click({
                 } catch {
                     Write-Log "  [!] Error extracting 3MF: $_" "Red"
                     Remove-Item -Path $tempWork -Recurse -Force -ErrorAction SilentlyContinue
-                    continue # Skip to the next file
+                    continue
                 }
 
                 # 1. COLOR WORKER
@@ -326,15 +337,15 @@ $btnStart.Add_Click({
                         $command = "& `"$scriptDir\merge_3mf_worker.ps1`" -WorkDir `"$tempWork`" -InputPath `"$inputPath`" -OutputPath `"$tempOutPath`" -ReportPath `"$repPath`" -DoColors `"$doColFlag`" *>&1"
                         Invoke-Expression $command | ForEach-Object { Write-Log "     $_" "LightGray"; [System.Windows.Forms.Application]::DoEvents() }
 
-                        # Handle the Nest / Original renaming exactly like the batch script did
-                        $nestName = "$baseName`Nest.3mf"
+                        # --- CORRECTED RENAMING LOGIC ---
+                        $nestName = "$nestBase.3mf"
                         $nestPath = Join-Path $targetDir $nestName
                         Rename-Item -Path $inputPath -NewName $nestName -Force
                         Rename-Item -Path $tempOutPath -NewName $inputName -Force
 
                         # Isolate Final Object
                         Write-Log "  -> Isolating Final Object..." "Cyan"
-                        $finalPath = Join-Path $targetDir "$baseName`Final.3mf"
+                        $finalPath = Join-Path $targetDir "$finalBase.3mf"
                         if (Test-Path $finalPath) { Remove-Item $finalPath -Force }
 
                         $tempSingle = Join-Path $env:TEMP ("single_work_" + [System.IO.Path]::GetRandomFileName())
@@ -349,7 +360,6 @@ $btnStart.Add_Click({
                 }
                 if ($script:cancelRun) { break }
 
-                # Cleanup main temp work dir
                 Remove-Item -Path $tempWork -Recurse -Force -ErrorAction SilentlyContinue
             }
 
@@ -359,7 +369,7 @@ $btnStart.Add_Click({
             # 3. SLICER WORKER
             if ($doSlice) {
                 Write-Log "  -> Slicing & Exporting Gcode..." "Cyan"
-                $isolatedPath = Join-Path $targetDir "$baseName`Final.3mf"
+                $isolatedPath = Join-Path $targetDir "$finalBase.3mf"
                 try {
                     $command = "& `"$scriptDir\slicer_automation_worker.ps1`" -InputPath `"$inputPath`" -IsolatedPath `"$isolatedPath`" *>&1"
                     Invoke-Expression $command | ForEach-Object { Write-Log "     $_" "LightGray"; [System.Windows.Forms.Application]::DoEvents() }
@@ -370,7 +380,7 @@ $btnStart.Add_Click({
             # 4. EXTRACTION & IMAGE WORKER
             if ($doExtract -or $doImage) {
                 $slicedFile = Join-Path $targetDir "$baseName.gcode.3mf"
-                $singleFile = Join-Path $targetDir "$baseName`Final.gcode.3mf"
+                $singleFile = Join-Path $targetDir "$finalBase.gcode.3mf"
 
                 $extractArgs = @(
                     "-InputFile", "`"$slicedFile`"",
@@ -380,16 +390,22 @@ $btnStart.Add_Click({
 
                 if (Test-Path $singleFile) { $extractArgs += "-SingleFile", "`"$singleFile`"" }
                 if ($doImage) { $extractArgs += "-GenerateImage" }
-                if (-not $doExtract) { $extractArgs += "-SkipExtraction" }
+                if (-not $doSlice) { $extractArgs += "-SkipExtraction" }
 
                 Write-Log "  -> Extracting Data / Generating Image..." "Cyan"
                 try {
                     $command = "& `"$scriptDir\Extract-3MFData.ps1`" $extractArgs *>&1"
                     Invoke-Expression $command | ForEach-Object { Write-Log "     $_" "LightGray"; [System.Windows.Forms.Application]::DoEvents() }
+
+                    # --- CORRECTED SILENT CLEANUP ---
+                    if (Test-Path $singleFile) {
+                        Remove-Item $singleFile -Force -ErrorAction SilentlyContinue
+                        Write-Log "  [+] Cleaned up temporary $finalBase.gcode.3mf" "DarkGray"
+                    }
                 } catch { Write-Log "  [!] Error: $_" "Red" }
             }
         }
-    }
+    } # <--- THIS IS THE BRACKET THAT WAS MISSING!
 
     if (-not $script:cancelRun) { Write-Log "`n=== ALL TASKS COMPLETE ===" "LightGreen" }
 
