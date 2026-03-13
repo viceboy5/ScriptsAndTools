@@ -55,25 +55,36 @@ goto collect_loop
 :begin_process
 if !TOTAL!==0 exit /b 1
 
-set /p "CHOICE_SLICE=Automated slice and extract data? (Y/N): "
+set /p "CHOICE_SLICE=Automated slice files? (Y/N): "
 if /I "!CHOICE_SLICE!"=="Y" ( set "DO_SLICE=1" ) else ( set "DO_SLICE=0" )
 
 set /p "CHOICE_COLORS=Scan and pick new colors? (Y/N): "
 if /I "!CHOICE_COLORS!"=="Y" ( set "DO_COLORS=1" ) else ( set "DO_COLORS=0" )
 
-:: --- NEW IMAGE PROMPT ---
+:: --- IMAGE LOGIC ---
 set /p "CHOICE_IMAGE=Generate composite image cards? (Y/N): "
 set "GEN_IMAGE_SWITCH="
 if /I "!CHOICE_IMAGE!"=="Y" ( set "GEN_IMAGE_SWITCH=-GenerateImage" )
-:: ------------------------
 
+:: --- EXTRACTION LOGIC ---
+set /p "CHOICE_DATA=Extract data / update TSV? (Y/N): "
+set "DO_EXTRACT=0"
+if /I "!CHOICE_DATA!"=="Y" ( set "DO_EXTRACT=1" )
+if "!DO_SLICE!"=="1" ( set "DO_EXTRACT=1" )
+
+:: Master switch: Do we need to call PowerShell in Phase 2 at all?
+set "CALL_PS1=0"
+if "!DO_EXTRACT!"=="1" set "CALL_PS1=1"
+if not "!GEN_IMAGE_SWITCH!"=="" set "CALL_PS1=1"
 echo.
 echo ==============================================================
 echo PHASE 1: PREPARATION ^& COLOR MAPPING (Requires User Input)
 echo ==============================================================
 for /f "usebackq delims=" %%F in ("%FILELIST%") do call :prepare_file "%%F"
 
-if "!DO_SLICE!"=="0" goto skip_slicing_phase
+if "!DO_SLICE!"=="0" (
+    if "!CALL_PS1!"=="0" goto skip_slicing_phase
+)
 
 echo.
 echo ==============================================================
@@ -150,8 +161,13 @@ if exist "!NEST_PATH!" (
     echo   [!] PREVIOUS MERGE DETECTED.
     choice /C YN /M "      Do you want to REVERT this file and re-process it"
     if errorlevel 2 (
-        echo   [-] Skipping !INPUTNAME!.
+        echo   [-] Skipping Prep for !INPUTNAME!.
         set /a PREP_SKIPPED+=1
+
+        :: Queue for Phase 2 if we need images or data
+        if "!CALL_PS1!"=="1" (
+            echo !INPUT!>> "%SLICELIST%"
+        )
         goto :eof
     )
     echo   [+] Calling Revert Worker...
@@ -208,21 +224,35 @@ set "SLICED_OUT=!INPUTDIR!!INPUTBASE!.gcode.3mf"
 set "SLICED_FINAL_TEMP=!INPUTDIR!!FINALBASE!.gcode.3mf"
 
 set /a _SIDX=SLICE_PROCESSED+SLICE_ERRORS+1
-echo [!_SIDX!/!PREP_PROCESSED!] Slicing: !INPUTNAME!
+echo.
+echo [!_SIDX!/!PREP_PROCESSED!] Processing Phase 2: !INPUTNAME!
 
-:: 1. Call the new Slicer Worker
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0slicer_automation_worker.ps1" -InputPath "!INPUT!" -IsolatedPath "!FINAL_PATH!"
-if errorlevel 1 (
-    set /a SLICE_ERRORS+=1
-    goto :eof
+:: 1. CONDITIONAL SLICING
+if "!DO_SLICE!"=="1" (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0slicer_automation_worker.ps1" -InputPath "!INPUT!" -IsolatedPath "!FINAL_PATH!"
+    if errorlevel 1 (
+        set /a SLICE_ERRORS+=1
+        goto :eof
+    )
+) else (
+    if not exist "!SLICED_OUT!" (
+        echo   [-] No sliced .gcode.3mf found to extract from. Skipping.
+        set /a SLICE_ERRORS+=1
+        goto :eof
+    ) else (
+        echo   [*] Slicing bypassed. Extracting from existing file...
+    )
 )
 
+:: 2. EXTRACTION & IMAGE GENERATION
+set "EXTRACT_FLAGS="
+if "!DO_EXTRACT!"=="0" set "EXTRACT_FLAGS=-SkipExtraction"
+
 if exist "!SLICED_FINAL_TEMP!" (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Extract-3MFData.ps1" -InputFile "!SLICED_OUT!" -SingleFile "!SLICED_FINAL_TEMP!" -MasterTsvPath "!MASTER_DATA!" -IndividualTsvPath "!INPUTDIR!!INPUTBASE!_Data.tsv" !GEN_IMAGE_SWITCH!
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Extract-3MFData.ps1" -InputFile "!SLICED_OUT!" -SingleFile "!SLICED_FINAL_TEMP!" -MasterTsvPath "!MASTER_DATA!" -IndividualTsvPath "!INPUTDIR!!INPUTBASE!_Data.tsv" !GEN_IMAGE_SWITCH! !EXTRACT_FLAGS!
     del "!SLICED_FINAL_TEMP!" /q
 ) else (
-    echo   [!] WARNING: Isolated object failed to slice.
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Extract-3MFData.ps1" -InputFile "!SLICED_OUT!" -MasterTsvPath "!MASTER_DATA!" -IndividualTsvPath "!INPUTDIR!!INPUTBASE!_Data.tsv" !GEN_IMAGE_SWITCH!
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Extract-3MFData.ps1" -InputFile "!SLICED_OUT!" -MasterTsvPath "!MASTER_DATA!" -IndividualTsvPath "!INPUTDIR!!INPUTBASE!_Data.tsv" !GEN_IMAGE_SWITCH! !EXTRACT_FLAGS!
 )
 
 echo   OK --^> Success.

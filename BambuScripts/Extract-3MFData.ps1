@@ -10,7 +10,8 @@ param (
     [string]$MasterTsvPath = "",
     [string]$IndividualTsvPath = "",
 
-    [switch]$GenerateImage # <--- Add this new parameter
+    [switch]$GenerateImage,
+    [switch]$SkipExtraction
 )
 
 if ($ConsoleOnly) {
@@ -24,6 +25,7 @@ $colorCsvPath = Join-Path $scriptDir "colorNamesCSV.csv"
 
 # --- 1. Load the Reverse-Lookup Color Dictionary (RGB EDITION) ---
 $LibraryNames = @{}
+$NameToHex = @{}
 if (Test-Path $colorCsvPath) {
     $csvLines = Get-Content -Path $colorCsvPath
     foreach ($line in $csvLines) {
@@ -33,8 +35,6 @@ if (Test-Path $colorCsvPath) {
         # Ensure we have at least Name, R, G, B
         if ($parts.Count -ge 4) {
             $name = $parts[0].Replace('"','').Trim()
-
-            # Skip the header row if it exists
             if ($name -match '(?i)^name$' -or $name -eq "N/A" -or $name -eq "") { continue }
 
             try {
@@ -42,12 +42,12 @@ if (Test-Path $colorCsvPath) {
                 $g = [int]$parts[2].Replace('"','').Trim()
                 $b = [int]$parts[3].Replace('"','').Trim()
 
-                # Format exactly as 8-character alphanumeric for the dictionary match
                 $rawHex = "{0:X2}{1:X2}{2:X2}FF" -f $r, $g, $b
                 $LibraryNames[$rawHex] = $name
-            } catch {
-                continue
-            }
+
+                # --- NEW: Save Hex for TSV Reversal ---
+                $NameToHex[$name] = "#" + $rawHex
+            } catch { continue }
         }
     }
 } else {
@@ -175,162 +175,196 @@ public class GcodeAnalyzer {
 if (-not ("GcodeAnalyzer" -as [type])) { Add-Type -TypeDefinition $csharpCode -Language CSharp }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-try {
-    $zipArchive = [System.IO.Compression.ZipFile]::OpenRead($InputFile)
+# ---------------------------------------------------------------------------------
+# INITIALIZE VARIABLES
+# ---------------------------------------------------------------------------------
+$projectName = ((Split-Path $InputFile -Leaf) -replace '\.gcode\.3mf$', '')
+$timeAdd = 0
+$filData = @(
+    @{ g = 0; color = ""; rawHex = "" }, @{ g = 0; color = ""; rawHex = "" },
+    @{ g = 0; color = ""; rawHex = "" }, @{ g = 0; color = ""; rawHex = "" }, @{ g = 0; color = ""; rawHex = "" }
+)
+$outputValues = @()
+$h = 0; $m = 0; $modelGrams = 0; $objCount = 0; $actualColorSwaps = 0
+$singlePrintTimeStr = "N/A"
+$analyzer = $null
 
-    $totalGrams = 0.0; $totalMeters = 0.0; $objCount = 0
 
-    $filData = @(
-        @{ g = 0; color = ""; rawHex = "" }, @{ g = 0; color = ""; rawHex = "" },
-        @{ g = 0; color = ""; rawHex = "" }, @{ g = 0; color = ""; rawHex = "" }, @{ g = 0; color = ""; rawHex = "" }
-    )
+# ---------------------------------------------------------------------------------
+# DATA COLLECTION (HEAVY EXTRACTION OR FAST TSV READ)
+# ---------------------------------------------------------------------------------
+if (-not $SkipExtraction) {
+    try {
+        $zipArchive = [System.IO.Compression.ZipFile]::OpenRead($InputFile)
 
-    # --- 3. Extract Metadata (XML) ---
-    $configEntry = $zipArchive.Entries | Where-Object { $_.FullName -replace '\\', '/' -match "Metadata/slice_info\.config$" }
-    if ($configEntry) {
-        $configStream = $configEntry.Open()
-        $configReader = [System.IO.StreamReader]::new($configStream)
-        $configContent = $configReader.ReadToEnd()
-        $configReader.Close()
+        $totalGrams = 0.0; $totalMeters = 0.0; $objCount = 0
 
-        try {
-            [xml]$xml = $configContent
+        # --- 3. Extract Metadata (XML) ---
+        $configEntry = $zipArchive.Entries | Where-Object { $_.FullName -replace '\\', '/' -match "Metadata/slice_info\.config$" }
+        if ($configEntry) {
+            $configStream = $configEntry.Open()
+            $configReader = [System.IO.StreamReader]::new($configStream)
+            $configContent = $configReader.ReadToEnd()
+            $configReader.Close()
 
-            foreach ($i in 1..4) {
-                $node = $xml.SelectSingleNode("//filament[@id='$i']")
-                if ($node) {
-                    $weight = 0.0
-                    [double]::TryParse($node.used_g, [System.Globalization.NumberStyles]::Any, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$weight) | Out-Null
+            try {
+                [xml]$xml = $configContent
 
-                    if ($weight -gt 0) {
-                        $filData[$i].g = [math]::Round($weight, 2)
+                foreach ($i in 1..4) {
+                    $node = $xml.SelectSingleNode("//filament[@id='$i']")
+                    if ($node) {
+                        $weight = 0.0
+                        [double]::TryParse($node.used_g, [System.Globalization.NumberStyles]::Any, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$weight) | Out-Null
 
-                        # Normalize hex code to pure alphanumeric for the dictionary match
-                        $rawHex = $node.color.Replace('"','').Trim().ToUpper()
-                        if ($rawHex.StartsWith('#')) { $rawHex = $rawHex.Substring(1) }
+                        if ($weight -gt 0) {
+                            $filData[$i].g = [math]::Round($weight, 2)
 
-                        if ($rawHex.Length -eq 6) { $rawHex += "FF" }
+                            # Normalize hex code to pure alphanumeric for the dictionary match
+                            $rawHex = $node.color.Replace('"','').Trim().ToUpper()
+                            if ($rawHex.StartsWith('#')) { $rawHex = $rawHex.Substring(1) }
 
-                        $filData[$i].rawHex = "#" + $rawHex # <--- ADD THIS LINE HERE
+                            if ($rawHex.Length -eq 6) { $rawHex += "FF" }
 
-                        if ($LibraryNames.Contains($rawHex)) {
-                            $filData[$i].color = $LibraryNames[$rawHex]
-                        } else {
-                            # Fallback to the raw hex with the # put back so it looks normal in Sheets
-                            $filData[$i].color = "#" + $rawHex
+                            $filData[$i].rawHex = "#" + $rawHex
+
+                            if ($LibraryNames.Contains($rawHex)) {
+                                $filData[$i].color = $LibraryNames[$rawHex]
+                            } else {
+                                $filData[$i].color = "#" + $rawHex
+                            }
                         }
                     }
                 }
-            }
 
-            # --- STRICT Pre-Merge Object Count Logic ---
-            $objs = $xml.SelectNodes('//plate/object')
-            if ($objs) {
-                foreach ($o in $objs) {
-                    $objName = $o.name
-                    if ($objName -match '(?i)text|version') { continue }
-
-                    # Only parse numbers that explicitly follow our safe "MergedGroup_" tag
-                    if ($objName -match 'MergedGroup_(\d+)$') { $objCount += [int]$matches[1] }
-                    else { $objCount += 1 }
+                # --- STRICT Pre-Merge Object Count Logic ---
+                $objs = $xml.SelectNodes('//plate/object')
+                if ($objs) {
+                    foreach ($o in $objs) {
+                        $objName = $o.name
+                        if ($objName -match '(?i)text|version') { continue }
+                        if ($objName -match 'MergedGroup_(\d+)$') { $objCount += [int]$matches[1] }
+                        else { $objCount += 1 }
+                    }
                 }
-            }
-        } catch { Write-Warning "Could not parse XML properly." }
+            } catch { Write-Warning "Could not parse XML properly." }
 
-        $gramMatches = [regex]::Matches($configContent, 'used_g="([0-9.]+)"')
-        foreach ($match in $gramMatches) { $totalGrams += [double]::Parse($match.Groups[1].Value, [System.Globalization.CultureInfo]::InvariantCulture) }
-        $meterMatches = [regex]::Matches($configContent, 'used_m="([0-9.]+)"')
-        foreach ($match in $meterMatches) { $totalMeters += [double]::Parse($match.Groups[1].Value, [System.Globalization.CultureInfo]::InvariantCulture) }
-    }
-
-    $gramsPerMm = 0.0
-    if ($totalMeters -gt 0) { $gramsPerMm = $totalGrams / ($totalMeters * 1000) }
-
-    # --- 4. Pass the torch to C# (Full Plate) ---
-    $gcodeEntry = $zipArchive.Entries | Where-Object { $_.FullName -like "*.gcode" } | Select-Object -First 1
-    $analyzer = New-Object GcodeAnalyzer
-    if ($gcodeEntry) {
-        $gcodeStream = $gcodeEntry.Open()
-        $analyzer.Analyze($gcodeStream, $gramsPerMm)
-    }
-    $zipArchive.Dispose()
-
-    # --- 5. Crunch Final Math & Format ---
-    $modelGrams = $totalGrams - $analyzer.FlushGrams - $analyzer.TowerGrams
-
-    $d = 0; $h = 0; $m = 0
-    if ($analyzer.PrintTime -match '(\d+)d') { $d = [int]$matches[1] }
-    if ($analyzer.PrintTime -match '(\d+)h') { $h = [int]$matches[1] }
-    if ($analyzer.PrintTime -match '(\d+)m') { $m = [int]$matches[1] }
-    if ($analyzer.PrintTime -match '(\d+)s' -and [int]$matches[1] -ge 30) { $m++ }
-
-    $h += ($d * 24)
-    if ($m -ge 60) { $m -= 60; $h++ }
-
-    $totalMinutes = ($h * 60) + $m
-    $actualColorSwaps = [math]::Max(0, ($analyzer.ColorChanges - 1))
-
-    # --- 6. Extract Single Object Time (If Provided) ---
-    $timeAdd = 0
-    $singlePrintTimeStr = "N/A"
-
-    if ($SingleFile -ne "" -and (Test-Path $SingleFile)) {
-        try {
-            $singleArchive = [System.IO.Compression.ZipFile]::OpenRead($SingleFile)
-            $singleGcode = $singleArchive.Entries | Where-Object { $_.FullName -like "*.gcode" } | Select-Object -First 1
-            $singleAnalyzer = New-Object GcodeAnalyzer
-
-            if ($singleGcode) {
-                $singleStream = $singleGcode.Open()
-                $singleAnalyzer.Analyze($singleStream, 0)
-                $singlePrintTimeStr = $singleAnalyzer.PrintTime
-
-                $sd = 0; $sh = 0; $sm = 0
-                if ($singleAnalyzer.PrintTime -match '(\d+)d') { $sd = [int]$matches[1] }
-                if ($singleAnalyzer.PrintTime -match '(\d+)h') { $sh = [int]$matches[1] }
-                if ($singleAnalyzer.PrintTime -match '(\d+)m') { $sm = [int]$matches[1] }
-                if ($singleAnalyzer.PrintTime -match '(\d+)s' -and [int]$matches[1] -ge 30) { $sm++ }
-
-                $sh += ($sd * 24)
-                if ($sm -ge 60) { $sm -= 60; $sh++ }
-
-                $singleTotalMinutes = ($sh * 60) + $sm
-
-                if ($objCount -gt 1) {
-                    $timeAdd = [math]::Round(($totalMinutes - $singleTotalMinutes) / ($objCount - 1), 2)
-                }
-            }
-            $singleArchive.Dispose()
-        } catch {
-            Write-Warning "Failed to read Single Object file for Time Add/Wig math."
-            if ($null -ne $singleArchive) { $singleArchive.Dispose() }
+            $gramMatches = [regex]::Matches($configContent, 'used_g="([0-9.]+)"')
+            foreach ($match in $gramMatches) { $totalGrams += [double]::Parse($match.Groups[1].Value, [System.Globalization.CultureInfo]::InvariantCulture) }
+            $meterMatches = [regex]::Matches($configContent, 'used_m="([0-9.]+)"')
+            foreach ($match in $meterMatches) { $totalMeters += [double]::Parse($match.Groups[1].Value, [System.Globalization.CultureInfo]::InvariantCulture) }
         }
+
+        $gramsPerMm = 0.0
+        if ($totalMeters -gt 0) { $gramsPerMm = $totalGrams / ($totalMeters * 1000) }
+
+        # --- 4. Pass the torch to C# (Full Plate) ---
+        $gcodeEntry = $zipArchive.Entries | Where-Object { $_.FullName -like "*.gcode" } | Select-Object -First 1
+        $analyzer = New-Object GcodeAnalyzer
+        if ($gcodeEntry) {
+            $gcodeStream = $gcodeEntry.Open()
+            $analyzer.Analyze($gcodeStream, $gramsPerMm)
+        }
+        $zipArchive.Dispose()
+
+        # --- 5. Crunch Final Math & Format ---
+        $modelGrams = $totalGrams - $analyzer.FlushGrams - $analyzer.TowerGrams
+
+        $d = 0; $h = 0; $m = 0
+        if ($analyzer.PrintTime -match '(\d+)d') { $d = [int]$matches[1] }
+        if ($analyzer.PrintTime -match '(\d+)h') { $h = [int]$matches[1] }
+        if ($analyzer.PrintTime -match '(\d+)m') { $m = [int]$matches[1] }
+        if ($analyzer.PrintTime -match '(\d+)s' -and [int]$matches[1] -ge 30) { $m++ }
+
+        $h += ($d * 24)
+        if ($m -ge 60) { $m -= 60; $h++ }
+
+        $totalMinutes = ($h * 60) + $m
+        $actualColorSwaps = [math]::Max(0, ($analyzer.ColorChanges - 1))
+
+        # --- 6. Extract Single Object Time (If Provided) ---
+        if ($SingleFile -ne "" -and (Test-Path $SingleFile)) {
+            try {
+                $singleArchive = [System.IO.Compression.ZipFile]::OpenRead($SingleFile)
+                $singleGcode = $singleArchive.Entries | Where-Object { $_.FullName -like "*.gcode" } | Select-Object -First 1
+                $singleAnalyzer = New-Object GcodeAnalyzer
+
+                if ($singleGcode) {
+                    $singleStream = $singleGcode.Open()
+                    $singleAnalyzer.Analyze($singleStream, 0)
+                    $singlePrintTimeStr = $singleAnalyzer.PrintTime
+
+                    $sd = 0; $sh = 0; $sm = 0
+                    if ($singleAnalyzer.PrintTime -match '(\d+)d') { $sd = [int]$matches[1] }
+                    if ($singleAnalyzer.PrintTime -match '(\d+)h') { $sh = [int]$matches[1] }
+                    if ($singleAnalyzer.PrintTime -match '(\d+)m') { $sm = [int]$matches[1] }
+                    if ($singleAnalyzer.PrintTime -match '(\d+)s' -and [int]$matches[1] -ge 30) { $sm++ }
+
+                    $sh += ($sd * 24)
+                    if ($sm -ge 60) { $sm -= 60; $sh++ }
+
+                    $singleTotalMinutes = ($sh * 60) + $sm
+
+                    if ($objCount -gt 1) {
+                        $timeAdd = [math]::Round(($totalMinutes - $singleTotalMinutes) / ($objCount - 1), 2)
+                    }
+                }
+                $singleArchive.Dispose()
+            } catch {
+                Write-Warning "Failed to read Single Object file for Time Add/Wig math."
+                if ($null -ne $singleArchive) { $singleArchive.Dispose() }
+            }
+        }
+
+        $outputValues = @(
+            $projectName, "", (Get-Date).ToString("M/d/yyyy"),
+            $h, $m,
+            $(if ($filData[1].g -gt 0) { $filData[1].g } else { 0 }), $filData[1].color,
+            $(if ($filData[2].g -gt 0) { $filData[2].g } else { 0 }), $filData[2].color,
+            $(if ($filData[3].g -gt 0) { $filData[3].g } else { 0 }), $filData[3].color,
+            $(if ($filData[4].g -gt 0) { $filData[4].g } else { 0 }), $filData[4].color,
+            "", $actualColorSwaps, $objCount, [math]::Round($modelGrams, 2), "", $timeAdd
+        )
+    } catch {
+        Write-Error "Failed to process .gcode.3mf archive: $_"
+        if ($null -ne $zipArchive) { $zipArchive.Dispose() }
     }
+} else {
+    # --- FAST TSV-ONLY MODE ---
+    if ($IndividualTsvPath -ne "" -and (Test-Path $IndividualTsvPath)) {
+        Write-Host "  -> Skipping data extraction. Loading values from TSV..." -ForegroundColor Cyan
+        try {
+            $existingData = Get-Content $IndividualTsvPath | Select-Object -Last 1
+            $cols = $existingData -split "`t"
 
-    $projectName = ((Split-Path $InputFile -Leaf) -replace '\.gcode\.3mf$', '')
+            if ($cols.Count -ge 19) {
+                # Rebuild filament array from TSV columns
+                for ($i = 1; $i -le 4; $i++) {
+                    $gIdx = 5 + (($i - 1) * 2)
+                    $cIdx = $gIdx + 1
+                    if ([double]::TryParse($cols[$gIdx], [ref]$null)) { $filData[$i].g = [double]$cols[$gIdx] }
 
-    $outputValues = @(
-        $projectName,
-        "",
-        (Get-Date).ToString("M/d/yyyy"),
-        $h,
-        $m,
-        $(if ($filData[1].g -gt 0) { $filData[1].g } else { 0 }),
-        $filData[1].color,
-        $(if ($filData[2].g -gt 0) { $filData[2].g } else { 0 }),
-        $filData[2].color,
-        $(if ($filData[3].g -gt 0) { $filData[3].g } else { 0 }),
-        $filData[3].color,
-        $(if ($filData[4].g -gt 0) { $filData[4].g } else { 0 }),
-        $filData[4].color,
-        "",
-        $actualColorSwaps,
-        $objCount,
-        [math]::Round($modelGrams, 2),
-        "",
-        $timeAdd
-    )
-# --- 7. AUTO-GENERATE COMPOSITE IMAGE ---
+                    $filData[$i].color = $cols[$cIdx]
+                    if ($filData[$i].color -ne "") {
+                        if ($filData[$i].color.StartsWith("#")) {
+                            $filData[$i].rawHex = $filData[$i].color
+                        } else {
+                            $filData[$i].rawHex = $NameToHex[$filData[$i].color]
+                        }
+                    }
+                }
+                if ([double]::TryParse($cols[18], [ref]$null)) { $timeAdd = [double]$cols[18] }
+            }
+        } catch {
+            Write-Warning "Failed to read data from TSV."
+        }
+    } else {
+        Write-Warning "  -> [!] No TSV found to load data from. Image will be blank."
+    }
+}
+
+# ---------------------------------------------------------------------------------
+# 7. AUTO-GENERATE COMPOSITE IMAGE
+# ---------------------------------------------------------------------------------
 if ($GenerateImage) {
     try {
         $pyScript = Join-Path $scriptDir "generate_image_worker.py"
@@ -342,7 +376,7 @@ if ($GenerateImage) {
             $sourceImg = ""
             $isTemp = $false
 
-            # 1. Search the folder for a custom PNG (Phase 1 should have put one here if you provided it)
+            # 1. Search the folder for a custom PNG
             $customPng = Get-ChildItem -Path $inputFolder -Filter "*.png" |
                          Where-Object { $_.Name -ne "$projectName.png" } |
                          Select-Object -First 1
@@ -353,15 +387,21 @@ if ($GenerateImage) {
                 # 2. SILENT FALLBACK to internal plate_1.png (No prompts!)
                 $sourceImg = Join-Path $env:TEMP "$projectName_plate_1.png"
                 $isTemp = $true
-                $archive = [System.IO.Compression.ZipFile]::OpenRead($InputFile)
-                $plateEntry = $archive.Entries | Where-Object { $_.FullName -replace '\\', '/' -match "(?i)Metadata/plate_1\.png$" } | Select-Object -First 1
 
-                if ($plateEntry) {
-                    [System.IO.Compression.ZipFileExtensions]::ExtractToFile($plateEntry, $sourceImg, $true)
+                # Protect against the archive not existing in TSV-Only mode
+                if (Test-Path $InputFile) {
+                    $archive = [System.IO.Compression.ZipFile]::OpenRead($InputFile)
+                    $plateEntry = $archive.Entries | Where-Object { $_.FullName -replace '\\', '/' -match "(?i)Metadata/plate_1\.png$" } | Select-Object -First 1
+
+                    if ($plateEntry) {
+                        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($plateEntry, $sourceImg, $true)
+                    } else {
+                        $sourceImg = "" # Failsafe
+                    }
+                    $archive.Dispose()
                 } else {
-                    $sourceImg = "" # Failsafe
+                    $sourceImg = ""
                 }
-                $archive.Dispose()
             }
 
             if (Test-Path $sourceImg) {
@@ -382,7 +422,6 @@ if ($GenerateImage) {
                     Remove-Item $pyLog -Force -ErrorAction SilentlyContinue
                 } else {
                     Write-Host "[FAILED]" -ForegroundColor Red
-                    # Print the exact error so we can see what went wrong
                     if (Test-Path $pyLog) {
                         Write-Host "      PYTHON ERROR:" -ForegroundColor Yellow
                         Get-Content $pyLog | Write-Host -ForegroundColor DarkRed
@@ -390,7 +429,6 @@ if ($GenerateImage) {
                     }
                 }
 
-                # Only delete the image if it was the temporary one we extracted
                 if ($isTemp) { Remove-Item $sourceImg -Force -ErrorAction SilentlyContinue }
             } else {
                 Write-Host "[SKIPPED - No Image Found]" -ForegroundColor DarkGray
@@ -400,12 +438,14 @@ if ($GenerateImage) {
         Write-Host "[CRASHED]" -ForegroundColor Red
         Write-Host "     POWERSHELL EXCEPTION: $_" -ForegroundColor Yellow
     }
-} else {
-    # Write-Host "  -> Image generation skipped." -ForegroundColor DarkGray
 }
 
+# ---------------------------------------------------------------------------------
+# 8. CONSOLE OUTPUT & TSV SAVING (Only runs during Full Extraction)
+# ---------------------------------------------------------------------------------
+if (-not $SkipExtraction) {
     Write-Host "`n--- Console Output Verification ---" -ForegroundColor Green
-    Write-Host "Raw File Time:    $($analyzer.PrintTime)"
+    Write-Host "Raw File Time:    $(if ($analyzer) { $analyzer.PrintTime } else { 'N/A' })"
     Write-Host "Single Obj Time:  $singlePrintTimeStr"
     Write-Host "Converted Time:   $h Hours, $m Minutes"
     Write-Host "Pre-Merge Count:  $objCount Objects"
@@ -427,11 +467,9 @@ if ($GenerateImage) {
         # --- UPSERT LOGIC FOR MASTER TSV ---
         if ($MasterTsvPath) {
             if (Test-Path $MasterTsvPath) {
-                # Read all existing lines
                 $lines = @(Get-Content $MasterTsvPath)
                 $found = $false
 
-                # Scan for an exact match of the Project Name in the first column
                 for ($i = 0; $i -lt $lines.Count; $i++) {
                     if ($lines[$i] -match "^$([regex]::Escape($projectName))\t") {
                         $lines[$i] = $tsvLine
@@ -440,9 +478,7 @@ if ($GenerateImage) {
                     }
                 }
 
-                # If not found, append to the bottom
                 if (-not $found) { $lines += $tsvLine }
-
                 Set-Content -Path $MasterTsvPath -Value $lines
             } else {
                 Set-Content -Path $MasterTsvPath -Value $tsvLine
@@ -456,8 +492,4 @@ if ($GenerateImage) {
             Write-Host "Success! Saved Individual: $IndividualTsvPath" -ForegroundColor Green
         }
     }
-
-} catch {
-    Write-Error "Failed to process .gcode.3mf archive: $_"
-    if ($null -ne $zipArchive) { $zipArchive.Dispose() }
 }
