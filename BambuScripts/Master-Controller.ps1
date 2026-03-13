@@ -303,7 +303,7 @@ $btnStart.Add_Click({
 
             # --- PRE-FLIGHT IMAGE CHECK ---
             if ($doImage) {
-                $existingPng = Get-ChildItem -Path $fileDir -Filter "*.png" | Where-Object { $_.Name -ne "$baseName.png" } | Select-Object -First 1
+                $existingPng = Get-ChildItem -Path $fileDir -Filter "*.png" | Where-Object { $_.Name -ne "$baseName.png" -and $_.Name -notlike "*_slicePreview.png" } | Select-Object -First 1
 
                 if (-not $existingPng) {
                     Write-Log "  [!] No custom image found for $inputName." "Yellow"
@@ -482,6 +482,41 @@ $btnStart.Add_Click({
     }
 
     if (-not $script:cancelRun) { Write-Log "`n=== ALL TASKS COMPLETE ===" "LightGreen" }
+
+    # =========================================================
+    # PHASE 3: FINAL IMAGE INJECTION (Base-Solo Function)
+    # =========================================================
+    if (-not $script:cancelRun -and $doImage) {
+        Write-Log "`n=========================================" "Magenta"
+        Write-Log " PHASE 3: FINAL IMAGE INJECTION" "White"
+        Write-Log "=========================================" "Magenta"
+
+        # Pre-check: Did we actually generate any previews?
+        $previews = Get-ChildItem -Path $targetDir -Filter "*_slicePreview.png" -Recurse
+
+        if ($previews.Count -gt 0) {
+            $batchPath = Join-Path $scriptDir "ReplaceImageNew.bat"
+            if (Test-Path $batchPath) {
+                Write-Log "-> Found $($previews.Count) new images. Injecting into GCODE..." "Cyan"
+                $proc = Start-Process -FilePath $batchPath -ArgumentList "`"$targetDir`"" -PassThru -NoNewWindow
+                while (-not $proc.HasExited) {
+                    [System.Windows.Forms.Application]::DoEvents()
+                    Start-Sleep -Milliseconds 100
+                }
+                Write-Log "[+] Injection Process Complete." "LightGreen"
+                 catch {
+                    Write-Log " [!] Failed to run Batch Injection: $_" "Red"
+                }
+            }
+        } else {
+            Write-Log "[*] No new generated images found to inject." "DarkGray"
+        }
+    }
+
+    # --- [ EXISTING CODE CONTINUES BELOW ] ---
+    # Unlock the UI
+    $script:isRunning = $false
+    # ...
 
     # Unlock the UI
     $script:isRunning = $false

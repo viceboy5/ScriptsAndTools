@@ -373,12 +373,18 @@ if ($GenerateImage) {
 
             $inputFolder = Split-Path $InputFile -Parent
             $outImg = Join-Path $inputFolder "$projectName.png"
+
+            # Python strips [._-]Full from the name and appends _slicePreview.png
+            # e.g. projectName "Bat.Full" -> pyBaseName "Bat" -> "Bat_slicePreview.png"
+            $pyBaseName = $projectName -replace '(?i)[._-]Full$', ''
+            $expectedPng = Join-Path $inputFolder "${pyBaseName}_slicePreview.png"
+
             $sourceImg = ""
             $isTemp = $false
 
-            # 1. Search the folder for a custom PNG
+            # 1. Search the folder for a custom PNG (never pick up a previously generated slicePreview)
             $customPng = Get-ChildItem -Path $inputFolder -Filter "*.png" |
-                         Where-Object { $_.Name -ne "$projectName.png" } |
+                         Where-Object { $_.Name -ne "$projectName.png" -and $_.Name -notlike "*_slicePreview.png" } |
                          Select-Object -First 1
 
             if ($customPng) {
@@ -417,7 +423,7 @@ if ($GenerateImage) {
                 # Call Python to build the image
                 $proc = Start-Process -FilePath "python" -ArgumentList $pyArgs -Wait -NoNewWindow -PassThru -RedirectStandardError $pyLog
 
-                if (Test-Path $outImg) {
+                if (Test-Path $expectedPng) {
                     Write-Host "[DONE]" -ForegroundColor Green
                     Remove-Item $pyLog -Force -ErrorAction SilentlyContinue
                 } else {

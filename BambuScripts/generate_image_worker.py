@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 import math
 from PIL import Image, ImageDraw, ImageFont, ImageChops, ImageFilter
 
@@ -61,15 +62,21 @@ def main():
     args = parser.parse_args()
 
     # --- 1. CLEAN NAME LOGIC ---
-    clean_name = args.name
-    import re
-    clean_name = re.sub(r'(?i)[._-]Full$', '', clean_name).replace('.', ' ').replace('_', ' ').strip().upper()
+    original_name = args.name
+    clean_name = re.sub(r'(?i)[._-]Full$', '', original_name).replace('.', ' ').replace('_', ' ').strip().upper()
 
-    background = Image.new("RGBA", (CANVAS_SIZE, CANVAS_SIZE), (75, 75, 80, 255))
-    ui_layer = Image.new("RGBA", (CANVAS_SIZE, CANVAS_SIZE), (0, 0, 0, 0))
-    ui_draw = ImageDraw.Draw(ui_layer)
+    # Create the specific output filename for the Batch script to find
+    # Example: "MyModel_Full.gcode.3mf" -> "MyModel_slicePreview.png"
+    base_filename = re.sub(r'(?i)[._-]Full(\.gcode(\.3mf)?)?$', '', original_name)
+    output_filename = f"{base_filename}_slicePreview.png"
+    output_path = os.path.join(os.path.dirname(args.out), output_filename)
 
-    # --- 2. DRAW ALL UI ELEMENTS TO THE TRANSPARENT LAYER ---
+    # --- 2. INITIALIZE CANVAS ---
+    background = Image.new("RGBA", (CANVAS_SIZE, CANVAS_SIZE), (0, 0, 0, 255))
+    ui_layer   = Image.new("RGBA", (CANVAS_SIZE, CANVAS_SIZE), (0, 0, 0, 0))
+    ui_draw    = ImageDraw.Draw(ui_layer)
+
+    # --- 3. DRAW ALL UI ELEMENTS TO THE TRANSPARENT LAYER ---
 
     # A. TITLE TEXT
     current_font_size = int(CANVAS_SIZE * FONT_TITLE_RATIO)
@@ -142,7 +149,7 @@ def main():
             draw_text_with_outline(ui_draw, (mass_x_pos, y + int(CANVAS_SIZE * 0.058)), mass_txt, font=font_mass,
                                    fill=(200, 200, 200))
 
-    # --- 3. DYNAMIC SPATIAL COLLISION SCALING ---
+    # --- 4. DYNAMIC SPATIAL COLLISION SCALING ---
     if os.path.exists(args.img):
         char_img = Image.open(args.img).convert("RGBA")
         bbox = char_img.getbbox()
@@ -223,7 +230,9 @@ def main():
         background.paste(char_img, best_pos, char_img)
 
     background.alpha_composite(ui_layer)
-    background.save(args.out)
+    # Save using our new specific naming convention
+    background.save(output_path)
+    print(f"Generated: {output_path}")
 
 
 if __name__ == "__main__":
