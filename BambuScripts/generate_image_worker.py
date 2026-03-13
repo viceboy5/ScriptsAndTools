@@ -67,7 +67,7 @@ def main():
 
     # Create the specific output filename for the Batch script to find
     # Example: "MyModel_Full.gcode.3mf" -> "MyModel_slicePreview.png"
-    base_filename = re.sub(r'(?i)[._-]Full(\.gcode(\.3mf)?)?$', '', original_name)
+    base_filename = re.sub(r'(?i)[._-]Full(\.gcode)?\.3mf$', '', original_name)
     output_filename = f"{base_filename}_slicePreview.png"
     output_path = os.path.join(os.path.dirname(args.out), output_filename)
 
@@ -104,7 +104,7 @@ def main():
 
     # Strip invisible padding to lock strictly to Bottom-Left margin
     x_time = MARGIN - bbox_time[0]
-    y_time = CANVAS_SIZE - MARGIN - bbox_time[3]
+    y_time = CANVAS_SIZE - int(CANVAS_SIZE * 0.08) - bbox_time[3]
 
     draw_text_with_outline(ui_draw, (x_time, y_time), time_text, font_time, (255, 255, 255))
     highest_time_y = y_time + bbox_time[1]
