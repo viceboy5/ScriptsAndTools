@@ -90,9 +90,13 @@ $chkImage.AutoSize = $true
 $form.Controls.Add($chkImage)
 
 # Smart Dependency
+# Smart Dependency
 $updateDependencies = {
-    if ($chkSlice.Checked -or $chkImage.Checked) { $chkExtract.Checked = $true }
+    # Image Generation uses the Extractor script, but shouldn't force a TSV overwrite!
+    if ($chkSlice.Checked) { $chkExtract.Checked = $true }
 }
+$chkSlice.Add_CheckedChanged($updateDependencies)
+# (We completely removed the $chkImage dependency here)
 $chkSlice.Add_CheckedChanged($updateDependencies)
 $chkImage.Add_CheckedChanged($updateDependencies)
 
@@ -201,19 +205,22 @@ $btnStart.Add_Click({
     $txtLog.Clear()
     Write-Log "=== AUTOMATION ENGINE ENGAGED ===" "Cyan"
     Write-Log "Target: $targetDir" "DarkGray"
+
     # ---------------------------------------------------------
     # ROUTE A: REVERT MODE
     # ---------------------------------------------------------
     if ($script:isRevertMode) {
         Write-Log "MODE: REVERT MERGE" "Orange"
         Write-Log "---------------------------------" "Cyan"
-        Write-Log "Scanning directory for *Nest.3mf files..." "Yellow"
+        Write-Log "Scanning directory and subfolders for *Nest.3mf files..." "Yellow"
         Wait-Responsive 500
 
-        $nestFiles = Get-ChildItem -Path $targetDir -Filter "*Nest.3mf"
+        $nestFiles = Get-ChildItem -Path $targetDir -Filter "*Nest.3mf" -Recurse | Where-Object {
+            $_.FullName -notmatch "(?i)\\old"
+        }
+
         if ($nestFiles.Count -eq 0) { Write-Log "[-] No Nest files found to revert." "Red" }
 
-        # This variable natively tells RevertMerge.bat to skip its 'pause' commands!
         $env:WORKER_MODE = "1"
 
         foreach ($file in $nestFiles) {
@@ -221,7 +228,6 @@ $btnStart.Add_Click({
             Write-Log "`n=== Reverting: $($file.Name) ===" "Orange"
 
             try {
-                # Standard clean call, exactly like the other standalone workers
                 $batPath = Join-Path $scriptDir "RevertMerge.bat"
                 $command = "& `"$batPath`" `"$($file.FullName)`" *>&1"
 
@@ -242,15 +248,48 @@ $btnStart.Add_Click({
         $doExtract = $chkExtract.Checked
         $doImage   = $chkImage.Checked
 
-        Write-Log "---------------------------------" "Cyan"
-        Write-Log "Scanning directory for source .3mf files..." "Yellow"
+        # --- PRE-FLIGHT 'OLD' FOLDER CLEANUP ---
+        $oldDirs = Get-ChildItem -Path $targetDir -Recurse -Directory | Where-Object { $_.Name -match "(?i)old" }
+        if ($oldDirs) {
+            $msgResult = [System.Windows.Forms.MessageBox]::Show(
+                "Found folders containing the word 'old'. Do you want to delete them before processing?`n`nChoosing 'No' will keep them, but they will still be safely ignored by the engine.",
+                "Cleanup Old Folders",
+                [System.Windows.Forms.MessageBoxButtons]::YesNo,
+                [System.Windows.Forms.MessageBoxIcon]::Question
+            )
+
+            if ($msgResult -eq 'Yes') {
+                Write-Log "Cleaning up 'old' folders..." "Yellow"
+                foreach ($dir in $oldDirs) {
+                    if (Test-Path $dir.FullName) { Remove-Item $dir.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+                }
+                Write-Log "[+] Cleanup complete." "LightGreen"
+            } else {
+                Write-Log "[*] Skipped cleanup. 'Old' folders will be ignored." "DarkGray"
+            }
+        }
+        # ---------------------------------------
+
+        Write-Log "Scanning directory and subfolders for source .3mf files..." "Yellow"
         Wait-Responsive 500
 
-        $allFiles = Get-ChildItem -Path $targetDir -Filter "*Full.3mf" | Where-Object {
-            $_.Name -notmatch "(?i)\.gcode\.3mf$"
+        $allFiles = Get-ChildItem -Path $targetDir -Filter "*Full.3mf" -Recurse | Where-Object {
+            $_.Name -notmatch "(?i)\.gcode\.3mf$" -and
+            $_.FullName -notmatch "(?i)\\old"
         }
 
         if ($allFiles.Count -eq 0) { Write-Log "[-] No valid *Full.3mf files found." "Red" }
+
+        # =========================================================
+        # PHASE 1: INTERACTIVE PREPARATION
+        # =========================================================
+        $processingQueue = @()
+
+        if ($allFiles.Count -gt 0) {
+            Write-Log "`n=========================================" "Magenta"
+            Write-Log " PHASE 1: INTERACTIVE PREPARATION" "White"
+            Write-Log "=========================================" "Magenta"
+        }
 
         foreach ($file in $allFiles) {
             if ($script:cancelRun) { Write-Log "`n>>> OPERATION ABORTED <<<" "Red"; break }
@@ -258,12 +297,13 @@ $btnStart.Add_Click({
             $baseName = $file.BaseName
             $inputName = $file.Name
             $inputPath = $file.FullName
-            Write-Log "`n=== Processing: $inputName ===" "White"
+            $fileDir = $file.DirectoryName
+
+            Write-Log "`n=== Pre-Flight: $inputName ===" "White"
 
             # --- PRE-FLIGHT IMAGE CHECK ---
             if ($doImage) {
-                # Look for an existing custom PNG (ignoring the final output name)
-                $existingPng = Get-ChildItem -Path $targetDir -Filter "*.png" | Where-Object { $_.Name -ne "$baseName.png" } | Select-Object -First 1
+                $existingPng = Get-ChildItem -Path $fileDir -Filter "*.png" | Where-Object { $_.Name -ne "$baseName.png" } | Select-Object -First 1
 
                 if (-not $existingPng) {
                     Write-Log "  [!] No custom image found for $inputName." "Yellow"
@@ -272,14 +312,12 @@ $btnStart.Add_Click({
                     $imgDialog = New-Object System.Windows.Forms.OpenFileDialog
                     $imgDialog.Title = "Select Custom Image for $inputName (Cancel to skip)"
                     $imgDialog.Filter = "PNG Images (*.png)|*.png|All Files (*.*)|*.*"
-                    $imgDialog.InitialDirectory = $targetDir
+                    $imgDialog.InitialDirectory = $fileDir
 
-                    # Show the dialog and keep the GUI responsive
                     if ($imgDialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                         $selectedImg = $imgDialog.FileName
-                        $destImg = Join-Path $targetDir (Split-Path $selectedImg -Leaf)
+                        $destImg = Join-Path $fileDir (Split-Path $selectedImg -Leaf)
 
-                        # Copy the file to the working directory if it's not already there
                         if ($selectedImg -ne $destImg) {
                             Copy-Item -Path $selectedImg -Destination $destImg -Force
                         }
@@ -293,16 +331,10 @@ $btnStart.Add_Click({
             }
             # ------------------------------
 
-            # ---------------------------------------------------------
-            # --- CORRECTED BASE NAME MATH ---
-            # $baseName is "Bat.Full". We strip the last 4 chars to get "Bat."
-            $basePrefix = $baseName.Substring(0, $baseName.Length - 4)
-            $nestBase   = $basePrefix + "Nest"
-            $finalBase  = $basePrefix + "Final"
+            # --- PRE-FLIGHT EXTRACTION & COLORS ---
+            $tempWork = $null
+            $extractFailed = $false
 
-            # ---------------------------------------------------------
-            # PHASE 1: PREP, COLORS, AND MERGE
-            # ---------------------------------------------------------
             if ($doColors -or $doMerge) {
                 $tempWork = Join-Path $env:TEMP ("merge_work_" + [System.IO.Path]::GetRandomFileName())
                 New-Item -ItemType Directory -Path $tempWork | Out-Null
@@ -313,39 +345,75 @@ $btnStart.Add_Click({
                 } catch {
                     Write-Log "  [!] Error extracting 3MF: $_" "Red"
                     Remove-Item -Path $tempWork -Recurse -Force -ErrorAction SilentlyContinue
-                    continue
+                    $extractFailed = $true
                 }
 
-                # 1. COLOR WORKER
-                if ($doColors) {
+                if (-not $extractFailed -and $doColors) {
                     Write-Log "  -> Scanning Colors..." "Cyan"
                     try {
                         $command = "& `"$scriptDir\update_colors_worker.ps1`" -WorkDir `"$tempWork`" -FileName `"$inputName`" -OriginalZip `"$inputPath`" *>&1"
                         Invoke-Expression $command | ForEach-Object { Write-Log "     $_" "LightGray"; [System.Windows.Forms.Application]::DoEvents() }
                     } catch { Write-Log "  [!] Error: $_" "Red" }
                 }
-                if ($script:cancelRun) { break }
+            }
+            if ($script:cancelRun) { break }
+
+            # Add to the Phase 2 Queue
+            if (-not $extractFailed) {
+                $processingQueue += [PSCustomObject]@{
+                    File = $file
+                    BaseName = $baseName
+                    InputName = $inputName
+                    InputPath = $inputPath
+                    FileDir = $fileDir
+                    TempWork = $tempWork
+                }
+            }
+        }
+
+        # =========================================================
+        # PHASE 2: UNATTENDED PROCESSING
+        # =========================================================
+        if (-not $script:cancelRun -and $processingQueue.Count -gt 0) {
+            Write-Log "`n=========================================" "Magenta"
+            Write-Log " PHASE 2: UNATTENDED PROCESSING" "White"
+            Write-Log "=========================================" "Magenta"
+
+            foreach ($item in $processingQueue) {
+                if ($script:cancelRun) { Write-Log "`n>>> OPERATION ABORTED <<<" "Red"; break }
+
+                # Restore variables from the Queue
+                $file = $item.File
+                $baseName = $item.BaseName
+                $inputName = $item.InputName
+                $inputPath = $item.InputPath
+                $fileDir = $item.FileDir
+                $tempWork = $item.TempWork
+
+                Write-Log "`n=== Processing: $inputName ===" "White"
+
+                $basePrefix = $baseName.Substring(0, $baseName.Length - 4)
+                $nestBase   = $basePrefix + "Nest"
+                $finalBase  = $basePrefix + "Final"
 
                 # 2. MERGE WORKER
                 if ($doMerge) {
                     Write-Log "  -> Merging Geometries..." "Cyan"
                     try {
-                        $tempOutPath = Join-Path $targetDir "$baseName`_merged_temp.3mf"
-                        $repPath = Join-Path $targetDir "$baseName`_MergeReport.txt"
+                        $tempOutPath = Join-Path $fileDir "$baseName`_merged_temp.3mf"
+                        $repPath = Join-Path $fileDir "$baseName`_MergeReport.txt"
                         $doColFlag = if ($doColors) { "1" } else { "0" }
 
                         $command = "& `"$scriptDir\merge_3mf_worker.ps1`" -WorkDir `"$tempWork`" -InputPath `"$inputPath`" -OutputPath `"$tempOutPath`" -ReportPath `"$repPath`" -DoColors `"$doColFlag`" *>&1"
                         Invoke-Expression $command | ForEach-Object { Write-Log "     $_" "LightGray"; [System.Windows.Forms.Application]::DoEvents() }
 
-                        # --- CORRECTED RENAMING LOGIC ---
                         $nestName = "$nestBase.3mf"
-                        $nestPath = Join-Path $targetDir $nestName
+                        $nestPath = Join-Path $fileDir $nestName
                         Rename-Item -Path $inputPath -NewName $nestName -Force
                         Rename-Item -Path $tempOutPath -NewName $inputName -Force
 
-                        # Isolate Final Object
                         Write-Log "  -> Isolating Final Object..." "Cyan"
-                        $finalPath = Join-Path $targetDir "$finalBase.3mf"
+                        $finalPath = Join-Path $fileDir "$finalBase.3mf"
                         if (Test-Path $finalPath) { Remove-Item $finalPath -Force }
 
                         $tempSingle = Join-Path $env:TEMP ("single_work_" + [System.IO.Path]::GetRandomFileName())
@@ -358,54 +426,60 @@ $btnStart.Add_Click({
 
                     } catch { Write-Log "  [!] Error: $_" "Red" }
                 }
+
+                # Cleanup Phase 1 Temp Dir
+                if ($tempWork) { Remove-Item -Path $tempWork -Recurse -Force -ErrorAction SilentlyContinue }
+
                 if ($script:cancelRun) { break }
 
-                Remove-Item -Path $tempWork -Recurse -Force -ErrorAction SilentlyContinue
-            }
+                # 3. SLICER WORKER
+                if ($doSlice) {
+                    Write-Log "  -> Slicing & Exporting Gcode..." "Cyan"
+                    $isolatedPath = Join-Path $fileDir "$finalBase.3mf"
+                    try {
+                        $command = "& `"$scriptDir\slicer_automation_worker.ps1`" -InputPath `"$inputPath`" -IsolatedPath `"$isolatedPath`" *>&1"
+                        Invoke-Expression $command | ForEach-Object { Write-Log "     $_" "LightGray"; [System.Windows.Forms.Application]::DoEvents() }
+                    } catch { Write-Log "  [!] Error: $_" "Red" }
+                }
+                if ($script:cancelRun) { break }
 
-            # ---------------------------------------------------------
-            # PHASE 2: SLICE, EXTRACT, AND IMAGE
-            # ---------------------------------------------------------
-            # 3. SLICER WORKER
-            if ($doSlice) {
-                Write-Log "  -> Slicing & Exporting Gcode..." "Cyan"
-                $isolatedPath = Join-Path $targetDir "$finalBase.3mf"
-                try {
-                    $command = "& `"$scriptDir\slicer_automation_worker.ps1`" -InputPath `"$inputPath`" -IsolatedPath `"$isolatedPath`" *>&1"
-                    Invoke-Expression $command | ForEach-Object { Write-Log "     $_" "LightGray"; [System.Windows.Forms.Application]::DoEvents() }
-                } catch { Write-Log "  [!] Error: $_" "Red" }
-            }
-            if ($script:cancelRun) { break }
+                # 4. EXTRACTION & IMAGE WORKER
+                if ($doExtract -or $doImage) {
+                    $slicedFile = Join-Path $fileDir "$baseName.gcode.3mf"
+                    $singleFile = Join-Path $fileDir "$finalBase.gcode.3mf"
 
-            # 4. EXTRACTION & IMAGE WORKER
-            if ($doExtract -or $doImage) {
-                $slicedFile = Join-Path $targetDir "$baseName.gcode.3mf"
-                $singleFile = Join-Path $targetDir "$finalBase.gcode.3mf"
-
-                $extractArgs = @(
-                    "-InputFile", "`"$slicedFile`"",
-                    "-MasterTsvPath", "`"$(Join-Path $targetDir 'Master_Data.tsv')`"",
-                    "-IndividualTsvPath", "`"$(Join-Path $targetDir "$baseName`_Data.tsv")`""
-                )
-
-                if (Test-Path $singleFile) { $extractArgs += "-SingleFile", "`"$singleFile`"" }
-                if ($doImage) { $extractArgs += "-GenerateImage" }
-                if (-not $doSlice) { $extractArgs += "-SkipExtraction" }
-
-                Write-Log "  -> Extracting Data / Generating Image..." "Cyan"
-                try {
-                    $command = "& `"$scriptDir\Extract-3MFData.ps1`" $extractArgs *>&1"
-                    Invoke-Expression $command | ForEach-Object { Write-Log "     $_" "LightGray"; [System.Windows.Forms.Application]::DoEvents() }
-
-                    # --- CORRECTED SILENT CLEANUP ---
-                    if (Test-Path $singleFile) {
-                        Remove-Item $singleFile -Force -ErrorAction SilentlyContinue
-                        Write-Log "  [+] Cleaned up temporary $finalBase.gcode.3mf" "DarkGray"
+                    $safeToExtract = $doExtract
+                    if ($safeToExtract) {
+                        if (-not (Test-Path $slicedFile) -or -not (Test-Path $singleFile)) {
+                            Write-Log "  [!] Missing .gcode.3mf files. Falling back to TSV-only mode to protect data." "Yellow"
+                            $safeToExtract = $false
+                        }
                     }
-                } catch { Write-Log "  [!] Error: $_" "Red" }
+
+                    $extractArgs = @(
+                        "-InputFile", "`"$slicedFile`"",
+                        "-MasterTsvPath", "`"$(Join-Path $targetDir 'Master_Data.tsv')`"",
+                        "-IndividualTsvPath", "`"$(Join-Path $fileDir "$baseName`_Data.tsv")`""
+                    )
+
+                    if (Test-Path $singleFile) { $extractArgs += "-SingleFile", "`"$singleFile`"" }
+                    if ($doImage) { $extractArgs += "-GenerateImage" }
+                    if (-not $safeToExtract) { $extractArgs += "-SkipExtraction" }
+
+                    Write-Log "  -> Extracting Data / Generating Image..." "Cyan"
+                    try {
+                        $command = "& `"$scriptDir\Extract-3MFData.ps1`" $extractArgs *>&1"
+                        Invoke-Expression $command | ForEach-Object { Write-Log "     $_" "LightGray"; [System.Windows.Forms.Application]::DoEvents() }
+
+                        if ($safeToExtract -and (Test-Path $singleFile)) {
+                            Remove-Item $singleFile -Force -ErrorAction SilentlyContinue
+                            Write-Log "  [+] Cleaned up temporary $finalBase.gcode.3mf" "DarkGray"
+                        }
+                    } catch { Write-Log "  [!] Error: $_" "Red" }
+                }
             }
         }
-    } # <--- THIS IS THE BRACKET THAT WAS MISSING!
+    }
 
     if (-not $script:cancelRun) { Write-Log "`n=== ALL TASKS COMPLETE ===" "LightGreen" }
 
