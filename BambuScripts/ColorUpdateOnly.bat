@@ -5,20 +5,27 @@ echo ===================================================
 echo STANDALONE COLOR UPDATE WORKER
 echo ===================================================
 
-:: Check if a folder was dropped onto the script
 if "%~1"=="" (
     echo [ERROR] Please drag and drop a MASTER FOLDER onto this script.
     pause
     exit /b
 )
 
-:: FIX: Standard variable expansion for the path string
+:: Prompt the user ONCE for the whole folder
+set "forceSwitch="
+echo.
+echo [1] Fix Unknown Colors Only
+echo [2] Edit ALL Active Colors
+choice /C 12 /M "Select your color edit mode:"
+if errorlevel 2 (
+    set "forceSwitch=-ForceEditAll"
+)
+
 set "masterDir=%~1"
 if "%masterDir:~-1%"=="\" set "masterDir=%masterDir:~0,-1%"
-
-:: Get the directory where this .bat file lives to reliably find the .ps1 worker
 set "scriptDir=%~dp0"
 
+echo.
 echo Scanning for *Full.3mf files in: %masterDir%
 echo ---------------------------------------------------
 
@@ -44,7 +51,7 @@ for /r "%masterDir%" %%F in (*Full.3mf) do (
             echo [ERROR] Failed to extract !fileName! - File might be in use.
         ) else (
             :: 3. Call the PowerShell worker
-            powershell.exe -NoProfile -ExecutionPolicy Bypass -File "!scriptDir!update_colors_worker.ps1" -WorkDir "!localTemp!" -FileName "!fileName!" -OriginalZip "!targetFile!"
+            powershell.exe -NoProfile -ExecutionPolicy Bypass -File "!scriptDir!update_colors_worker.ps1" -WorkDir "!localTemp!" -FileName "!fileName!" -OriginalZip "!targetFile!" !forceSwitch!
         )
 
         :: 4. Clean up the temporary reading directory
