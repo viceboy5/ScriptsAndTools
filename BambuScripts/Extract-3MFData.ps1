@@ -173,6 +173,7 @@ public class GcodeAnalyzer {
 "@
 
 if (-not ("GcodeAnalyzer" -as [type])) { Add-Type -TypeDefinition $csharpCode -Language CSharp }
+Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 # ---------------------------------------------------------------------------------
