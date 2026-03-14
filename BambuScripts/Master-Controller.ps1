@@ -504,9 +504,6 @@ $btnStart.Add_Click({
                     Start-Sleep -Milliseconds 100
                 }
                 Write-Log "[+] Injection Process Complete." "LightGreen"
-                 catch {
-                    Write-Log " [!] Failed to run Batch Injection: $_" "Red"
-                }
             }
         } else {
             Write-Log "[*] No new generated images found to inject." "DarkGray"

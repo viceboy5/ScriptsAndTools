@@ -57,7 +57,6 @@ echo --------------------------------------------------------- >> "%logFile%"
 echo Processing finished: %date% %time% >> "%logFile%"
 echo =====================================================================
 echo All tasks complete! Log saved to: %logFile%
-pause
 exit /b
 
 :ProcessAndMove
