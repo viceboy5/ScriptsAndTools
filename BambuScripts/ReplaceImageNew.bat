@@ -102,4 +102,4 @@ popd
 rename "%thisDir%%zipName%" "%thisName%"
 
 rd /s /q "%localTemp%"
-exit /b
+exit /b 0
