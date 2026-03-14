@@ -110,7 +110,7 @@ if ($ForceEditAll -or $hasUnknowns) {
     $lblTitle = New-Object System.Windows.Forms.Label
     $lblTitle.Text = "Map the active filaments for this file:"
     $lblTitle.AutoSize = $true
-    $lblTitle.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+    $lblTitle.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
     $lblTitle.Location = New-Object System.Drawing.Point(15, 15)
     $form.Controls.Add($lblTitle)
 
@@ -129,30 +129,32 @@ if ($ForceEditAll -or $hasUnknowns) {
         $checkHex = if ($hex.Length -eq 7) { $hex + "FF" } else { $hex }
         $isUnknown = (-not $SessionCache.Contains($checkHex) -and -not $SessionCache.Contains($hex))
 
-        # Original Color Swatch
+        # Original Color Swatch (Made larger)
         $pnlOrig = New-Object System.Windows.Forms.Panel
-        $pnlOrig.Size = New-Object System.Drawing.Size(30, 30)
+        $pnlOrig.Size = New-Object System.Drawing.Size(35, 35)
         $pnlOrig.Location = New-Object System.Drawing.Point(15, $yOffset)
         $pnlOrig.BorderStyle = 'FixedSingle'
         try { $pnlOrig.BackColor = [System.Drawing.ColorTranslator]::FromHtml((&$FormatHex $hex)) } catch {}
         $form.Controls.Add($pnlOrig)
 
-        # Slot Label & Status (Math separated to prevent PowerShell parsing bugs)
-        $lblY = $yOffset + 7
+        # Slot Label & Status (Larger font, shifted right)
+        $lblY = $yOffset + 8
         $lblSlot = New-Object System.Windows.Forms.Label
         $statusText = if ($isUnknown) { "[UNKNOWN]" } else { "Matched" }
         $lblSlot.Text = "Slot $slotId - $statusText"
         if ($isUnknown) { $lblSlot.ForeColor = [System.Drawing.Color]::Red }
         $lblSlot.AutoSize = $true
-        $lblSlot.Location = New-Object System.Drawing.Point(55, $lblY)
-        $lblSlot.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+        $lblSlot.Location = New-Object System.Drawing.Point(60, $lblY)
+        $lblSlot.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
         $form.Controls.Add($lblSlot)
 
-        # Dropdown
+        # Dropdown (Restored large font, max items, type-to-search, and wider size)
         $comboY = $yOffset + 4
         $combo = New-Object System.Windows.Forms.ComboBox
-        $combo.Location = New-Object System.Drawing.Point(175, $comboY)
-        $combo.Size = New-Object System.Drawing.Size(260, 25)
+        $combo.Location = New-Object System.Drawing.Point(220, $comboY)
+        $combo.Size = New-Object System.Drawing.Size(300, 28)
+        $combo.Font = New-Object System.Drawing.Font("Segoe UI", 11)
+        $combo.MaxDropDownItems = 25
         $combo.DropDownStyle = 'DropDown'
         $combo.AutoCompleteMode = 'SuggestAppend'
         $combo.AutoCompleteSource = 'ListItems'
@@ -171,10 +173,10 @@ if ($ForceEditAll -or $hasUnknowns) {
         }
         $form.Controls.Add($combo)
 
-        # New Color Swatch
+        # New Color Swatch (Made larger)
         $pnlNew = New-Object System.Windows.Forms.Panel
-        $pnlNew.Size = New-Object System.Drawing.Size(30, 30)
-        $pnlNew.Location = New-Object System.Drawing.Point(445, $yOffset)
+        $pnlNew.Size = New-Object System.Drawing.Size(35, 35)
+        $pnlNew.Location = New-Object System.Drawing.Point(535, $yOffset)
         $pnlNew.BorderStyle = 'FixedSingle'
         try {
             $initHex = $LibraryColors[$combo.Text]
@@ -194,16 +196,16 @@ if ($ForceEditAll -or $hasUnknowns) {
         }.GetNewClosure())
 
         $dropdowns[$hex] = $combo
-        $yOffset += 45
+        $yOffset += 55 # Increased spacing between rows for the larger UI elements
     }
 
-    # Save Button
-    $btnY = $yOffset + 5
+    # Save Button (Made larger and shifted to align right)
+    $btnY = $yOffset + 10
     $btnSave = New-Object System.Windows.Forms.Button
     $btnSave.Text = "Save mapped colors"
-    $btnSave.Size = New-Object System.Drawing.Size(160, 35)
-    $btnSave.Location = New-Object System.Drawing.Point(315, $btnY)
-    $btnSave.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $btnSave.Size = New-Object System.Drawing.Size(180, 40)
+    $btnSave.Location = New-Object System.Drawing.Point(390, $btnY)
+    $btnSave.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
     $form.Controls.Add($btnSave)
     $form.AcceptButton = $btnSave
 
@@ -222,7 +224,7 @@ if ($ForceEditAll -or $hasUnknowns) {
     })
 
     # Invisible spacer to pad the bottom of the window
-    $botY = $yOffset + 45
+    $botY = $yOffset + 60
     $pnlBottom = New-Object System.Windows.Forms.Panel
     $pnlBottom.Location = New-Object System.Drawing.Point(0, $botY)
     $pnlBottom.Size = New-Object System.Drawing.Size(10, 10)
