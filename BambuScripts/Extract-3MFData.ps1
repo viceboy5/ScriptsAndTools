@@ -375,7 +375,7 @@ if ($GenerateImage) {
             $inputFolder = Split-Path $InputFile -Parent
 
             # Compute exact filename Python will write - prevents stray files in script dir
-            $pyBaseName  = $projectName -replace '(?i)[._-]Full$', ''
+            $pyBaseName  = $projectName -replace '(?i)[ ._-]Full$', ''
             $expectedPng = Join-Path $inputFolder "${pyBaseName}_slicePreview.png"
 
             $sourceImg = ""

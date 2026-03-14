@@ -63,12 +63,14 @@ def main():
 
     # --- 1. CLEAN NAME LOGIC ---
     original_name = args.name
-    clean_name = re.sub(r'(?i)[._-]Full$', '', original_name).replace('.', ' ').replace('_', ' ').strip().upper()
+    # Added a space before ._-
+    clean_name = re.sub(r'(?i)[ ._-]Full$', '', original_name).replace('.', ' ').replace('_', ' ').strip().upper()
 
-    # Create the specific output filename for the Batch script to find
-    # Example: "MyModel_Full.gcode.3mf" -> "MyModel_slicePreview.png"
-    base_filename = re.sub(r'(?i)[._-]Full(\.gcode(\.3mf)?)?$', '', original_name)
+    # Added a space before ._-
+    base_filename = re.sub(r'(?i)[ ._-]Full(\.gcode(\.3mf)?)?$', '', original_name)
     output_filename = f"{base_filename}_slicePreview.png"
+
+    # RESTORED: This is the line that was missing!
     output_path = os.path.join(os.path.dirname(args.out), output_filename)
 
     # --- 2. INITIALIZE CANVAS ---
