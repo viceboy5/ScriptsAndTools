@@ -2,6 +2,7 @@ import argparse
 import os
 import re
 import math
+import csv
 from PIL import Image, ImageDraw, ImageFont, ImageChops, ImageFilter
 
 # --- DYNAMIC CONFIGURATION ---
@@ -52,6 +53,64 @@ def draw_text_with_outline(draw, pos, text, font, fill, outline_color=(0, 0, 0),
     draw.text((x, y), text, font=font, fill=fill)
 
 
+def load_gradient_library(csv_filename="colorNamesCSV.csv"):
+    """Reads the CSV and maps the base RGB tuple to a list of gradient hexes."""
+    gradient_map = {}
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    csv_path = os.path.join(script_dir, csv_filename)
+
+    if os.path.exists(csv_path):
+        with open(csv_path, mode='r', encoding='utf-8-sig') as f:
+            reader = csv.reader(f)
+            try:
+                next(reader)  # Skip the header row
+            except StopIteration:
+                return gradient_map
+
+            for row in reader:
+                # Check if there are columns beyond R, G, B
+                if len(row) > 4:
+                    try:
+                        # Grab the base RGB tuple to use as the lookup key
+                        base_rgb = (int(row[1].strip()), int(row[2].strip()), int(row[3].strip()))
+
+                        # Dynamically capture all remaining columns that contain a hex code
+                        gradients = [cell.strip() for cell in row[4:] if cell.strip().startswith('#')]
+
+                        if len(gradients) >= 2:
+                            gradient_map[base_rgb] = gradients
+                    except ValueError:
+                        continue  # Skip rows with missing or malformed RGB data
+    return gradient_map
+
+
+def create_gradient_swatch(width, height, hex_colors):
+    """Draws a pixel-perfect linear gradient from an infinite list of hexes."""
+    base = Image.new('RGB', (width, height))
+    draw = ImageDraw.Draw(base)
+
+    rgb_colors = []
+    for h in hex_colors:
+        h = h.strip().lstrip('#')
+        rgb_colors.append(tuple(int(h[i:i + 2], 16) for i in (0, 2, 4)))
+
+    segment_width = width / (len(rgb_colors) - 1)
+
+    for i in range(len(rgb_colors) - 1):
+        color1, color2 = rgb_colors[i], rgb_colors[i + 1]
+        start_x = int(i * segment_width)
+        end_x = int((i + 1) * segment_width) if i < len(rgb_colors) - 2 else width
+
+        for x in range(start_x, end_x):
+            ratio = (x - start_x) / max(1, (end_x - start_x))
+            r = int(color1[0] * (1 - ratio) + color2[0] * ratio)
+            g = int(color1[1] * (1 - ratio) + color2[1] * ratio)
+            b = int(color1[2] * (1 - ratio) + color2[2] * ratio)
+            draw.line([(x, 0), (x, height)], fill=(r, g, b))
+
+    return base
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--name", required=True)
@@ -60,6 +119,8 @@ def main():
     parser.add_argument("--out", required=True)
     parser.add_argument("--colors", nargs='*', default=[])
     args = parser.parse_args()
+
+    gradient_library = load_gradient_library()
 
     # --- 1. CLEAN NAME LOGIC ---
     original_name = args.name
@@ -129,7 +190,18 @@ def main():
             rgb = parse_hex_to_rgb(chex)
             rounded_mass = int(math.ceil(float(cmass) / 10.0)) * 10
 
-            ui_draw.rectangle([box_x, y, box_x + COLOR_BOX_SIZE, y + COLOR_BOX_SIZE], fill=rgb)
+            # Check if this RGB tuple is mapped to a gradient in the CSV
+            if rgb in gradient_library:
+                # Generate the gradient block
+                grad_img = create_gradient_swatch(COLOR_BOX_SIZE, COLOR_BOX_SIZE, gradient_library[rgb])
+                # Paste it perfectly over the intended coordinates on the background layer
+                background.paste(grad_img, (box_x, y))
+
+                # Draw a border around it on the UI layer so it matches the other swatches
+                ui_draw.rectangle([box_x, y, box_x + COLOR_BOX_SIZE, y + COLOR_BOX_SIZE], outline="gray", width=2)
+            else:
+                # Fallback to standard solid color drawing on the UI layer
+                ui_draw.rectangle([box_x, y, box_x + COLOR_BOX_SIZE, y + COLOR_BOX_SIZE], fill=rgb)
 
             num_txt = str(idx + 1)
             num_w = ui_draw.textbbox((0, 0), num_txt, font=font_num)[2]
