@@ -113,6 +113,40 @@ if ($ActiveSlotMap.Count -eq 0) {
     exit
 }
 
+# --- NEW: PROMPT FOR EDIT MODE ---
+$formPrompt = New-Object System.Windows.Forms.Form
+$formPrompt.Text = "Color Check Mode"
+$formPrompt.Size = New-Object System.Drawing.Size(400, 160)
+$formPrompt.StartPosition = 'CenterScreen'
+$formPrompt.FormBorderStyle = 'FixedDialog'
+$formPrompt.MaximizeBox = $false
+$formPrompt.TopMost = $true
+
+$lblPrompt = New-Object System.Windows.Forms.Label
+$lblPrompt.Text = "How would you like to process the active colors for:`n$FileName?"
+$lblPrompt.Location = New-Object System.Drawing.Point(20, 20)
+$lblPrompt.AutoSize = $true
+$lblPrompt.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$formPrompt.Controls.Add($lblPrompt)
+
+$btnUnknowns = New-Object System.Windows.Forms.Button
+$btnUnknowns.Text = "Fix Unknowns Only"
+$btnUnknowns.Location = New-Object System.Drawing.Point(20, 70)
+$btnUnknowns.Size = New-Object System.Drawing.Size(150, 35)
+$btnUnknowns.DialogResult = 'No' # Maps to "Unknowns Only"
+$formPrompt.Controls.Add($btnUnknowns)
+
+$btnAll = New-Object System.Windows.Forms.Button
+$btnAll.Text = "Edit ALL Active Colors"
+$btnAll.Location = New-Object System.Drawing.Point(200, 70)
+$btnAll.Size = New-Object System.Drawing.Size(160, 35)
+$btnAll.DialogResult = 'Yes' # Maps to "Edit All"
+$formPrompt.Controls.Add($btnAll)
+
+$forceEditAll = ($formPrompt.ShowDialog() -eq 'Yes')
+$formPrompt.Dispose()
+# ---------------------------------
+
 # 4. UPGRADED UI FUNCTION
 function Show-ColorPicker([string]$UnknownHex, [string]$SlotId) {
     $form = New-Object System.Windows.Forms.Form
@@ -197,7 +231,21 @@ function Show-ColorPicker([string]$UnknownHex, [string]$SlotId) {
         }
     })
 
-    if ($combo.Items.Count -gt 0) { $combo.SelectedIndex = 0 }
+    # --- NEW: Reverse-lookup to pre-select the known name ---
+    $matchedName = $null
+    foreach ($key in $LibraryColors.Keys) {
+        if ($LibraryColors[$key] -eq $UnknownHex.ToUpper()) {
+            $matchedName = $key
+            break
+        }
+    }
+
+    if ($null -ne $matchedName) {
+        $combo.SelectedItem = $matchedName
+    } elseif ($combo.Items.Count -gt 0) {
+        $combo.SelectedIndex = 0
+    }
+    # --------------------------------------------------------
 
     $btn = New-Object System.Windows.Forms.Button
     $btn.Text = "Map Color"
@@ -224,12 +272,17 @@ function Show-ColorPicker([string]$UnknownHex, [string]$SlotId) {
     return $UnknownHex.ToUpper()
 }
 
-# 5. Trigger UI for unmapped, ACTIVE colors ONLY
+# 5. Trigger UI based on user choice
 foreach ($hex in @($ActiveSlotMap.Keys)) {
     $checkHex = $hex
     if ($checkHex.Length -eq 7) { $checkHex += "FF" }
 
-    if (-not $SessionCache.Contains($checkHex) -and -not $SessionCache.Contains($hex)) {
+    # If ForceEditAll is true, OR the color is missing from the cache, trigger the UI
+    if ($forceEditAll -or (-not $SessionCache.Contains($checkHex) -and -not $SessionCache.Contains($hex))) {
+
+        # We temporarily remove it from the cache so the UI knows it needs a new map
+        if ($forceEditAll) { $SessionCache.Remove($checkHex); $SessionCache.Remove($hex) }
+
         $mappedHex = Show-ColorPicker -UnknownHex $hex -SlotId $ActiveSlotMap[$hex]
         $SessionCache[$hex] = $mappedHex
     }
