@@ -111,6 +111,68 @@ def create_gradient_swatch(width, height, hex_colors):
     return base
 
 
+def draw_gradient_text(layer, pos, text, font, gradient_colors, outline_color=(0, 0, 0), outline_ratio=0.004):
+    """Draws text filled with a horizontal gradient (used for RARE highlight)."""
+    x, y = pos
+    outline_width = max(1, int(CANVAS_SIZE * outline_ratio))
+    draw = ImageDraw.Draw(layer)
+    for dx in range(-outline_width, outline_width + 1):
+        for dy in range(-outline_width, outline_width + 1):
+            if dx != 0 or dy != 0:
+                draw.text((x + dx, y + dy), text, font=font, fill=outline_color)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw, th = bbox[2], bbox[3]
+    if tw <= 0 or th <= 0:
+        return
+    mask_img = Image.new("L", (tw, th), 0)
+    ImageDraw.Draw(mask_img).text((-bbox[0], -bbox[1]), text, font=font, fill=255)
+    grad_rgba = create_gradient_swatch(tw, th, gradient_colors).convert("RGBA")
+    grad_rgba.putalpha(mask_img)
+    layer.paste(grad_rgba, (x, y + bbox[1]), grad_rgba)
+
+
+def draw_metallic_border(draw, box_x, y, size, base_rgb, border_width=4):
+    """Multi-layer metallic border derived from the filament color."""
+    r, g, b = base_rgb
+    highlight = (min(255,int(r*0.5+200)), min(255,int(g*0.5+200)), min(255,int(b*0.5+200)))
+    midtone   = (min(255,int(r*0.7+80)),  min(255,int(g*0.7+80)),  min(255,int(b*0.7+80)))
+    shadow    = (max(0,int(r*0.3)),        max(0,int(g*0.3)),        max(0,int(b*0.3)))
+    draw.rectangle([box_x, y, box_x+size, y+size], outline=midtone, width=border_width)
+    o = border_width // 2
+    draw.line([box_x+o, y+o, box_x+size-o, y+o],          fill=highlight, width=max(1,border_width//2))
+    draw.line([box_x+o, y+o, box_x+o, y+size-o],          fill=highlight, width=max(1,border_width//2))
+    draw.line([box_x+o, y+size-o, box_x+size-o, y+size-o],fill=shadow,    width=max(1,border_width//2))
+    draw.line([box_x+size-o, y+o, box_x+size-o, y+size-o],fill=shadow,    width=max(1,border_width//2))
+
+
+def create_silk_swatch(width, height, base_rgb):
+    """Diagonal sheen concentrated at corners, base color dominant in center.
+    Top-left corner brightens to highlight, bottom-right darkens to shadow.
+    Squared falloff keeps the center close to base so numbers stay readable."""
+    r, g, b = base_rgb
+    highlight = (min(255,int(r*0.55+200)), min(255,int(g*0.55+200)), min(255,int(b*0.55+200)))
+    shadow    = (max(0,int(r*0.35)),       max(0,int(g*0.35)),       max(0,int(b*0.35)))
+    img = Image.new("RGB", (width, height))
+    pixels = img.load()
+    for px in range(width):
+        for py in range(height):
+            diag = (px / width + py / height) / 2.0
+            t = (diag - 0.5) * 2.0
+            t = t * abs(t)  # squared falloff: strong at edges, weak at centre
+            if t < 0:
+                s = -t
+                pr = int(r*(1-s) + highlight[0]*s)
+                pg = int(g*(1-s) + highlight[1]*s)
+                pb = int(b*(1-s) + highlight[2]*s)
+            else:
+                s = t
+                pr = int(r*(1-s) + shadow[0]*s)
+                pg = int(g*(1-s) + shadow[1]*s)
+                pb = int(b*(1-s) + shadow[2]*s)
+            pixels[px, py] = (pr, pg, pb)
+    return img
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--name", required=True)
@@ -157,7 +219,17 @@ def main():
     x_name = CANVAS_SIZE - MARGIN - bbox_title[2]
     y_name = MARGIN - bbox_title[1]
 
-    draw_text_with_outline(ui_draw, (x_name, y_name), clean_name, font_title, (255, 255, 255))
+    RARE_GRADIENT = ["#FFE066", "#FFB700", "#FF8C00", "#FFB700", "#FFE066"]
+    cursor_x = x_name
+    for word in clean_name.split(" "):
+        word_bbox = ui_draw.textbbox((0, 0), word, font=font_title)
+        word_w = word_bbox[2] - word_bbox[0]
+        space_w = ui_draw.textbbox((0, 0), " ", font=font_title)[2]
+        if word == "RARE":
+            draw_gradient_text(ui_layer, (cursor_x, y_name), word, font_title, RARE_GRADIENT)
+        else:
+            draw_text_with_outline(ui_draw, (cursor_x, y_name), word, font_title, (255, 255, 255))
+        cursor_x += word_w + space_w
     lowest_title_y = y_name + bbox_title[3]
 
     # B. SKIP TIME TEXT
@@ -191,16 +263,20 @@ def main():
             rounded_mass = int(math.ceil(float(cmass) / 10.0)) * 10
 
             # Check if this RGB tuple is mapped to a gradient in the CSV
-            if rgb in gradient_library:
-                # Generate the gradient block
-                grad_img = create_gradient_swatch(COLOR_BOX_SIZE, COLOR_BOX_SIZE, gradient_library[rgb])
-                # Paste it perfectly over the intended coordinates on the background layer
-                background.paste(grad_img, (box_x, y))
+            is_silk = "silk" in cname.lower()
 
-                # Draw a border around it on the UI layer so it matches the other swatches
-                ui_draw.rectangle([box_x, y, box_x + COLOR_BOX_SIZE, y + COLOR_BOX_SIZE], outline="gray", width=2)
+            if rgb in gradient_library:
+                grad_img = create_gradient_swatch(COLOR_BOX_SIZE, COLOR_BOX_SIZE, gradient_library[rgb])
+                background.paste(grad_img, (box_x, y))
+                if is_silk:
+                    draw_metallic_border(ui_draw, box_x, y, COLOR_BOX_SIZE, rgb)
+                else:
+                    ui_draw.rectangle([box_x, y, box_x + COLOR_BOX_SIZE, y + COLOR_BOX_SIZE], outline="gray", width=2)
+            elif is_silk:
+                silk_img = create_silk_swatch(COLOR_BOX_SIZE, COLOR_BOX_SIZE, rgb)
+                background.paste(silk_img, (box_x, y))
+                draw_metallic_border(ui_draw, box_x, y, COLOR_BOX_SIZE, rgb)
             else:
-                # Fallback to standard solid color drawing on the UI layer
                 ui_draw.rectangle([box_x, y, box_x + COLOR_BOX_SIZE, y + COLOR_BOX_SIZE], fill=rgb)
 
             num_txt = str(idx + 1)
