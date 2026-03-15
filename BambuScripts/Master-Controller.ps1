@@ -301,6 +301,25 @@ $btnStart.Add_Click({
 
             Write-Log "`n=== Pre-Flight: $inputName ===" "White"
 
+            # --- MULTI-PLATE GUARD (base Full.3mf) ---
+            # Check the source 3MF for plate_2.png before doing anything else.
+            $baseIsMultiPlate = $false
+            try {
+                $mpBase = [System.IO.Compression.ZipFile]::OpenRead($inputPath)
+                $basePlate2 = $mpBase.Entries | Where-Object {
+                    $_.FullName -replace "\\", "/" -match "(?i)Metadata/plate_2\.png$"
+                } | Select-Object -First 1
+                $mpBase.Dispose()
+                if ($basePlate2) { $baseIsMultiPlate = $true }
+            } catch {
+                Write-Log "  [!] Could not inspect $inputName for plate count: $_" "Yellow"
+            }
+            if ($baseIsMultiPlate) {
+                Write-Log "  [SKIP] $inputName has multiple plates - skipping all steps. Review manually." "Yellow"
+                continue
+            }
+            # --- END MULTI-PLATE GUARD ---
+
             # --- PRE-FLIGHT IMAGE CHECK ---
             if ($doImage) {
                 $existingPng = Get-ChildItem -Path $fileDir -Filter "*.png" | Where-Object { $_.Name -ne "$baseName.png" -and $_.Name -notlike "*_slicePreview.png" } | Select-Object -First 1
@@ -504,6 +523,9 @@ $btnStart.Add_Click({
                     Start-Sleep -Milliseconds 100
                 }
                 Write-Log "[+] Injection Process Complete." "LightGreen"
+                 catch {
+                    Write-Log " [!] Failed to run Batch Injection: $_" "Red"
+                }
             }
         } else {
             Write-Log "[*] No new generated images found to inject." "DarkGray"
