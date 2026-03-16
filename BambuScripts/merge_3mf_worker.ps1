@@ -235,32 +235,9 @@ foreach ($groupSize in $mergePlan) {
     $cursor += $groupSize
     $idSurvivor = $groupItems[0].GetAttribute('objectid')
 
-    $firstItemComps = $groupObjs[0].SelectNodes('m:components/m:component', $xns)
-    $sourceRelPath = $firstItemComps[0].GetAttribute('path', $nsProd)
-    if ([string]::IsNullOrWhiteSpace($sourceRelPath)) { $sourceRelPath = $firstItemComps[0].GetAttribute('p:path') }
-    if ([string]::IsNullOrWhiteSpace($sourceRelPath)) { $sourceRelPath = $firstItemComps[0].GetAttribute('path') }
-
-    $sourceLocalPath = ($sourceRelPath.TrimStart('/')).Replace('/', '\')
-    $sourceDiskPath = Join-Path $WorkDir $sourceLocalPath
-
-    $newModelName = "object_${modelFileCounter}.model"
-    $newModelPath = "/3D/Objects/$newModelName"
-    $newDiskPath = Join-Path $objectsDir $newModelName
-
-    if (-not $sourceToMasterMap.Contains($sourceRelPath)) {
-        $normSource = [System.IO.Path]::GetFullPath($sourceDiskPath)
-        $normDest = [System.IO.Path]::GetFullPath($newDiskPath)
-        if ($normSource -ne $normDest) {
-            Copy-Item -Path $normSource -Destination $normDest -Force
-        }
-        $sourceToMasterMap[$sourceRelPath] = $newModelPath
-        $masterPathForThisGroup = $newModelPath
-    } else {
-        [System.IO.File]::WriteAllText($newDiskPath, $emptyShell, (New-Object System.Text.UTF8Encoding($false)))
-        $masterPathForThisGroup = $sourceToMasterMap[$sourceRelPath]
-    }
-    $usedModelPaths.Add($newModelPath) | Out-Null
-    $modelFileCounter++
+    # Path resolution is handled per-component in the loop below.
+    # Each component already knows its own geometry path; we register it
+    # with usedModelPaths so GC keeps the file, with no renaming needed.
 
     # Centroid
     [double]$sumX = 0; [double]$sumY = 0; [double]$sumZ = 0
@@ -293,11 +270,29 @@ foreach ($groupSize in $mergePlan) {
         for ($i = 0; $i -lt $cList.Count; $i++) {
             $c = $cList[$i]
 
+            # Read this component's own geometry path directly.
+            # For shared-geometry files all components share one path (first use wins).
+            # For unique-geometry files each component has its own distinct path.
+            # Either way: no renaming -- just register the path so GC keeps the file.
+            $cPath = $c.GetAttribute('path', $nsProd)
+            if ([string]::IsNullOrWhiteSpace($cPath)) { $cPath = $c.GetAttribute('p:path') }
+            if ([string]::IsNullOrWhiteSpace($cPath)) { $cPath = $c.GetAttribute('path') }
+            if (-not [string]::IsNullOrWhiteSpace($cPath)) {
+                if (-not $cPath.StartsWith('/')) { $cPath = '/' + $cPath }
+                if (-not $sourceToMasterMap.Contains($cPath)) {
+                    $sourceToMasterMap[$cPath] = $cPath
+                    $usedModelPaths.Add($cPath) | Out-Null
+                }
+            }
+            $resolvedPath = if (-not [string]::IsNullOrWhiteSpace($cPath)) { $sourceToMasterMap[$cPath] } else { $null }
+
             [double[]]$compTx  = Parse-Tx ($c.GetAttribute('transform'))
             [double[]]$bakedTx = Mul-Tx $invTxNew (Mul-Tx $origTx $compTx)
 
             $newComp = $xml.CreateElement('component', $nsCore)
-            $newComp.SetAttribute('path', $nsProd, $masterPathForThisGroup) | Out-Null
+            if (-not [string]::IsNullOrWhiteSpace($resolvedPath)) {
+                $newComp.SetAttribute('path', $nsProd, $resolvedPath) | Out-Null
+            }
             $newComp.SetAttribute('objectid', $c.GetAttribute('objectid'))
 
             $compUuid = $compIndex.ToString("x8") + $compBaseSuffix
@@ -440,34 +435,19 @@ for ($li = ($mergeItems.Count - $lone); $li -lt $mergeItems.Count; $li++) {
 
     $loneComps = $loneObj.SelectNodes('m:components/m:component', $xns)
     if ($loneComps.Count -gt 0) {
-        $sourceRelPath = $loneComps[0].GetAttribute('path', $nsProd)
-        if ([string]::IsNullOrWhiteSpace($sourceRelPath)) { $sourceRelPath = $loneComps[0].GetAttribute('p:path') }
-        if ([string]::IsNullOrWhiteSpace($sourceRelPath)) { $sourceRelPath = $loneComps[0].GetAttribute('path') }
-
-        $sourceLocalPath = ($sourceRelPath.TrimStart('/')).Replace('/', '\')
-        $sourceDiskPath = Join-Path $WorkDir $sourceLocalPath
-
-        $newModelName = "object_${modelFileCounter}.model"
-        $newModelPath = "/3D/Objects/$newModelName"
-        $newDiskPath = Join-Path $objectsDir $newModelName
-
-        if (-not $sourceToMasterMap.Contains($sourceRelPath)) {
-            $normSource = [System.IO.Path]::GetFullPath($sourceDiskPath)
-            $normDest = [System.IO.Path]::GetFullPath($newDiskPath)
-            if ($normSource -ne $normDest) {
-                Copy-Item -Path $normSource -Destination $normDest -Force
+        # Register each component's existing path directly - same approach as merge loop
+        foreach ($lc in $loneComps) {
+            $lcPath = $lc.GetAttribute('path', $nsProd)
+            if ([string]::IsNullOrWhiteSpace($lcPath)) { $lcPath = $lc.GetAttribute('p:path') }
+            if ([string]::IsNullOrWhiteSpace($lcPath)) { $lcPath = $lc.GetAttribute('path') }
+            if (-not [string]::IsNullOrWhiteSpace($lcPath)) {
+                if (-not $lcPath.StartsWith('/')) { $lcPath = '/' + $lcPath }
+                if (-not $sourceToMasterMap.Contains($lcPath)) {
+                    $sourceToMasterMap[$lcPath] = $lcPath
+                    $usedModelPaths.Add($lcPath) | Out-Null
+                }
+                $lc.SetAttribute('path', $nsProd, $sourceToMasterMap[$lcPath]) | Out-Null
             }
-            $sourceToMasterMap[$sourceRelPath] = $newModelPath
-            $masterPathForThisGroup = $newModelPath
-        } else {
-            [System.IO.File]::WriteAllText($newDiskPath, $emptyShell, (New-Object System.Text.UTF8Encoding($false)))
-            $masterPathForThisGroup = $sourceToMasterMap[$sourceRelPath]
-        }
-        $usedModelPaths.Add($newModelPath) | Out-Null
-        $modelFileCounter++
-
-        foreach ($c in $loneComps) {
-            $c.SetAttribute('path', $nsProd, $masterPathForThisGroup) | Out-Null
         }
     }
 
