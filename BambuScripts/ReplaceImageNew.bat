@@ -29,6 +29,7 @@ for /r "%masterDir%" %%F in (*Full.gcode.3mf) do (
     set "strippedName=%%~nxF"
     set "strippedName=!strippedName:_Full.gcode.3mf=!"
     set "strippedName=!strippedName:.Full.gcode.3mf=!"
+    :: NEW: Strip the version with a space
     set "strippedName=!strippedName: Full.gcode.3mf=!"
 
     set "newPng="
@@ -56,6 +57,7 @@ echo --------------------------------------------------------- >> "%logFile%"
 echo Processing finished: %date% %time% >> "%logFile%"
 echo =====================================================================
 echo All tasks complete! Log saved to: %logFile%
+pause
 exit /b
 
 :ProcessAndMove
@@ -64,37 +66,27 @@ set "thisPng=%~2"
 set "thisDir=%~3"
 set "thisName=%~4"
 
-:: Wait for the file to finish downloading - size must be stable for 3 consecutive checks
-echo [WAIT] Checking %thisName% is fully downloaded...
-set "stableCount=0"
-set "lastSize=-1"
-for /l %%C in (1,1,30) do (
-    if !stableCount! lss 3 (
-        for %%S in ("%thisFile%") do set "curSize=%%~zS"
-        if !curSize!==!lastSize! (
-            set /a stableCount+=1
-        ) else (
-            set "stableCount=0"
-            set "lastSize=!curSize!"
-            timeout /t 2 /nobreak >nul
-        )
-    )
-)
-if !stableCount! lss 3 (
-    echo [ERROR] %thisName% never finished downloading after 60s. Skipping.
-    exit /b
-)
-echo [OK] File size stable at !lastSize! bytes. Proceeding.
-
 set "localTemp=%TEMP%\BambuReplace_%RANDOM%"
 mkdir "%localTemp%"
 
 set "zipName=%thisName:.gcode.3mf=.zip%"
-rename "%thisFile%" "%zipName%"
-if errorlevel 1 (
-    echo [ERROR] Could not rename %thisFile%
+
+:: Retry rename up to 10x with 1s delay - handles Synology Drive sync lock
+set "renameOk=0"
+for /l %%i in (1,1,10) do (
+    if "!renameOk!"=="0" (
+        rename "%thisFile%" "%zipName%" 2>nul
+        if not errorlevel 1 set "renameOk=1"
+        if "!renameOk!"=="0" (
+            echo [WAIT] File locked, retrying %%i/10...
+            timeout /t 1 /nobreak >nul
+        )
+    )
+)
+if "!renameOk!"=="0" (
+    echo [ERROR] Could not rename after 10 attempts - file still locked: %thisFile%
     rd /s /q "%localTemp%"
-    exit /b
+    exit /b 1
 )
 
 tar.exe -xf "%thisDir%%zipName%" -C "%localTemp%"
@@ -112,22 +104,6 @@ for /f "delims=" %%D in ('dir /b /s /ad "%localTemp%" 2^>nul ^| findstr /i "\\Me
 
 if defined metadataDir (
     move /y "%thisPng%" "%metadataDir%\plate_1.png" >nul
-
-    :: Wait for plate_1.png to be fully flushed before re-zipping
-    :: Uses for /l instead of goto - goto breaks inside call subroutines
-    set "plateReady=0"
-    for /l %%W in (1,1,20) do (
-        if exist "%metadataDir%\plate_1.png" set "plateReady=1"
-        if !plateReady!==0 timeout /t 1 /nobreak >nul
-    )
-    if !plateReady!==0 (
-        echo [ERROR] plate_1.png never appeared after move. Aborting.
-        rd /s /q "%localTemp%"
-        exit /b
-    )
-    echo [OK] plate_1.png confirmed on disk. Proceeding to re-zip.
-) else (
-    echo [WARN] Metadata folder not found. Skipping image injection.
 )
 
 del "%thisDir%%zipName%"
@@ -136,6 +112,12 @@ tar.exe -a -cf "%thisDir%%zipName%" *
 popd
 
 rename "%thisDir%%zipName%" "%thisName%"
+if errorlevel 1 (
+    echo [ERROR] Final rename back to 3MF failed: %thisName%
+    rd /s /q "%localTemp%"
+    exit /b 1
+)
+echo [INJECTED] %thisName%
 
 rd /s /q "%localTemp%"
 exit /b 0

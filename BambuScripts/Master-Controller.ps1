@@ -521,9 +521,21 @@ $btnStart.Add_Click({
                     [System.Windows.Forms.Application]::DoEvents()
                     Start-Sleep -Milliseconds 100
                 }
-                Write-Log "[+] Injection Process Complete." "LightGreen"
-                 catch {
-                    Write-Log " [!] Failed to run Batch Injection: $_" "Red"
+                # Verify each PNG was consumed (moved into archive) - if still on disk, injection failed
+                $failedCount = 0
+                $successCount = 0
+                foreach ($png in $generatedPreviews) {
+                    if (Test-Path $png) {
+                        $failedCount++
+                        Write-Log "  [!] PNG still on disk - injection failed for: $(Split-Path $png -Leaf)" "Red"
+                    } else {
+                        $successCount++
+                    }
+                }
+                if ($failedCount -eq 0) {
+                    Write-Log "[+] Injection Complete. $successCount file(s) updated successfully." "LightGreen"
+                } else {
+                    Write-Log "[!] Injection partially failed: $successCount succeeded, $failedCount failed. Check log for details." "Orange"
                 }
             }
         } else {
