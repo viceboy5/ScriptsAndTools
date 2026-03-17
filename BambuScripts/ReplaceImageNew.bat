@@ -29,8 +29,9 @@ for /r "%masterDir%" %%F in (*Full.gcode.3mf) do (
     set "strippedName=%%~nxF"
     set "strippedName=!strippedName:_Full.gcode.3mf=!"
     set "strippedName=!strippedName:.Full.gcode.3mf=!"
-    :: NEW: Strip the version with a space
     set "strippedName=!strippedName: Full.gcode.3mf=!"
+    :: Fallback: strip bare .gcode.3mf for names with no separator (e.g. BeaverFull)
+    set "strippedName=!strippedName:.gcode.3mf=!"
 
     set "newPng="
     if exist "!workingDir!!strippedName!_slicePreview.png" (
@@ -73,25 +74,25 @@ set "retryCount=0"
 :RenameRetry
 set /a "retryCount+=1"
 if %retryCount% gtr 15 (
-    echo [ERROR] Gave up after 15 attempts - file never became available: %thisName%
+    echo [ERROR] Gave up after 15 attempts: %thisName%
     rd /s /q "%localTemp%"
     exit /b 1
 )
 
-:: Step 1 - Rename to .zip so tar can open it
+:: Step 1 - Rename to .zip
 echo [DEBUG] Attempt %retryCount% - renaming to zip...
 rename "%thisFile%" "%zipName%"
 if errorlevel 1 (
-    echo [WAIT] Rename failed - file locked. Waiting 3s...
+    echo [WAIT] Rename failed - file locked, waiting 3s...
     timeout /t 3 /nobreak >nul
     goto RenameRetry
 )
 
-:: Step 2 - Probe with tar -tf to confirm content is accessible (not a cloud stub)
+:: Step 2 - Probe with tar -tf to confirm content is accessible
 echo [DEBUG] Probing archive readability...
 tar.exe -tf "%thisDir%%zipName%" >nul 2>&1
 if errorlevel 1 (
-    echo [WAIT] Cloud stub detected - triggering download. Waiting 10s...
+    echo [WAIT] Cloud stub not ready, triggering download and waiting 10s...
     rename "%thisDir%%zipName%" "%thisName%"
     type "%thisFile%" >nul 2>&1
     timeout /t 10 /nobreak >nul
@@ -99,7 +100,7 @@ if errorlevel 1 (
 )
 
 :: Step 3 - Extract
-echo [DEBUG] Extracting archive...
+echo [DEBUG] Extracting...
 tar.exe -xf "%thisDir%%zipName%" -C "%localTemp%" 2>&1
 if errorlevel 1 (
     echo [ERROR] tar extraction failed: %thisName%
@@ -128,7 +129,7 @@ if defined metadataDir (
 )
 
 :: Step 5 - Re-zip and rename back
-echo [DEBUG] Re-compressing archive...
+echo [DEBUG] Re-compressing...
 del "%thisDir%%zipName%"
 pushd "%localTemp%"
 tar.exe -a -cf "%thisDir%%zipName%" * 2>&1
