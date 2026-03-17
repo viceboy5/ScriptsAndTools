@@ -515,7 +515,7 @@ $btnStart.Add_Click({
                     if (-not $safeToExtract) { $extractArgs += "-SkipExtraction" }
 
                     # Compute the PNG path we expect Python to write
-                    $previewBaseName = $baseName -replace '(?i)[._-]Full$', ''
+                    $previewBaseName = $baseName -replace '(?i)[ ._-]Full$', ''
                     $expectedPreviewPng = Join-Path $fileDir "${previewBaseName}_slicePreview.png"
 
                     Write-Log "  -> Extracting Data / Generating Image..." "Cyan"
