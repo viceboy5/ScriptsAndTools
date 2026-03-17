@@ -515,27 +515,65 @@ $btnStart.Add_Click({
         if ($generatedPreviews.Count -gt 0) {
             $batchPath = Join-Path $scriptDir "ReplaceImageNew.bat"
             if (Test-Path $batchPath) {
-                Write-Log "-> Found $($generatedPreviews.Count) new images. Injecting into GCODE..." "Cyan"
-                $proc = Start-Process -FilePath $batchPath -ArgumentList "`"$targetDir`"" -PassThru -NoNewWindow
+                Write-Log "-> Found $($generatedPreviews.Count) new image(s). Injecting into GCODE..." "Cyan"
+
+                # Redirect bat stdout to a temp file so we can tail it live in the GUI
+                $batLog = Join-Path $env:TEMP "BambuInject_$([System.IO.Path]::GetRandomFileName()).log"
+                $proc = Start-Process -FilePath $batchPath `
+                    -ArgumentList "`"$targetDir`"" `
+                    -PassThru -NoNewWindow `
+                    -RedirectStandardOutput $batLog
+
+                $lastLine = 0
                 while (-not $proc.HasExited) {
                     [System.Windows.Forms.Application]::DoEvents()
-                    Start-Sleep -Milliseconds 100
+                    Start-Sleep -Milliseconds 150
+
+                    # Stream new lines from the bat log as they appear
+                    if (Test-Path $batLog) {
+                        $lines = @(Get-Content $batLog -ErrorAction SilentlyContinue)
+                        for ($li = $lastLine; $li -lt $lines.Count; $li++) {
+                            $line = $lines[$li].Trim()
+                            if     ($line -match "^\[INJECTED\]") { Write-Log "  $line" "LightGreen" }
+                            elseif ($line -match "^\[ERROR\]")    { Write-Log "  $line" "Red" }
+                            elseif ($line -match "^\[WAIT\]")     { Write-Log "  $line" "Yellow" }
+                            elseif ($line -match "^\[SKIP\]")     { Write-Log "  $line" "DarkGray" }
+                            elseif ($line -match "^\[WARN\]")     { Write-Log "  $line" "Orange" }
+                            elseif ($line -ne "")                 { Write-Log "  $line" "DarkGray" }
+                        }
+                        $lastLine = $lines.Count
+                    }
                 }
-                # Verify each PNG was consumed (moved into archive) - if still on disk, injection failed
-                $failedCount = 0
-                $successCount = 0
+
+                # Flush any remaining lines after process exits
+                if (Test-Path $batLog) {
+                    $lines = @(Get-Content $batLog -ErrorAction SilentlyContinue)
+                    for ($li = $lastLine; $li -lt $lines.Count; $li++) {
+                        $line = $lines[$li].Trim()
+                        if     ($line -match "^\[INJECTED\]") { Write-Log "  $line" "LightGreen" }
+                        elseif ($line -match "^\[ERROR\]")    { Write-Log "  $line" "Red" }
+                        elseif ($line -match "^\[WAIT\]")     { Write-Log "  $line" "Yellow" }
+                        elseif ($line -match "^\[SKIP\]")     { Write-Log "  $line" "DarkGray" }
+                        elseif ($line -match "^\[WARN\]")     { Write-Log "  $line" "Orange" }
+                        elseif ($line -ne "")                 { Write-Log "  $line" "DarkGray" }
+                    }
+                    Remove-Item $batLog -Force -ErrorAction SilentlyContinue
+                }
+
+                # Verify each PNG was consumed by checking if it still exists on disk
+                $failCount = 0; $successCount = 0
                 foreach ($png in $generatedPreviews) {
                     if (Test-Path $png) {
-                        $failedCount++
-                        Write-Log "  [!] PNG still on disk - injection failed for: $(Split-Path $png -Leaf)" "Red"
+                        $failCount++
+                        Write-Log "  [!] PNG still on disk - injection failed: $(Split-Path $png -Leaf)" "Red"
                     } else {
                         $successCount++
                     }
                 }
-                if ($failedCount -eq 0) {
-                    Write-Log "[+] Injection Complete. $successCount file(s) updated successfully." "LightGreen"
+                if ($failCount -eq 0) {
+                    Write-Log "[+] All $successCount injection(s) confirmed successful." "LightGreen"
                 } else {
-                    Write-Log "[!] Injection partially failed: $successCount succeeded, $failedCount failed. Check log for details." "Orange"
+                    Write-Log "[!] $successCount succeeded, $failCount failed. See errors above." "Orange"
                 }
             }
         } else {

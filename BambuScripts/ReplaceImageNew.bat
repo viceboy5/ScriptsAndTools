@@ -57,7 +57,6 @@ echo --------------------------------------------------------- >> "%logFile%"
 echo Processing finished: %date% %time% >> "%logFile%"
 echo =====================================================================
 echo All tasks complete! Log saved to: %logFile%
-pause
 exit /b
 
 :ProcessAndMove
@@ -84,7 +83,7 @@ for /l %%i in (1,1,10) do (
     )
 )
 if "!renameOk!"=="0" (
-    echo [ERROR] Could not rename after 10 attempts - file still locked: %thisFile%
+    echo [ERROR] Could not rename after 10 attempts: %thisFile%
     rd /s /q "%localTemp%"
     exit /b 1
 )
@@ -104,6 +103,14 @@ for /f "delims=" %%D in ('dir /b /s /ad "%localTemp%" 2^>nul ^| findstr /i "\\Me
 
 if defined metadataDir (
     move /y "%thisPng%" "%metadataDir%\plate_1.png" >nul
+    if errorlevel 1 (
+        echo [ERROR] Failed to move PNG into archive: %thisPng%
+    ) else (
+        echo [OK] Replaced plate_1.png in: %metadataDir%
+    )
+) else (
+    echo [WARN] Metadata folder not found. Archive contents:
+    dir /b /s "%localTemp%"
 )
 
 del "%thisDir%%zipName%"
