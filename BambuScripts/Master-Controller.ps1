@@ -184,11 +184,12 @@ $btnFullProcess.BackColor = [System.Drawing.Color]::LightSkyBlue
 $form.Controls.Add($btnFullProcess)
 
 $btnRevert = New-Object System.Windows.Forms.Button
-$btnRevert.Text = "Revert Merge"
+$btnRevert.Text = "View Merge Results"
 $btnRevert.Location = New-Object System.Drawing.Point(130, 555)
-$btnRevert.Size = New-Object System.Drawing.Size(110, 35)
+$btnRevert.Size = New-Object System.Drawing.Size(130, 35)
 $btnRevert.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-$btnRevert.BackColor = [System.Drawing.Color]::Orange
+$btnRevert.BackColor = [System.Drawing.Color]::SteelBlue
+$btnRevert.ForeColor = [System.Drawing.Color]::White
 $form.Controls.Add($btnRevert)
 
 $btnCancel = New-Object System.Windows.Forms.Button
@@ -206,6 +207,7 @@ $btnStart.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Wind
 $btnStart.BackColor = [System.Drawing.Color]::LightGreen
 $form.Controls.Add($btnStart)
 
+
 # --- MACRO BUTTON LOGIC ---
 $btnFullProcess.Add_Click({
     $chkColors.Checked = $true
@@ -217,14 +219,32 @@ $btnFullProcess.Add_Click({
 })
 
 $btnRevert.Add_Click({
-    $chkColors.Checked = $false
-    $chkMerge.Checked  = $false
-    $chkSlice.Checked  = $false
-    $chkExtract.Checked = $false
-    $chkImage.Checked  = $false
-
-    $script:isRevertMode = $true
-    $btnStart.PerformClick()
+    if ($lstFolders.Items.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Add at least one folder to the list first.", "No Folders", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+        return
+    }
+    $manualQueue = @()
+    foreach ($dir in $lstFolders.Items) {
+        $files = Get-ChildItem -Path $dir -Filter "*Full.3mf" -Recurse -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -notmatch "(?i)\.gcode\.3mf$" -and $_.FullName -notmatch "(?i)\\old"
+        }
+        foreach ($f in $files) {
+            $manualQueue += [PSCustomObject]@{
+                File      = $f
+                BaseName  = $f.BaseName
+                InputName = $f.Name
+                InputPath = $f.FullName
+                FileDir   = $f.DirectoryName
+                TempWork  = $null
+                TargetDir = $dir
+            }
+        }
+    }
+    if ($manualQueue.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("No *Full.3mf files found in the queued folders.", "Nothing to Review", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+        return
+    }
+    Show-ResultsWindow $manualQueue @() $scriptDir
 })
 
 # --- 5. CORE EXECUTION LOGIC ---
@@ -245,7 +265,6 @@ $btnStart.Add_Click({
     $chkImage.Enabled = $false
     $btnStart.Enabled = $false
     $btnFullProcess.Enabled = $false
-    $btnRevert.Enabled = $false
 
     $btnCancel.Text = "Stop Engine"
     $btnCancel.BackColor = [System.Drawing.Color]::LightCoral
@@ -648,6 +667,11 @@ $btnStart.Add_Click({
         }
     }
 
+    # --- Show results review window ---
+    if (-not $script:isRevertMode -and $null -ne $globalQueue -and $globalQueue.Count -gt 0) {
+        Show-ResultsWindow $globalQueue $generatedPreviews $scriptDir
+    }
+
     # --- [ EXISTING CODE CONTINUES BELOW ] ---
     # Unlock the UI
     $script:isRunning = $false
@@ -671,7 +695,6 @@ $btnStart.Add_Click({
     $chkImage.Enabled = $true
     $btnStart.Enabled = $true
     $btnFullProcess.Enabled = $true
-    $btnRevert.Enabled = $true
 })
 
 $btnCancel.Add_Click({
@@ -683,5 +706,243 @@ $btnCancel.Add_Click({
         $form.Close()
     }
 })
+
+# =============================================================================
+# RESULTS REVIEW WINDOW
+# =============================================================================
+function Show-ResultsWindow($queue, $previews, $scriptDir) {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+
+    $rForm = New-Object System.Windows.Forms.Form
+    $rForm.Text = "Results Review"
+    $rForm.Size = New-Object System.Drawing.Size(900, 650)
+    $rForm.StartPosition = "CenterScreen"
+    $rForm.MinimumSize = New-Object System.Drawing.Size(700, 400)
+    $rForm.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
+
+    $lblHeader = New-Object System.Windows.Forms.Label
+    $lblHeader.Text = "Review Results - Check images then Keep or Undo each file"
+    $lblHeader.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $lblHeader.ForeColor = [System.Drawing.Color]::White
+    $lblHeader.Location = New-Object System.Drawing.Point(10, 10)
+    $lblHeader.Size = New-Object System.Drawing.Size(870, 24)
+    $lblHeader.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+    $rForm.Controls.Add($lblHeader)
+
+    $scroll = New-Object System.Windows.Forms.Panel
+    $scroll.Location = New-Object System.Drawing.Point(10, 40)
+    $scroll.Size = New-Object System.Drawing.Size(865, 520)
+    $scroll.AutoScroll = $true
+    $scroll.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
+    $scroll.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+    $rForm.Controls.Add($scroll)
+
+    $btnKeepAll = New-Object System.Windows.Forms.Button
+    $btnKeepAll.Text = "Keep All & Close"
+    $btnKeepAll.Size = New-Object System.Drawing.Size(150, 35)
+    $btnKeepAll.Location = New-Object System.Drawing.Point(10, 570)
+    $btnKeepAll.BackColor = [System.Drawing.Color]::LightGreen
+    $btnKeepAll.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+    $rForm.Controls.Add($btnKeepAll)
+
+    $btnUndoAll = New-Object System.Windows.Forms.Button
+    $btnUndoAll.Text = "Undo All Merges"
+    $btnUndoAll.Size = New-Object System.Drawing.Size(150, 35)
+    $btnUndoAll.Location = New-Object System.Drawing.Point(170, 570)
+    $btnUndoAll.BackColor = [System.Drawing.Color]::Orange
+    $btnUndoAll.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+    $rForm.Controls.Add($btnUndoAll)
+
+    $lblStatus = New-Object System.Windows.Forms.Label
+    $lblStatus.Text = ""
+    $lblStatus.ForeColor = [System.Drawing.Color]::LightGray
+    $lblStatus.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    $lblStatus.Location = New-Object System.Drawing.Point(340, 578)
+    $lblStatus.Size = New-Object System.Drawing.Size(540, 20)
+    $lblStatus.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+    $rForm.Controls.Add($lblStatus)
+
+    $thumbSize = 180
+    $rowHeight = $thumbSize + 60
+    $rowY = 5
+    $rowData = @()
+    $tempDir = Join-Path $env:TEMP "WiggliteerResults"
+    if (-not (Test-Path $tempDir)) { New-Item -ItemType Directory -Path $tempDir | Out-Null }
+
+    foreach ($item in $queue) {
+        $baseName  = $item.BaseName
+        $fileDir   = $item.FileDir
+        $gcodePath = Join-Path $fileDir "$baseName.gcode.3mf"
+
+        $platePath = $null
+        $pickPath  = $null
+        if (Test-Path $gcodePath) {
+            try {
+                $zip = [System.IO.Compression.ZipFile]::OpenRead($gcodePath)
+                $plateEntry = $zip.Entries | Where-Object { $_.FullName -replace "\\","/" -match "(?i)Metadata/plate_1\.png$" } | Select-Object -First 1
+                if ($plateEntry) {
+                    $platePath = Join-Path $tempDir "${baseName}_plate.png"
+                    [System.IO.Compression.ZipFileExtensions]::ExtractToFile($plateEntry, $platePath, $true)
+                }
+                $pickEntry = $zip.Entries | Where-Object { $_.FullName -match "(?i)pick_1\.png$" } | Select-Object -First 1
+                if ($pickEntry) {
+                    $pickPath = Join-Path $tempDir "${baseName}_pick.png"
+                    [System.IO.Compression.ZipFileExtensions]::ExtractToFile($pickEntry, $pickPath, $true)
+                }
+                $zip.Dispose()
+            } catch {}
+        }
+
+        $nestBase = $baseName.Substring(0, $baseName.Length - 4) + "Nest"
+        $nestPath = Join-Path $fileDir "$nestBase.3mf"
+        $hasMerge = Test-Path $nestPath
+
+        $row = New-Object System.Windows.Forms.Panel
+        $row.Location = New-Object System.Drawing.Point(0, $rowY)
+        $row.Size = New-Object System.Drawing.Size(840, $rowHeight)
+        $row.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 45)
+        $scroll.Controls.Add($row)
+
+        $lblName = New-Object System.Windows.Forms.Label
+        $lblName.Text = $baseName
+        $lblName.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+        $lblName.ForeColor = [System.Drawing.Color]::White
+        $lblName.Location = New-Object System.Drawing.Point(5, 5)
+        $lblName.Size = New-Object System.Drawing.Size(500, 22)
+        $row.Controls.Add($lblName)
+
+        $pbPlate = New-Object System.Windows.Forms.PictureBox
+        $pbPlate.Size = New-Object System.Drawing.Size($thumbSize, $thumbSize)
+        $pbPlate.Location = New-Object System.Drawing.Point(5, 30)
+        $pbPlate.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+        $pbPlate.BackColor = [System.Drawing.Color]::Black
+        $pbPlate.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+        if ($platePath -and (Test-Path $platePath)) {
+            try { $pbPlate.Image = [System.Drawing.Image]::FromFile($platePath) } catch {}
+        }
+        $row.Controls.Add($pbPlate)
+
+        $lblPlate = New-Object System.Windows.Forms.Label
+        $lblPlate.Text = "Plate Preview"
+        $lblPlate.ForeColor = [System.Drawing.Color]::LightGray
+        $lblPlate.Font = New-Object System.Drawing.Font("Segoe UI", 8)
+        $lblPlate.Location = New-Object System.Drawing.Point(5, $($thumbSize + 33))
+        $lblPlate.Size = New-Object System.Drawing.Size($thumbSize, 18)
+        $lblPlate.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+        $row.Controls.Add($lblPlate)
+
+        $pbPick = New-Object System.Windows.Forms.PictureBox
+        $pbPick.Size = New-Object System.Drawing.Size($thumbSize, $thumbSize)
+        $pbPick.Location = New-Object System.Drawing.Point($($thumbSize + 15), 30)
+        $pbPick.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+        $pbPick.BackColor = [System.Drawing.Color]::Black
+        $pbPick.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+        if ($pickPath -and (Test-Path $pickPath)) {
+            try { $pbPick.Image = [System.Drawing.Image]::FromFile($pickPath) } catch {}
+        } else {
+            $lblNoPick = New-Object System.Windows.Forms.Label
+            $lblNoPick.Text = "No pick_1.png"
+            $lblNoPick.ForeColor = [System.Drawing.Color]::DarkGray
+            $lblNoPick.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+            $lblNoPick.Location = New-Object System.Drawing.Point(10, 80)
+            $lblNoPick.Size = New-Object System.Drawing.Size($($thumbSize - 20), 20)
+            $lblNoPick.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+            $pbPick.Controls.Add($lblNoPick)
+        }
+        $row.Controls.Add($pbPick)
+
+        $lblPick = New-Object System.Windows.Forms.Label
+        $lblPick.Text = "Pick / Merge Check"
+        $lblPick.ForeColor = [System.Drawing.Color]::LightGray
+        $lblPick.Font = New-Object System.Drawing.Font("Segoe UI", 8)
+        $lblPick.Location = New-Object System.Drawing.Point($($thumbSize + 15), $($thumbSize + 33))
+        $lblPick.Size = New-Object System.Drawing.Size($thumbSize, 18)
+        $lblPick.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+        $row.Controls.Add($lblPick)
+
+        $btnUndo = New-Object System.Windows.Forms.Button
+        $btnUndo.Text = if ($hasMerge) { "Undo Merge" } else { "No Merge to Undo" }
+        $btnUndo.Size = New-Object System.Drawing.Size(130, 30)
+        $btnUndo.Location = New-Object System.Drawing.Point($($thumbSize * 2 + 25), 50)
+        $btnUndo.BackColor = if ($hasMerge) { [System.Drawing.Color]::Orange } else { [System.Drawing.Color]::DimGray }
+        $btnUndo.Enabled = $hasMerge
+        $btnUndo.Tag = @{ Item = $item; Row = $row; Label = $lblName; ScriptDir = $scriptDir; StatusLabel = $lblStatus }
+        $btnUndo.Add_Click({
+            $data = $this.Tag
+            $itm  = $data.Item
+            $lbl  = $data.Label
+            $sLbl = $data.StatusLabel
+            # Run RevertMerge.bat without -Wait so the UI thread stays responsive
+            try {
+                $batPath = Join-Path $data.ScriptDir "RevertMerge.bat"
+                if (Test-Path $batPath) {
+                    $proc = Start-Process -FilePath $batPath -ArgumentList "`"$($itm.InputPath)`"" -PassThru -NoNewWindow
+                    # Poll instead of -Wait so the form stays interactive
+                    $this.Enabled = $false
+                    $this.Text = "Reverting..."
+                    while (-not $proc.HasExited) {
+                        [System.Windows.Forms.Application]::DoEvents()
+                        Start-Sleep -Milliseconds 100
+                    }
+                }
+                $lbl.Text = $itm.BaseName + "  [REVERTED]"
+                $lbl.ForeColor = [System.Drawing.Color]::Orange
+                $this.Text = "Reverted"
+                $data.Row.BackColor = [System.Drawing.Color]::FromArgb(60, 40, 10)
+                $sLbl.Text = "Reverted: $($itm.BaseName)"
+            } catch {
+                $sLbl.Text = "Error: $_"
+                $this.Enabled = $true
+                $this.Text = "Undo Merge"
+            }
+        })
+        $row.Controls.Add($btnUndo)
+
+        $previewBase = $baseName -replace '(?i)[ ._-]Full$', ''
+        $expectedPng = Join-Path $fileDir "${previewBase}_slicePreview.png"
+        $wasGenerated = ($previews -contains $expectedPng) -or ($null -ne $platePath)
+        $lblRowStatus = New-Object System.Windows.Forms.Label
+        $lblRowStatus.Text = if ($wasGenerated) { "[OK] Image injected" } else { "[--] No preview found" }
+        $lblRowStatus.ForeColor = if ($wasGenerated) { [System.Drawing.Color]::LightGreen } else { [System.Drawing.Color]::DarkGray }
+        $lblRowStatus.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+        $lblRowStatus.Location = New-Object System.Drawing.Point($($thumbSize * 2 + 25), 90)
+        $lblRowStatus.Size = New-Object System.Drawing.Size(160, 20)
+        $row.Controls.Add($lblRowStatus)
+
+        $rowData += @{ Item = $item; UndoBtn = $btnUndo }
+        $rowY += $rowHeight + 8
+    }
+
+    $scroll.AutoScrollMinSize = New-Object System.Drawing.Size(840, $rowY)
+
+    $btnKeepAll.Add_Click({ $rForm.Close() })
+
+    # Undo All with "Are you sure" confirmation
+    $btnUndoAll.Add_Click({
+        $pendingCount = ($rowData | Where-Object { $_.UndoBtn.Enabled }).Count
+        if ($pendingCount -eq 0) {
+            $lblStatus.Text = "No merges available to undo."
+            return
+        }
+        $confirm = [System.Windows.Forms.MessageBox]::Show(
+            "Are you sure you want to undo all $pendingCount merge(s)?`n`nThis cannot be undone.",
+            "Confirm Undo All",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+        if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+        foreach ($rd in $rowData) {
+            if ($rd.UndoBtn.Enabled) {
+                $rd.UndoBtn.PerformClick()
+                [System.Windows.Forms.Application]::DoEvents()
+            }
+        }
+        $lblStatus.Text = "All merges reverted."
+    })
+
+    $rForm.ShowDialog() | Out-Null
+    Get-ChildItem -Path $tempDir -Filter "*.png" | Remove-Item -Force -ErrorAction SilentlyContinue
+}
 
 $form.ShowDialog() | Out-Null
