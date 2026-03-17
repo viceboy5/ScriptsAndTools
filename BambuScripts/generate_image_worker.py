@@ -6,7 +6,7 @@ import csv
 from PIL import Image, ImageDraw, ImageFont, ImageChops, ImageFilter
 
 # --- DYNAMIC CONFIGURATION ---
-CANVAS_SIZE = 1080
+CANVAS_SIZE = 512
 
 # Layout Ratios
 MARGIN_RATIO = 0.01
