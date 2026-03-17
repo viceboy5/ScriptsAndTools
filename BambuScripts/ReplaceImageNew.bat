@@ -29,7 +29,6 @@ for /r "%masterDir%" %%F in (*Full.gcode.3mf) do (
     set "strippedName=%%~nxF"
     set "strippedName=!strippedName:_Full.gcode.3mf=!"
     set "strippedName=!strippedName:.Full.gcode.3mf=!"
-    :: NEW: Strip the version with a space
     set "strippedName=!strippedName: Full.gcode.3mf=!"
 
     set "newPng="
@@ -65,6 +64,28 @@ set "thisPng=%~2"
 set "thisDir=%~3"
 set "thisName=%~4"
 
+:: Wait for the file to finish downloading - size must be stable for 3 consecutive checks
+echo [WAIT] Checking %thisName% is fully downloaded...
+set "stableCount=0"
+set "lastSize=-1"
+for /l %%C in (1,1,30) do (
+    if !stableCount! lss 3 (
+        for %%S in ("%thisFile%") do set "curSize=%%~zS"
+        if !curSize!==!lastSize! (
+            set /a stableCount+=1
+        ) else (
+            set "stableCount=0"
+            set "lastSize=!curSize!"
+            timeout /t 2 /nobreak >nul
+        )
+    )
+)
+if !stableCount! lss 3 (
+    echo [ERROR] %thisName% never finished downloading after 60s. Skipping.
+    exit /b
+)
+echo [OK] File size stable at !lastSize! bytes. Proceeding.
+
 set "localTemp=%TEMP%\BambuReplace_%RANDOM%"
 mkdir "%localTemp%"
 
@@ -91,6 +112,22 @@ for /f "delims=" %%D in ('dir /b /s /ad "%localTemp%" 2^>nul ^| findstr /i "\\Me
 
 if defined metadataDir (
     move /y "%thisPng%" "%metadataDir%\plate_1.png" >nul
+
+    :: Wait for plate_1.png to be fully flushed before re-zipping
+    :: Uses for /l instead of goto - goto breaks inside call subroutines
+    set "plateReady=0"
+    for /l %%W in (1,1,20) do (
+        if exist "%metadataDir%\plate_1.png" set "plateReady=1"
+        if !plateReady!==0 timeout /t 1 /nobreak >nul
+    )
+    if !plateReady!==0 (
+        echo [ERROR] plate_1.png never appeared after move. Aborting.
+        rd /s /q "%localTemp%"
+        exit /b
+    )
+    echo [OK] plate_1.png confirmed on disk. Proceeding to re-zip.
+) else (
+    echo [WARN] Metadata folder not found. Skipping image injection.
 )
 
 del "%thisDir%%zipName%"

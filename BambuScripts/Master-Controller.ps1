@@ -301,25 +301,6 @@ $btnStart.Add_Click({
 
             Write-Log "`n=== Pre-Flight: $inputName ===" "White"
 
-            # --- MULTI-PLATE GUARD (base Full.3mf) ---
-            # Check the source 3MF for plate_2.png before doing anything else.
-            $baseIsMultiPlate = $false
-            try {
-                $mpBase = [System.IO.Compression.ZipFile]::OpenRead($inputPath)
-                $basePlate2 = $mpBase.Entries | Where-Object {
-                    $_.FullName -replace "\\", "/" -match "(?i)Metadata/plate_2\.png$"
-                } | Select-Object -First 1
-                $mpBase.Dispose()
-                if ($basePlate2) { $baseIsMultiPlate = $true }
-            } catch {
-                Write-Log "  [!] Could not inspect $inputName for plate count: $_" "Yellow"
-            }
-            if ($baseIsMultiPlate) {
-                Write-Log "  [SKIP] $inputName has multiple plates - skipping all steps. Review manually." "Yellow"
-                continue
-            }
-            # --- END MULTI-PLATE GUARD ---
-
             # --- PRE-FLIGHT IMAGE CHECK ---
             if ($doImage) {
                 $existingPng = Get-ChildItem -Path $fileDir -Filter "*.png" | Where-Object { $_.Name -ne "$baseName.png" -and $_.Name -notlike "*_slicePreview.png" } | Select-Object -First 1
@@ -397,6 +378,9 @@ $btnStart.Add_Click({
             Write-Log "`n=========================================" "Magenta"
             Write-Log " PHASE 2: UNATTENDED PROCESSING" "White"
             Write-Log "=========================================" "Magenta"
+
+            # Track generated preview paths explicitly so Phase 3 never needs to scan
+            $generatedPreviews = New-Object System.Collections.Generic.List[string]
 
             foreach ($item in $processingQueue) {
                 if ($script:cancelRun) { Write-Log "`n>>> OPERATION ABORTED <<<" "Red"; break }
@@ -485,10 +469,24 @@ $btnStart.Add_Click({
                     if ($doImage) { $extractArgs += "-GenerateImage" }
                     if (-not $safeToExtract) { $extractArgs += "-SkipExtraction" }
 
+                    # Compute the PNG path we expect Python to write
+                    $previewBaseName = $baseName -replace '(?i)[._-]Full$', ''
+                    $expectedPreviewPng = Join-Path $fileDir "${previewBaseName}_slicePreview.png"
+
                     Write-Log "  -> Extracting Data / Generating Image..." "Cyan"
                     try {
                         $command = "& `"$scriptDir\Extract-3MFData.ps1`" $extractArgs *>&1"
                         Invoke-Expression $command | ForEach-Object { Write-Log "     $_" "LightGray"; [System.Windows.Forms.Application]::DoEvents() }
+
+                        # Wait up to 5 seconds for the file to appear on disk (handles Synology Drive flush lag)
+                        $waitMs = 0
+                        while (-not (Test-Path $expectedPreviewPng) -and $waitMs -lt 5000) {
+                            Start-Sleep -Milliseconds 200
+                            $waitMs += 200
+                        }
+                        if (Test-Path $expectedPreviewPng) {
+                            $generatedPreviews.Add($expectedPreviewPng) | Out-Null
+                        }
 
                         if ($safeToExtract -and (Test-Path $singleFile)) {
                             Remove-Item $singleFile -Force -ErrorAction SilentlyContinue
@@ -510,13 +508,14 @@ $btnStart.Add_Click({
         Write-Log " PHASE 3: FINAL IMAGE INJECTION" "White"
         Write-Log "=========================================" "Magenta"
 
-        # Pre-check: Did we actually generate any previews?
-        $previews = Get-ChildItem -Path $targetDir -Filter "*_slicePreview.png" -Recurse
+        # Use the explicitly tracked list from Phase 2 rather than scanning
+        # (scanning can miss files that haven't synced to disk yet on Synology Drive)
+        if ($null -eq $generatedPreviews) { $generatedPreviews = @() }
 
-        if ($previews.Count -gt 0) {
+        if ($generatedPreviews.Count -gt 0) {
             $batchPath = Join-Path $scriptDir "ReplaceImageNew.bat"
             if (Test-Path $batchPath) {
-                Write-Log "-> Found $($previews.Count) new images. Injecting into GCODE..." "Cyan"
+                Write-Log "-> Found $($generatedPreviews.Count) new images. Injecting into GCODE..." "Cyan"
                 $proc = Start-Process -FilePath $batchPath -ArgumentList "`"$targetDir`"" -PassThru -NoNewWindow
                 while (-not $proc.HasExited) {
                     [System.Windows.Forms.Application]::DoEvents()
