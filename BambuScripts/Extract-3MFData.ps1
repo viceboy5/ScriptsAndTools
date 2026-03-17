@@ -173,6 +173,7 @@ public class GcodeAnalyzer {
 "@
 
 if (-not ("GcodeAnalyzer" -as [type])) { Add-Type -TypeDefinition $csharpCode -Language CSharp }
+Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 # ---------------------------------------------------------------------------------
@@ -374,7 +375,7 @@ if ($GenerateImage) {
             $inputFolder = Split-Path $InputFile -Parent
 
             # Compute exact filename Python will write - prevents stray files in script dir
-            $pyBaseName  = $projectName -replace '(?i)[._-]Full$', ''
+            $pyBaseName  = $projectName -replace '(?i)[ ._-]Full$', ''
             $expectedPng = Join-Path $inputFolder "${pyBaseName}_slicePreview.png"
 
             $sourceImg = ""
@@ -419,10 +420,8 @@ if ($GenerateImage) {
                 }
 
                 $pyLog = Join-Path $env:TEMP "python_error.log"
-                # Build a single quoted argument string - array splitting breaks paths with spaces
-                $pyArgString = $pyArgs -join " "
-                Write-Host "      [DEBUG] python $pyArgString" -ForegroundColor DarkCyan
-                $proc = Start-Process -FilePath "python" -ArgumentList $pyArgString -NoNewWindow -PassThru -RedirectStandardError $pyLog
+                # Call Python to build the image
+                $proc = Start-Process -FilePath "python" -ArgumentList $pyArgs -NoNewWindow -PassThru -RedirectStandardError $pyLog
                 # Poll instead of -Wait so the GUI stays responsive during Python's collision detection
                 while (-not $proc.HasExited) {
                     [System.Windows.Forms.Application]::DoEvents()
