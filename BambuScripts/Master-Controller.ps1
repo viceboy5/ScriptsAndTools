@@ -11,7 +11,7 @@ $script:isRevertMode = $false
 # --- 1. BUILD THE MAIN WINDOW ---
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Wiggliteerz Master Controller"
-$form.Size = New-Object System.Drawing.Size(560, 580)
+$form.Size = New-Object System.Drawing.Size(560, 650)
 $form.StartPosition = 'CenterScreen'
 $form.FormBorderStyle = 'FixedDialog'
 $form.MaximizeBox = $false
@@ -27,65 +27,104 @@ $lblTitle.Location = New-Object System.Drawing.Point(20, 15)
 $lblTitle.AutoSize = $true
 $form.Controls.Add($lblTitle)
 
-# Folder Browser
-$txtPath = New-Object System.Windows.Forms.TextBox
-$txtPath.Location = New-Object System.Drawing.Point(20, 50)
-$txtPath.Size = New-Object System.Drawing.Size(410, 25)
-$txtPath.Text = "" # <--- Set to totally blank!
-$form.Controls.Add($txtPath)
+# --- Folder Queue (supports Browse + drag-and-drop) ---
+$lstFolders = New-Object System.Windows.Forms.ListBox
+$lstFolders.Location = New-Object System.Drawing.Point(20, 50)
+$lstFolders.Size = New-Object System.Drawing.Size(410, 80)
+$lstFolders.HorizontalScrollbar = $true
+$lstFolders.Font = New-Object System.Drawing.Font("Consolas", 8)
+$lstFolders.AllowDrop = $true
 
-$btnBrowse = New-Object System.Windows.Forms.Button
-$btnBrowse.Text = "Browse"
-$btnBrowse.Location = New-Object System.Drawing.Point(440, 49)
-$btnBrowse.Size = New-Object System.Drawing.Size(85, 27)
-$btnBrowse.Add_Click({
+# Drag-and-drop: accept one or many folders dropped onto the list
+$lstFolders.Add_DragEnter({
+    param($s, $e)
+    if ($e.Data.GetDataPresent([System.Windows.Forms.DataFormats]::FileDrop)) {
+        $e.Effect = [System.Windows.Forms.DragDropEffects]::Copy
+    } else {
+        $e.Effect = [System.Windows.Forms.DragDropEffects]::None
+    }
+})
+
+$lstFolders.Add_DragDrop({
+    param($s, $e)
+    $dropped = $e.Data.GetData([System.Windows.Forms.DataFormats]::FileDrop)
+    foreach ($item in $dropped) {
+        if ((Test-Path $item -PathType Container) -and -not $lstFolders.Items.Contains($item)) {
+            $lstFolders.Items.Add($item) | Out-Null
+        }
+    }
+})
+
+$form.Controls.Add($lstFolders)
+
+function Open-FolderDialog($startPath) {
     $dialog = New-Object System.Windows.Forms.OpenFileDialog
     $dialog.Title = "Select Target Folder"
-
-    # Only set the starting directory if the text box isn't empty
-    if ($txtPath.Text -ne "") { $dialog.InitialDirectory = $txtPath.Text }
-
+    if ($startPath -and (Test-Path $startPath)) { $dialog.InitialDirectory = $startPath }
     $dialog.Filter = "Folders|\n"
     $dialog.AddExtension = $false
     $dialog.CheckFileExists = $false
     $dialog.DereferenceLinks = $true
     $dialog.ValidateNames = $false
     $dialog.FileName = "Select Folder"
-
     if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-        $txtPath.Text = Split-Path $dialog.FileName
+        return Split-Path $dialog.FileName
+    }
+    return $null
+}
+
+$btnBrowse = New-Object System.Windows.Forms.Button
+$btnBrowse.Text = "Add Folder"
+$btnBrowse.Location = New-Object System.Drawing.Point(440, 50)
+$btnBrowse.Size = New-Object System.Drawing.Size(95, 27)
+$btnBrowse.Add_Click({
+    $start = if ($lstFolders.Items.Count -gt 0) { $lstFolders.Items[$lstFolders.Items.Count-1] } else { "" }
+    $picked = Open-FolderDialog $start
+    if ($picked -and $picked -ne "" -and -not $lstFolders.Items.Contains($picked)) {
+        $lstFolders.Items.Add($picked) | Out-Null
     }
 })
 $form.Controls.Add($btnBrowse)
 
+$btnRemove = New-Object System.Windows.Forms.Button
+$btnRemove.Text = "Remove"
+$btnRemove.Location = New-Object System.Drawing.Point(440, 85)
+$btnRemove.Size = New-Object System.Drawing.Size(95, 27)
+$btnRemove.Add_Click({
+    if ($lstFolders.SelectedIndex -ge 0) {
+        $lstFolders.Items.RemoveAt($lstFolders.SelectedIndex)
+    }
+})
+$form.Controls.Add($btnRemove)
+
 # Checkboxes
 $chkColors = New-Object System.Windows.Forms.CheckBox
 $chkColors.Text = "1. Scan & Pick Colors"
-$chkColors.Location = New-Object System.Drawing.Point(30, 90)
+$chkColors.Location = New-Object System.Drawing.Point(30, 155)
 $chkColors.AutoSize = $true
 $form.Controls.Add($chkColors)
 
 $chkMerge = New-Object System.Windows.Forms.CheckBox
 $chkMerge.Text = "2. Merge Geometries"
-$chkMerge.Location = New-Object System.Drawing.Point(30, 120)
+$chkMerge.Location = New-Object System.Drawing.Point(30, 185)
 $chkMerge.AutoSize = $true
 $form.Controls.Add($chkMerge)
 
 $chkSlice = New-Object System.Windows.Forms.CheckBox
 $chkSlice.Text = "3. Slice & Export Gcode"
-$chkSlice.Location = New-Object System.Drawing.Point(220, 90)
+$chkSlice.Location = New-Object System.Drawing.Point(220, 155)
 $chkSlice.AutoSize = $true
 $form.Controls.Add($chkSlice)
 
 $chkExtract = New-Object System.Windows.Forms.CheckBox
 $chkExtract.Text = "4. Extract Data / TSV"
-$chkExtract.Location = New-Object System.Drawing.Point(220, 120)
+$chkExtract.Location = New-Object System.Drawing.Point(220, 185)
 $chkExtract.AutoSize = $true
 $form.Controls.Add($chkExtract)
 
 $chkImage = New-Object System.Windows.Forms.CheckBox
 $chkImage.Text = "5. Generate Image Card"
-$chkImage.Location = New-Object System.Drawing.Point(390, 90)
+$chkImage.Location = New-Object System.Drawing.Point(390, 155)
 $chkImage.AutoSize = $true
 $form.Controls.Add($chkImage)
 
@@ -102,7 +141,7 @@ $chkImage.Add_CheckedChanged($updateDependencies)
 
 # --- 3. LIVE LOGGING CONSOLE ---
 $txtLog = New-Object System.Windows.Forms.RichTextBox
-$txtLog.Location = New-Object System.Drawing.Point(20, 160)
+$txtLog.Location = New-Object System.Drawing.Point(20, 220)
 $txtLog.Size = New-Object System.Drawing.Size(505, 320)
 $txtLog.ReadOnly = $true
 $txtLog.BackColor = [System.Drawing.Color]::Black
@@ -133,27 +172,27 @@ function Wait-Responsive($milliseconds) {
 # --- 4. ACTION BUTTONS ---
 $btnFullProcess = New-Object System.Windows.Forms.Button
 $btnFullProcess.Text = "Full Process"
-$btnFullProcess.Location = New-Object System.Drawing.Point(20, 495)
+$btnFullProcess.Location = New-Object System.Drawing.Point(20, 555)
 $btnFullProcess.Size = New-Object System.Drawing.Size(100, 35)
 $btnFullProcess.BackColor = [System.Drawing.Color]::LightSkyBlue
 $form.Controls.Add($btnFullProcess)
 
 $btnRevert = New-Object System.Windows.Forms.Button
 $btnRevert.Text = "Revert Merge"
-$btnRevert.Location = New-Object System.Drawing.Point(130, 495)
+$btnRevert.Location = New-Object System.Drawing.Point(130, 555)
 $btnRevert.Size = New-Object System.Drawing.Size(110, 35)
 $btnRevert.BackColor = [System.Drawing.Color]::Orange
 $form.Controls.Add($btnRevert)
 
 $btnCancel = New-Object System.Windows.Forms.Button
 $btnCancel.Text = "Cancel"
-$btnCancel.Location = New-Object System.Drawing.Point(315, 495)
+$btnCancel.Location = New-Object System.Drawing.Point(315, 555)
 $btnCancel.Size = New-Object System.Drawing.Size(90, 35)
 $form.Controls.Add($btnCancel)
 
 $btnStart = New-Object System.Windows.Forms.Button
 $btnStart.Text = "Start Selected"
-$btnStart.Location = New-Object System.Drawing.Point(415, 495)
+$btnStart.Location = New-Object System.Drawing.Point(415, 555)
 $btnStart.Size = New-Object System.Drawing.Size(110, 35)
 $btnStart.BackColor = [System.Drawing.Color]::LightGreen
 $form.Controls.Add($btnStart)
@@ -187,7 +226,8 @@ $btnStart.Add_Click({
     $script:cancelRun = $false
 
     # Lock the UI
-    $txtPath.Enabled = $false
+    $lstFolders.Enabled = $false
+    $btnRemove.Enabled = $false
     $btnBrowse.Enabled = $false
     $chkColors.Enabled = $false
     $chkMerge.Enabled = $false
@@ -201,10 +241,11 @@ $btnStart.Add_Click({
     $btnCancel.Text = "Stop Engine"
     $btnCancel.BackColor = [System.Drawing.Color]::LightCoral
 
-    $targetDir = $txtPath.Text
+    $targetDirs = @($lstFolders.Items | ForEach-Object { $_ })
+    $targetDir = if ($targetDirs.Count -gt 0) { $targetDirs[0] } else { "" }
     $txtLog.Clear()
     Write-Log "=== AUTOMATION ENGINE ENGAGED ===" "Cyan"
-    Write-Log "Target: $targetDir" "DarkGray"
+    Write-Log "Queued $($targetDirs.Count) folder(s)" "DarkGray"
 
     # ---------------------------------------------------------
     # ROUTE A: REVERT MODE
@@ -242,6 +283,11 @@ $btnStart.Add_Click({
     # ROUTE B: STANDARD PROCESSING (Direct Worker Calls)
     # ---------------------------------------------------------
     else {
+        $generatedPreviews = New-Object System.Collections.Generic.List[string]
+
+        foreach ($targetDir in $targetDirs) {
+        if ($script:cancelRun) { break }
+        Write-Log "`n--- FOLDER: $targetDir ---" "Cyan"
         $doColors  = $chkColors.Checked
         $doMerge   = $chkMerge.Checked
         $doSlice   = $chkSlice.Checked
@@ -379,8 +425,7 @@ $btnStart.Add_Click({
             Write-Log " PHASE 2: UNATTENDED PROCESSING" "White"
             Write-Log "=========================================" "Magenta"
 
-            # Track generated preview paths explicitly so Phase 3 never needs to scan
-            $generatedPreviews = New-Object System.Collections.Generic.List[string]
+            # (generatedPreviews initialized before foreach - see above)
 
             foreach ($item in $processingQueue) {
                 if ($script:cancelRun) { Write-Log "`n>>> OPERATION ABORTED <<<" "Red"; break }
@@ -500,6 +545,8 @@ $btnStart.Add_Click({
 
     if (-not $script:cancelRun) { Write-Log "`n=== ALL TASKS COMPLETE ===" "LightGreen" }
 
+        } # end foreach targetDir
+
     # =========================================================
     # PHASE 3: FINAL IMAGE INJECTION (Base-Solo Function)
     # =========================================================
@@ -513,54 +560,117 @@ $btnStart.Add_Click({
         if ($null -eq $generatedPreviews) { $generatedPreviews = @() }
 
         if ($generatedPreviews.Count -gt 0) {
+
+            # -------------------------------------------------------
+            # PRE-FLIGHT: Force Synology Drive to fully download each
+            # .gcode.3mf before the bat tries to rename/extract it.
+            # We find every gcode file that corresponds to a preview,
+            # read it fully to trigger the download, then wait for its
+            # file size to stop changing (i.e. download is complete).
+            # -------------------------------------------------------
+            Write-Log "`n-> Pre-flight: ensuring all files are downloaded from cloud..." "Yellow"
+            foreach ($png in $generatedPreviews) {
+                $folder     = Split-Path $png -Parent
+                $gcodeFiles = Get-ChildItem -Path $folder -Filter "*Full.gcode.3mf" -ErrorAction SilentlyContinue
+                foreach ($gf in $gcodeFiles) {
+                    [System.Windows.Forms.Application]::DoEvents()
+                    Write-Log "  -> Checking: $($gf.Name)" "DarkGray"
+
+                    # Read the file to trigger Synology Drive download
+                    try {
+                        $stream = [System.IO.File]::OpenRead($gf.FullName)
+                        $buf = New-Object byte[] 65536
+                        while ($stream.Read($buf, 0, $buf.Length) -gt 0) {
+                            [System.Windows.Forms.Application]::DoEvents()
+                        }
+                        $stream.Close()
+                    } catch {
+                        Write-Log "     [WARN] Could not read $($gf.Name): $_" "Orange"
+                        continue
+                    }
+
+                    # Wait for file size to stabilise (download complete)
+                    $prevSize = -1
+                    $stableCount = 0
+                    $waitSecs = 0
+                    while ($stableCount -lt 3 -and $waitSecs -lt 120) {
+                        [System.Windows.Forms.Application]::DoEvents()
+                        $curSize = (Get-Item $gf.FullName -ErrorAction SilentlyContinue).Length
+                        if ($curSize -eq $prevSize) {
+                            $stableCount++
+                        } else {
+                            $stableCount = 0
+                            Write-Log "     [WAIT] Downloading... ($([math]::Round($curSize/1MB,1)) MB)" "Yellow"
+                        }
+                        $prevSize = $curSize
+                        $waitSecs += 2
+                        Start-Sleep -Milliseconds 2000
+                    }
+
+                    if ($waitSecs -ge 120) {
+                        Write-Log "     [WARN] $($gf.Name) may not be fully downloaded after 2 min." "Orange"
+                    } else {
+                        Write-Log "     [OK] $($gf.Name) is local ($([math]::Round((Get-Item $gf.FullName).Length/1MB,1)) MB)" "LightGreen"
+                    }
+                }
+            }
+
             $batchPath = Join-Path $scriptDir "ReplaceImageNew.bat"
             if (Test-Path $batchPath) {
-                Write-Log "-> Found $($generatedPreviews.Count) new image(s). Injecting into GCODE..." "Cyan"
+                Write-Log "-> Found $($generatedPreviews.Count) image(s) to inject across $($targetDirs.Count) folder(s)..." "Cyan"
 
-                # Redirect bat stdout to a temp file so we can tail it live in the GUI
-                $batLog = Join-Path $env:TEMP "BambuInject_$([System.IO.Path]::GetRandomFileName()).log"
-                $proc = Start-Process -FilePath $batchPath `
-                    -ArgumentList "`"$targetDir`"" `
-                    -PassThru -NoNewWindow `
-                    -RedirectStandardOutput $batLog
+                # Call the bat once per target folder so it scans the right place each time
+                foreach ($injectDir in $targetDirs) {
+                    if ($script:cancelRun) { break }
 
-                $lastLine = 0
-                while (-not $proc.HasExited) {
-                    [System.Windows.Forms.Application]::DoEvents()
-                    Start-Sleep -Milliseconds 150
+                    # Skip folders that produced no preview (nothing to inject)
+                    $hasPng = $generatedPreviews | Where-Object { $_.StartsWith($injectDir) }
+                    if (-not $hasPng) { continue }
 
-                    # Stream new lines from the bat log as they appear
+                    Write-Log "  -> Injecting: $injectDir" "DarkGray"
+                    $batLog = Join-Path $env:TEMP "BambuInject_$([System.IO.Path]::GetRandomFileName()).log"
+                    $proc = Start-Process -FilePath $batchPath `
+                        -ArgumentList "`"$injectDir`"" `
+                        -PassThru -NoNewWindow `
+                        -RedirectStandardOutput $batLog
+
+                    $lastLine = 0
+                    while (-not $proc.HasExited) {
+                        [System.Windows.Forms.Application]::DoEvents()
+                        Start-Sleep -Milliseconds 150
+                        if (Test-Path $batLog) {
+                            $lines = @(Get-Content $batLog -ErrorAction SilentlyContinue)
+                            for ($li = $lastLine; $li -lt $lines.Count; $li++) {
+                                $line = $lines[$li].Trim()
+                                if     ($line -match "^\[INJECTED\]") { Write-Log "     $line" "LightGreen" }
+                                elseif ($line -match "^\[ERROR\]")    { Write-Log "     $line" "Red" }
+                                elseif ($line -match "^\[WAIT\]")     { Write-Log "     $line" "Yellow" }
+                                elseif ($line -match "^\[SKIP\]")     { Write-Log "     $line" "DarkGray" }
+                                elseif ($line -match "^\[WARN\]")     { Write-Log "     $line" "Orange" }
+                                elseif ($line -match "^\[OK\]")       { Write-Log "     $line" "LightGreen" }
+                                elseif ($line -ne "")                  { Write-Log "     $line" "DarkGray" }
+                            }
+                            $lastLine = $lines.Count
+                        }
+                    }
+                    # Flush remaining lines
                     if (Test-Path $batLog) {
                         $lines = @(Get-Content $batLog -ErrorAction SilentlyContinue)
                         for ($li = $lastLine; $li -lt $lines.Count; $li++) {
                             $line = $lines[$li].Trim()
-                            if     ($line -match "^\[INJECTED\]") { Write-Log "  $line" "LightGreen" }
-                            elseif ($line -match "^\[ERROR\]")    { Write-Log "  $line" "Red" }
-                            elseif ($line -match "^\[WAIT\]")     { Write-Log "  $line" "Yellow" }
-                            elseif ($line -match "^\[SKIP\]")     { Write-Log "  $line" "DarkGray" }
-                            elseif ($line -match "^\[WARN\]")     { Write-Log "  $line" "Orange" }
-                            elseif ($line -ne "")                 { Write-Log "  $line" "DarkGray" }
+                            if     ($line -match "^\[INJECTED\]") { Write-Log "     $line" "LightGreen" }
+                            elseif ($line -match "^\[ERROR\]")    { Write-Log "     $line" "Red" }
+                            elseif ($line -match "^\[WAIT\]")     { Write-Log "     $line" "Yellow" }
+                            elseif ($line -match "^\[SKIP\]")     { Write-Log "     $line" "DarkGray" }
+                            elseif ($line -match "^\[WARN\]")     { Write-Log "     $line" "Orange" }
+                            elseif ($line -match "^\[OK\]")       { Write-Log "     $line" "LightGreen" }
+                            elseif ($line -ne "")                  { Write-Log "     $line" "DarkGray" }
                         }
-                        $lastLine = $lines.Count
+                        Remove-Item $batLog -Force -ErrorAction SilentlyContinue
                     }
-                }
+                } # end foreach injectDir
 
-                # Flush any remaining lines after process exits
-                if (Test-Path $batLog) {
-                    $lines = @(Get-Content $batLog -ErrorAction SilentlyContinue)
-                    for ($li = $lastLine; $li -lt $lines.Count; $li++) {
-                        $line = $lines[$li].Trim()
-                        if     ($line -match "^\[INJECTED\]") { Write-Log "  $line" "LightGreen" }
-                        elseif ($line -match "^\[ERROR\]")    { Write-Log "  $line" "Red" }
-                        elseif ($line -match "^\[WAIT\]")     { Write-Log "  $line" "Yellow" }
-                        elseif ($line -match "^\[SKIP\]")     { Write-Log "  $line" "DarkGray" }
-                        elseif ($line -match "^\[WARN\]")     { Write-Log "  $line" "Orange" }
-                        elseif ($line -ne "")                 { Write-Log "  $line" "DarkGray" }
-                    }
-                    Remove-Item $batLog -Force -ErrorAction SilentlyContinue
-                }
-
-                # Verify each PNG was consumed by checking if it still exists on disk
+                # Final verification: PNG consumed = success, still on disk = failure
                 $failCount = 0; $successCount = 0
                 foreach ($png in $generatedPreviews) {
                     if (Test-Path $png) {
@@ -594,7 +704,8 @@ $btnStart.Add_Click({
     $btnCancel.Text = "Close"
     $btnCancel.BackColor = [System.Drawing.Color]::LightGray
 
-    $txtPath.Enabled = $true
+    $lstFolders.Enabled = $true
+    $btnRemove.Enabled = $true
     $btnBrowse.Enabled = $true
     $chkColors.Enabled = $true
     $chkMerge.Enabled = $true
