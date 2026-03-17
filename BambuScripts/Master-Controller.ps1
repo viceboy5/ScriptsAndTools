@@ -186,7 +186,7 @@ $form.Controls.Add($btnFullProcess)
 $btnRevert = New-Object System.Windows.Forms.Button
 $btnRevert.Text = "View Merge Results"
 $btnRevert.Location = New-Object System.Drawing.Point(130, 555)
-$btnRevert.Size = New-Object System.Drawing.Size(130, 35)
+$btnRevert.Size = New-Object System.Drawing.Size(110, 35)
 $btnRevert.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
 $btnRevert.BackColor = [System.Drawing.Color]::SteelBlue
 $btnRevert.ForeColor = [System.Drawing.Color]::White
@@ -710,6 +710,41 @@ $btnCancel.Add_Click({
 # =============================================================================
 # RESULTS REVIEW WINDOW
 # =============================================================================
+
+function Invoke-RandomizePickColors($sourcePath, $destPath) {
+    # Map each unique color in the image to a random RGB replacement.
+    # Pixels sharing a color stay consistent with each other so segment
+    # boundaries remain clear - just shifted to visually distinct hues.
+    Add-Type -AssemblyName System.Drawing
+    $rng = New-Object System.Random
+    try {
+        $bmp = New-Object System.Drawing.Bitmap($sourcePath)
+        $colorMap = @{}
+        for ($y = 0; $y -lt $bmp.Height; $y++) {
+            for ($x = 0; $x -lt $bmp.Width; $x++) {
+                $px = $bmp.GetPixel($x, $y)
+                # Skip fully transparent pixels
+                if ($px.A -lt 10) { continue }
+                $key = "$($px.R),$($px.G),$($px.B)"
+                if (-not $colorMap.ContainsKey($key)) {
+                    $colorMap[$key] = [System.Drawing.Color]::FromArgb(
+                        $px.A,
+                        $rng.Next(0, 256),
+                        $rng.Next(0, 256),
+                        $rng.Next(0, 256)
+                    )
+                }
+                $bmp.SetPixel($x, $y, $colorMap[$key])
+            }
+        }
+        $bmp.Save($destPath)
+        $bmp.Dispose()
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 function Show-ResultsWindow($queue, $previews, $scriptDir) {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
@@ -780,16 +815,24 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
         if (Test-Path $gcodePath) {
             try {
                 $zip = [System.IO.Compression.ZipFile]::OpenRead($gcodePath)
+
                 $plateEntry = $zip.Entries | Where-Object { $_.FullName -replace "\\","/" -match "(?i)Metadata/plate_1\.png$" } | Select-Object -First 1
                 if ($plateEntry) {
                     $platePath = Join-Path $tempDir "${baseName}_plate.png"
                     [System.IO.Compression.ZipFileExtensions]::ExtractToFile($plateEntry, $platePath, $true)
                 }
+
                 $pickEntry = $zip.Entries | Where-Object { $_.FullName -match "(?i)pick_1\.png$" } | Select-Object -First 1
                 if ($pickEntry) {
+                    $rawPickPath = Join-Path $tempDir "${baseName}_pick_raw.png"
+                    [System.IO.Compression.ZipFileExtensions]::ExtractToFile($pickEntry, $rawPickPath, $true)
+                    # Randomize colors so adjacent similar segments are visually distinct
                     $pickPath = Join-Path $tempDir "${baseName}_pick.png"
-                    [System.IO.Compression.ZipFileExtensions]::ExtractToFile($pickEntry, $pickPath, $true)
+                    $ok = Invoke-RandomizePickColors $rawPickPath $pickPath
+                    if (-not $ok) { $pickPath = $rawPickPath }  # fallback to original
+                    Remove-Item $rawPickPath -Force -ErrorAction SilentlyContinue
                 }
+
                 $zip.Dispose()
             } catch {}
         }
@@ -873,12 +916,10 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
             $itm  = $data.Item
             $lbl  = $data.Label
             $sLbl = $data.StatusLabel
-            # Run RevertMerge.bat without -Wait so the UI thread stays responsive
             try {
                 $batPath = Join-Path $data.ScriptDir "RevertMerge.bat"
                 if (Test-Path $batPath) {
                     $proc = Start-Process -FilePath $batPath -ArgumentList "`"$($itm.InputPath)`"" -PassThru -NoNewWindow
-                    # Poll instead of -Wait so the form stays interactive
                     $this.Enabled = $false
                     $this.Text = "Reverting..."
                     while (-not $proc.HasExited) {
@@ -915,16 +956,11 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
     }
 
     $scroll.AutoScrollMinSize = New-Object System.Drawing.Size(840, $rowY)
-
     $btnKeepAll.Add_Click({ $rForm.Close() })
 
-    # Undo All with "Are you sure" confirmation
     $btnUndoAll.Add_Click({
         $pendingCount = ($rowData | Where-Object { $_.UndoBtn.Enabled }).Count
-        if ($pendingCount -eq 0) {
-            $lblStatus.Text = "No merges available to undo."
-            return
-        }
+        if ($pendingCount -eq 0) { $lblStatus.Text = "No merges available to undo."; return }
         $confirm = [System.Windows.Forms.MessageBox]::Show(
             "Are you sure you want to undo all $pendingCount merge(s)?`n`nThis cannot be undone.",
             "Confirm Undo All",
