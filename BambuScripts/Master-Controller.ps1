@@ -728,7 +728,7 @@ function Invoke-RandomizePickColors($sourcePath, $destPath) {
                 $bmp.SetPixel($x, $y, $colorMap[$key])
             }
         }
-        $bmp.Save($destPath)
+        $bmp.Save($destPath) | Out-Null
         $bmp.Dispose()
         return $true
     } catch { return $false }
@@ -821,24 +821,37 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
         $platePath = $null
         $pickPath  = $null
         if (Test-Path $gcodePath) {
+            $zip = $null
             try {
                 $zip = [System.IO.Compression.ZipFile]::OpenRead($gcodePath)
-                $plateEntry = $zip.Entries | Where-Object { $_.FullName -replace "\\","/" -match "(?i)Metadata/plate_1\.png$" } | Select-Object -First 1
-                if ($plateEntry) {
-                    $platePath = Join-Path $tempDir "${baseName}_plate.png"
-                    [System.IO.Compression.ZipFileExtensions]::ExtractToFile($plateEntry, $platePath, $true)
-                }
-                $pickEntry = $zip.Entries | Where-Object { $_.FullName -match "(?i)pick_1\.png$" } | Select-Object -First 1
-                if ($pickEntry) {
-                    $rawPickPath = Join-Path $tempDir "${baseName}_pick_raw.png"
-                    [System.IO.Compression.ZipFileExtensions]::ExtractToFile($pickEntry, $rawPickPath, $true)
-                    $pickPath = Join-Path $tempDir "${baseName}_pick.png"
-                    $ok = Invoke-RandomizePickColors $rawPickPath $pickPath
-                    if (-not $ok) { $pickPath = $rawPickPath }
-                    Remove-Item $rawPickPath -Force -ErrorAction SilentlyContinue
-                }
+            } catch { $zip = $null }
+
+            if ($zip) {
+                # Extract plate_1.png independently
+                try {
+                    $plateEntry = $zip.Entries | Where-Object { $_.FullName -replace "\\","/" -match "(?i)Metadata/plate_1\.png$" } | Select-Object -First 1
+                    if ($plateEntry) {
+                        $platePath = Join-Path $tempDir "${baseName}_plate.png"
+                        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($plateEntry, $platePath, $true)
+                    }
+                } catch {}
+
+                # Extract pick_1.png independently - separate try so plate failure cannot block it
+                try {
+                    # Normalize entry paths to handle both / and \ separators
+                    $pickEntry = $zip.Entries | Where-Object { ($_.FullName -replace "\\","/") -match "(?i)(^|/)pick_1\.png$" } | Select-Object -First 1
+                    if ($pickEntry) {
+                        $rawPickPath = Join-Path $tempDir "${baseName}_pick_raw.png"
+                        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($pickEntry, $rawPickPath, $true)
+                        $pickPath = Join-Path $tempDir "${baseName}_pick.png"
+                        Invoke-RandomizePickColors $rawPickPath $pickPath | Out-Null
+                        if (-not (Test-Path $pickPath)) { $pickPath = $rawPickPath }
+                        Remove-Item $rawPickPath -Force -ErrorAction SilentlyContinue
+                    }
+                } catch {}
+
                 $zip.Dispose()
-            } catch {}
+            }
         }
 
         $nestBase = $baseName.Substring(0, $baseName.Length - 4) + "Nest"
