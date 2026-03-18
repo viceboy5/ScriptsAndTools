@@ -712,9 +712,6 @@ $btnCancel.Add_Click({
 # =============================================================================
 
 function Invoke-RandomizePickColors($sourcePath, $destPath) {
-    # Map each unique color in the image to a random RGB replacement.
-    # Pixels sharing a color stay consistent with each other so segment
-    # boundaries remain clear - just shifted to visually distinct hues.
     Add-Type -AssemblyName System.Drawing
     $rng = New-Object System.Random
     try {
@@ -723,16 +720,10 @@ function Invoke-RandomizePickColors($sourcePath, $destPath) {
         for ($y = 0; $y -lt $bmp.Height; $y++) {
             for ($x = 0; $x -lt $bmp.Width; $x++) {
                 $px = $bmp.GetPixel($x, $y)
-                # Skip fully transparent pixels
                 if ($px.A -lt 10) { continue }
                 $key = "$($px.R),$($px.G),$($px.B)"
                 if (-not $colorMap.ContainsKey($key)) {
-                    $colorMap[$key] = [System.Drawing.Color]::FromArgb(
-                        $px.A,
-                        $rng.Next(0, 256),
-                        $rng.Next(0, 256),
-                        $rng.Next(0, 256)
-                    )
+                    $colorMap[$key] = [System.Drawing.Color]::FromArgb($px.A, $rng.Next(0,256), $rng.Next(0,256), $rng.Next(0,256))
                 }
                 $bmp.SetPixel($x, $y, $colorMap[$key])
             }
@@ -740,9 +731,26 @@ function Invoke-RandomizePickColors($sourcePath, $destPath) {
         $bmp.Save($destPath)
         $bmp.Dispose()
         return $true
-    } catch {
-        return $false
-    }
+    } catch { return $false }
+}
+
+function Show-ImageViewer($imagePath, $title) {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+    $vForm = New-Object System.Windows.Forms.Form
+    $vForm.Text = $title
+    $vForm.Size = New-Object System.Drawing.Size(800, 820)
+    $vForm.StartPosition = "CenterScreen"
+    $vForm.BackColor = [System.Drawing.Color]::Black
+    $vForm.MinimumSize = New-Object System.Drawing.Size(300, 300)
+    $pb = New-Object System.Windows.Forms.PictureBox
+    $pb.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $pb.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+    $pb.BackColor = [System.Drawing.Color]::Black
+    try { $pb.Image = [System.Drawing.Image]::FromFile($imagePath) } catch {}
+    $vForm.Controls.Add($pb)
+    $vForm.ShowDialog() | Out-Null
+    if ($pb.Image) { $pb.Image.Dispose() }
 }
 
 function Show-ResultsWindow($queue, $previews, $scriptDir) {
@@ -757,7 +765,7 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
     $rForm.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
 
     $lblHeader = New-Object System.Windows.Forms.Label
-    $lblHeader.Text = "Review Results - Check images then Keep or Undo each file"
+    $lblHeader.Text = "Review Results  -  Double-click any image to view full size"
     $lblHeader.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
     $lblHeader.ForeColor = [System.Drawing.Color]::White
     $lblHeader.Location = New-Object System.Drawing.Point(10, 10)
@@ -815,24 +823,20 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
         if (Test-Path $gcodePath) {
             try {
                 $zip = [System.IO.Compression.ZipFile]::OpenRead($gcodePath)
-
                 $plateEntry = $zip.Entries | Where-Object { $_.FullName -replace "\\","/" -match "(?i)Metadata/plate_1\.png$" } | Select-Object -First 1
                 if ($plateEntry) {
                     $platePath = Join-Path $tempDir "${baseName}_plate.png"
                     [System.IO.Compression.ZipFileExtensions]::ExtractToFile($plateEntry, $platePath, $true)
                 }
-
                 $pickEntry = $zip.Entries | Where-Object { $_.FullName -match "(?i)pick_1\.png$" } | Select-Object -First 1
                 if ($pickEntry) {
                     $rawPickPath = Join-Path $tempDir "${baseName}_pick_raw.png"
                     [System.IO.Compression.ZipFileExtensions]::ExtractToFile($pickEntry, $rawPickPath, $true)
-                    # Randomize colors so adjacent similar segments are visually distinct
                     $pickPath = Join-Path $tempDir "${baseName}_pick.png"
                     $ok = Invoke-RandomizePickColors $rawPickPath $pickPath
-                    if (-not $ok) { $pickPath = $rawPickPath }  # fallback to original
+                    if (-not $ok) { $pickPath = $rawPickPath }
                     Remove-Item $rawPickPath -Force -ErrorAction SilentlyContinue
                 }
-
                 $zip.Dispose()
             } catch {}
         }
@@ -861,13 +865,19 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
         $pbPlate.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
         $pbPlate.BackColor = [System.Drawing.Color]::Black
         $pbPlate.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+        $pbPlate.Cursor = [System.Windows.Forms.Cursors]::Hand
         if ($platePath -and (Test-Path $platePath)) {
             try { $pbPlate.Image = [System.Drawing.Image]::FromFile($platePath) } catch {}
         }
+        $pbPlate.Tag = @{ Path = $platePath; Title = "$baseName - Plate Preview" }
+        $pbPlate.Add_DoubleClick({
+            $d = $this.Tag
+            if ($d.Path -and (Test-Path $d.Path)) { Show-ImageViewer $d.Path $d.Title }
+        })
         $row.Controls.Add($pbPlate)
 
         $lblPlate = New-Object System.Windows.Forms.Label
-        $lblPlate.Text = "Plate Preview"
+        $lblPlate.Text = "Plate Preview  (double-click to enlarge)"
         $lblPlate.ForeColor = [System.Drawing.Color]::LightGray
         $lblPlate.Font = New-Object System.Drawing.Font("Segoe UI", 8)
         $lblPlate.Location = New-Object System.Drawing.Point(5, $($thumbSize + 33))
@@ -881,6 +891,7 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
         $pbPick.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
         $pbPick.BackColor = [System.Drawing.Color]::Black
         $pbPick.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+        $pbPick.Cursor = [System.Windows.Forms.Cursors]::Hand
         if ($pickPath -and (Test-Path $pickPath)) {
             try { $pbPick.Image = [System.Drawing.Image]::FromFile($pickPath) } catch {}
         } else {
@@ -893,10 +904,15 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
             $lblNoPick.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
             $pbPick.Controls.Add($lblNoPick)
         }
+        $pbPick.Tag = @{ Path = $pickPath; Title = "$baseName - Pick / Merge Check" }
+        $pbPick.Add_DoubleClick({
+            $d = $this.Tag
+            if ($d.Path -and (Test-Path $d.Path)) { Show-ImageViewer $d.Path $d.Title }
+        })
         $row.Controls.Add($pbPick)
 
         $lblPick = New-Object System.Windows.Forms.Label
-        $lblPick.Text = "Pick / Merge Check"
+        $lblPick.Text = "Pick / Merge Check  (double-click to enlarge)"
         $lblPick.ForeColor = [System.Drawing.Color]::LightGray
         $lblPick.Font = New-Object System.Drawing.Font("Segoe UI", 8)
         $lblPick.Location = New-Object System.Drawing.Point($($thumbSize + 15), $($thumbSize + 33))
@@ -912,16 +928,19 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
         $btnUndo.Enabled = $hasMerge
         $btnUndo.Tag = @{ Item = $item; Row = $row; Label = $lblName; ScriptDir = $scriptDir; StatusLabel = $lblStatus }
         $btnUndo.Add_Click({
-            $data = $this.Tag
-            $itm  = $data.Item
-            $lbl  = $data.Label
-            $sLbl = $data.StatusLabel
+            # Capture $this immediately - it becomes unreliable after DoEvents() calls
+            $myBtn = $this
+            $data  = $myBtn.Tag
+            $itm   = $data.Item
+            $lbl   = $data.Label
+            $sLbl  = $data.StatusLabel
+            $myBtn.Enabled = $false
+            $myBtn.Text = "Reverting..."
+            [System.Windows.Forms.Application]::DoEvents()
             try {
                 $batPath = Join-Path $data.ScriptDir "RevertMerge.bat"
                 if (Test-Path $batPath) {
                     $proc = Start-Process -FilePath $batPath -ArgumentList "`"$($itm.InputPath)`"" -PassThru -NoNewWindow
-                    $this.Enabled = $false
-                    $this.Text = "Reverting..."
                     while (-not $proc.HasExited) {
                         [System.Windows.Forms.Application]::DoEvents()
                         Start-Sleep -Milliseconds 100
@@ -929,13 +948,13 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
                 }
                 $lbl.Text = $itm.BaseName + "  [REVERTED]"
                 $lbl.ForeColor = [System.Drawing.Color]::Orange
-                $this.Text = "Reverted"
+                $myBtn.Text = "Reverted"
                 $data.Row.BackColor = [System.Drawing.Color]::FromArgb(60, 40, 10)
                 $sLbl.Text = "Reverted: $($itm.BaseName)"
             } catch {
                 $sLbl.Text = "Error: $_"
-                $this.Enabled = $true
-                $this.Text = "Undo Merge"
+                $myBtn.Enabled = $true
+                $myBtn.Text = "Undo Merge"
             }
         })
         $row.Controls.Add($btnUndo)
@@ -957,26 +976,49 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
 
     $scroll.AutoScrollMinSize = New-Object System.Drawing.Size(840, $rowY)
     $btnKeepAll.Add_Click({ $rForm.Close() })
-
     $btnUndoAll.Add_Click({
-        $pendingCount = ($rowData | Where-Object { $_.UndoBtn.Enabled }).Count
-        if ($pendingCount -eq 0) { $lblStatus.Text = "No merges available to undo."; return }
+        $pending = @($rowData | Where-Object { $_.UndoBtn.Enabled })
+        if ($pending.Count -eq 0) { $lblStatus.Text = "No merges available to undo."; return }
         $confirm = [System.Windows.Forms.MessageBox]::Show(
-            "Are you sure you want to undo all $pendingCount merge(s)?`n`nThis cannot be undone.",
+            "Are you sure you want to undo all $($pending.Count) merge(s)?`n`nThis cannot be undone.",
             "Confirm Undo All",
             [System.Windows.Forms.MessageBoxButtons]::YesNo,
             [System.Windows.Forms.MessageBoxIcon]::Warning
         )
         if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) { return }
-        foreach ($rd in $rowData) {
-            if ($rd.UndoBtn.Enabled) {
-                $rd.UndoBtn.PerformClick()
+
+        # Call revert logic directly rather than PerformClick so $this is unambiguous
+        foreach ($rd in $pending) {
+            $btn  = $rd.UndoBtn
+            $data = $btn.Tag
+            $itm  = $data.Item
+            $lbl  = $data.Label
+            $btn.Enabled = $false
+            $btn.Text = "Reverting..."
+            [System.Windows.Forms.Application]::DoEvents()
+            try {
+                $batPath = Join-Path $data.ScriptDir "RevertMerge.bat"
+                if (Test-Path $batPath) {
+                    $proc = Start-Process -FilePath $batPath -ArgumentList "`"$($itm.InputPath)`"" -PassThru -NoNewWindow
+                    while (-not $proc.HasExited) {
+                        [System.Windows.Forms.Application]::DoEvents()
+                        Start-Sleep -Milliseconds 100
+                    }
+                }
+                $lbl.Text = $itm.BaseName + "  [REVERTED]"
+                $lbl.ForeColor = [System.Drawing.Color]::Orange
+                $btn.Text = "Reverted"
+                $data.Row.BackColor = [System.Drawing.Color]::FromArgb(60, 40, 10)
+                $lblStatus.Text = "Reverted: $($itm.BaseName)"
                 [System.Windows.Forms.Application]::DoEvents()
+            } catch {
+                $lblStatus.Text = "Error reverting $($itm.BaseName): $_"
+                $btn.Enabled = $true
+                $btn.Text = "Undo Merge"
             }
         }
-        $lblStatus.Text = "All merges reverted."
+        $lblStatus.Text = "All $($pending.Count) merge(s) reverted."
     })
-
     $rForm.ShowDialog() | Out-Null
     Get-ChildItem -Path $tempDir -Filter "*.png" | Remove-Item -Force -ErrorAction SilentlyContinue
 }
