@@ -83,15 +83,34 @@ if (Test-Path $vlhPath) {
 }
 
 # ── PURGE OFF-PLATE & ORPHANED OBJECTS ────────────────────────────────────────
+# ── PURGE OFF-PLATE & ORPHANED OBJECTS ──────────────────────────────────────
 $validBuildItems = @()
 $killedIds = New-Object System.Collections.Generic.HashSet[string]
+
+# Build set of object IDs that are actually assigned to a plate in model_settings.
+# Any build item NOT in this set is an "Outside" object (visible in Bambu as the
+# Outside group) and must be removed before merging, regardless of its coordinates.
+$plateAssignedIds = New-Object System.Collections.Generic.HashSet[string]
+if ($hasSettings) {
+    foreach ($inst in @($settings.SelectNodes('//plate/model_instance'))) {
+        $metaId = $inst.SelectSingleNode('metadata[@key="object_id"]')
+        if ($null -ne $metaId) { $plateAssignedIds.Add($metaId.GetAttribute('value')) | Out-Null }
+    }
+}
 
 foreach ($item in $buildItems) {
     $id = $item.GetAttribute('objectid')
     [double[]]$tx = Parse-Tx ($item.GetAttribute('transform'))
     $x = $tx[9]; $y = $tx[10]
 
-    if ($x -lt -50 -or $x -gt 300 -or $y -lt -50 -or $y -gt 300) {
+    # Filter 1: coordinate-based off-plate check (original)
+    $offPlateByCoord = ($x -lt -50 -or $x -gt 300 -or $y -lt -50 -or $y -gt 300)
+
+    # Filter 2: settings-based Outside check - object has no plate model_instance
+    $offPlateBySettings = ($plateAssignedIds.Count -gt 0 -and -not $plateAssignedIds.Contains($id))
+
+    if ($offPlateByCoord -or $offPlateBySettings) {
+        $killedIds.Add($id) | Out-Null
         $item.ParentNode.RemoveChild($item) | Out-Null
     } else {
         $validBuildItems += $item
