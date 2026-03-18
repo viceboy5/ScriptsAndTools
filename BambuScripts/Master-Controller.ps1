@@ -192,51 +192,6 @@ $btnRevert.BackColor = [System.Drawing.Color]::SteelBlue
 $btnRevert.ForeColor = [System.Drawing.Color]::White
 $form.Controls.Add($btnRevert)
 
-$btnCombineTsv = New-Object System.Windows.Forms.Button
-$btnCombineTsv.Text = "Combine TSVs"
-$btnCombineTsv.Location = New-Object System.Drawing.Point(275, 555)
-$btnCombineTsv.Size = New-Object System.Drawing.Size(110, 35)
-$btnCombineTsv.BackColor = [System.Drawing.Color]::MediumPurple
-$btnCombineTsv.ForeColor = [System.Drawing.Color]::White
-$btnCombineTsv.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-$btnCombineTsv.Add_Click({
-    if ($lstFolders.Items.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("Add at least one folder to the list first.", "No Folders", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
-        return
-    }
-
-    foreach ($targetDir in $lstFolders.Items) {
-        # Find all individual *_Data.tsv files anywhere under this folder
-        $tsvFiles = Get-ChildItem -Path $targetDir -Filter "*_Data.tsv" -Recurse -ErrorAction SilentlyContinue |
-                    Where-Object { $_.Name -notmatch "(?i)^.*_Design_Data\.tsv$" }
-
-        if ($tsvFiles.Count -eq 0) {
-            Write-Log "  [*] No _Data.tsv files found in: $targetDir" "DarkGray"
-            continue
-        }
-
-        # Name the combined file after the folder
-        $folderName  = Split-Path $targetDir -Leaf
-        $outTsvPath  = Join-Path $targetDir "${folderName}_Data.tsv"
-
-        Write-Log "`n-> Combining $($tsvFiles.Count) TSV(s) into: ${folderName}_Data.tsv" "Cyan"
-
-        # Each individual TSV is a single line - collect all, deduplicate by project name (first column)
-        $combined = [ordered]@{}
-        foreach ($tsv in $tsvFiles) {
-            $line = Get-Content $tsv.FullName -ErrorAction SilentlyContinue | Select-Object -Last 1
-            if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            $key = ($line -split "`t")[0]
-            $combined[$key] = $line
-        }
-
-        $combined.Values | Set-Content -Path $outTsvPath -Encoding UTF8
-        Write-Log "  [+] Written: $outTsvPath ($($combined.Count) rows)" "LightGreen"
-        [System.Windows.Forms.Application]::DoEvents()
-    }
-})
-$form.Controls.Add($btnCombineTsv)
-
 $btnCancel = New-Object System.Windows.Forms.Button
 $btnCancel.Text = "Cancel"
 $btnCancel.Location = New-Object System.Drawing.Point(315, 555)
@@ -539,6 +494,7 @@ $btnStart.Add_Click({
                     }
                     $extractArgs = @(
                         "-InputFile",         "`"$slicedFile`"",
+                        "-MasterTsvPath",     "`"$(Join-Path $targetDir 'Master_Data.tsv')`"",
                         "-IndividualTsvPath", "`"$(Join-Path $fileDir "$baseName`_Data.tsv")`""
                     )
                     if (Test-Path $singleFile) { $extractArgs += "-SingleFile",   "`"$singleFile`"" }
@@ -791,7 +747,11 @@ function Show-ImageViewer($imagePath, $title) {
     $pb.Dock = [System.Windows.Forms.DockStyle]::Fill
     $pb.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
     $pb.BackColor = [System.Drawing.Color]::Black
-    try { $pb.Image = [System.Drawing.Image]::FromFile($imagePath) } catch {}
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($imagePath)
+        $ms = New-Object System.IO.MemoryStream(,$bytes)
+        $pb.Image = [System.Drawing.Image]::FromStream($ms)
+    } catch {}
     $vForm.Controls.Add($pb)
     $vForm.ShowDialog() | Out-Null
     if ($pb.Image) { $pb.Image.Dispose() }
@@ -855,7 +815,9 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
     $rowY = 5
     $rowData = @()
     $tempDir = Join-Path $env:TEMP "WiggliteerResults"
-    if (-not (Test-Path $tempDir)) { New-Item -ItemType Directory -Path $tempDir | Out-Null }
+    # Always wipe on open so stale extractions from previous runs are never shown
+    if (Test-Path $tempDir) { Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue }
+    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
 
     foreach ($item in $queue) {
         $baseName  = $item.BaseName
@@ -924,7 +886,11 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
         $pbPlate.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
         $pbPlate.Cursor = [System.Windows.Forms.Cursors]::Hand
         if ($platePath -and (Test-Path $platePath)) {
-            try { $pbPlate.Image = [System.Drawing.Image]::FromFile($platePath) } catch {}
+            try {
+                $bytes = [System.IO.File]::ReadAllBytes($platePath)
+                $ms = New-Object System.IO.MemoryStream(,$bytes)
+                $pbPlate.Image = [System.Drawing.Image]::FromStream($ms)
+            } catch {}
         }
         $pbPlate.Tag = @{ Path = $platePath; Title = "$baseName - Plate Preview" }
         $pbPlate.Add_DoubleClick({
@@ -950,7 +916,11 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
         $pbPick.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
         $pbPick.Cursor = [System.Windows.Forms.Cursors]::Hand
         if ($pickPath -and (Test-Path $pickPath)) {
-            try { $pbPick.Image = [System.Drawing.Image]::FromFile($pickPath) } catch {}
+            try {
+                $bytes = [System.IO.File]::ReadAllBytes($pickPath)
+                $ms = New-Object System.IO.MemoryStream(,$bytes)
+                $pbPick.Image = [System.Drawing.Image]::FromStream($ms)
+            } catch {}
         } else {
             $lblNoPick = New-Object System.Windows.Forms.Label
             $lblNoPick.Text = "No pick_1.png"
