@@ -192,6 +192,51 @@ $btnRevert.BackColor = [System.Drawing.Color]::SteelBlue
 $btnRevert.ForeColor = [System.Drawing.Color]::White
 $form.Controls.Add($btnRevert)
 
+$btnCombineTsv = New-Object System.Windows.Forms.Button
+$btnCombineTsv.Text = "Combine TSVs"
+$btnCombineTsv.Location = New-Object System.Drawing.Point(275, 555)
+$btnCombineTsv.Size = New-Object System.Drawing.Size(110, 35)
+$btnCombineTsv.BackColor = [System.Drawing.Color]::MediumPurple
+$btnCombineTsv.ForeColor = [System.Drawing.Color]::White
+$btnCombineTsv.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+$btnCombineTsv.Add_Click({
+    if ($lstFolders.Items.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Add at least one folder to the list first.", "No Folders", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+        return
+    }
+
+    foreach ($targetDir in $lstFolders.Items) {
+        # Find all individual *_Data.tsv files anywhere under this folder
+        $tsvFiles = Get-ChildItem -Path $targetDir -Filter "*_Data.tsv" -Recurse -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -notmatch "(?i)^.*_Design_Data\.tsv$" }
+
+        if ($tsvFiles.Count -eq 0) {
+            Write-Log "  [*] No _Data.tsv files found in: $targetDir" "DarkGray"
+            continue
+        }
+
+        # Name the combined file after the folder
+        $folderName  = Split-Path $targetDir -Leaf
+        $outTsvPath  = Join-Path $targetDir "${folderName}_Data.tsv"
+
+        Write-Log "`n-> Combining $($tsvFiles.Count) TSV(s) into: ${folderName}_Data.tsv" "Cyan"
+
+        # Each individual TSV is a single line - collect all, deduplicate by project name (first column)
+        $combined = [ordered]@{}
+        foreach ($tsv in $tsvFiles) {
+            $line = Get-Content $tsv.FullName -ErrorAction SilentlyContinue | Select-Object -Last 1
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $key = ($line -split "`t")[0]
+            $combined[$key] = $line
+        }
+
+        $combined.Values | Set-Content -Path $outTsvPath -Encoding UTF8
+        Write-Log "  [+] Written: $outTsvPath ($($combined.Count) rows)" "LightGreen"
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+})
+$form.Controls.Add($btnCombineTsv)
+
 $btnCancel = New-Object System.Windows.Forms.Button
 $btnCancel.Text = "Cancel"
 $btnCancel.Location = New-Object System.Drawing.Point(315, 555)
@@ -494,7 +539,6 @@ $btnStart.Add_Click({
                     }
                     $extractArgs = @(
                         "-InputFile",         "`"$slicedFile`"",
-                        "-MasterTsvPath",     "`"$(Join-Path $targetDir 'Master_Data.tsv')`"",
                         "-IndividualTsvPath", "`"$(Join-Path $fileDir "$baseName`_Data.tsv")`""
                     )
                     if (Test-Path $singleFile) { $extractArgs += "-SingleFile",   "`"$singleFile`"" }
