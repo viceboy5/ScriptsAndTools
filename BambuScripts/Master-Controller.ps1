@@ -11,8 +11,8 @@ $script:isRevertMode = $false
 # --- 1. BUILD THE MAIN WINDOW ---
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Wiggliteerz Master Controller"
-$form.Size = New-Object System.Drawing.Size(560, 650)
-$form.MinimumSize = New-Object System.Drawing.Size(560, 500)
+$form.Size = New-Object System.Drawing.Size(700, 650)
+$form.MinimumSize = New-Object System.Drawing.Size(700, 500)
 $form.StartPosition = 'CenterScreen'
 $form.FormBorderStyle = 'Sizable'
 $form.MaximizeBox = $true
@@ -192,16 +192,54 @@ $btnRevert.BackColor = [System.Drawing.Color]::SteelBlue
 $btnRevert.ForeColor = [System.Drawing.Color]::White
 $form.Controls.Add($btnRevert)
 
+$btnCombineTsv = New-Object System.Windows.Forms.Button
+$btnCombineTsv.Text = "Combine TSVs"
+$btnCombineTsv.Size = New-Object System.Drawing.Size(120, 35)
+$btnCombineTsv.Location = New-Object System.Drawing.Point(270, 555)
+$btnCombineTsv.BackColor = [System.Drawing.Color]::MediumPurple
+$btnCombineTsv.ForeColor = [System.Drawing.Color]::White
+# Left+Right+Bottom anchor keeps it centered as the window resizes
+$btnCombineTsv.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+$btnCombineTsv.Add_Click({
+    if ($lstFolders.Items.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Add at least one folder to the list first.", "No Folders", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+        return
+    }
+    foreach ($targetDir in $lstFolders.Items) {
+        $tsvFiles = Get-ChildItem -Path $targetDir -Filter "*_Data.tsv" -Recurse -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -notmatch "(?i)^.*_Design_Data\.tsv$" }
+        if ($tsvFiles.Count -eq 0) {
+            Write-Log "  [*] No _Data.tsv files found in: $targetDir" "DarkGray"
+            continue
+        }
+        $folderName = Split-Path $targetDir -Leaf
+        $outTsvPath = Join-Path $targetDir "${folderName}_Data.tsv"
+        Write-Log "`n-> Combining $($tsvFiles.Count) TSV(s) into: ${folderName}_Data.tsv" "Cyan"
+        $combined = [ordered]@{}
+        foreach ($tsv in $tsvFiles) {
+            if ($tsv.FullName -eq $outTsvPath) { continue }
+            $line = Get-Content $tsv.FullName -ErrorAction SilentlyContinue | Select-Object -Last 1
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $key = ($line -split "`t")[0]
+            $combined[$key] = $line
+        }
+        $combined.Values | Set-Content -Path $outTsvPath -Encoding UTF8
+        Write-Log "  [+] Written: $outTsvPath ($($combined.Count) rows)" "LightGreen"
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+})
+$form.Controls.Add($btnCombineTsv)
+
 $btnCancel = New-Object System.Windows.Forms.Button
 $btnCancel.Text = "Cancel"
-$btnCancel.Location = New-Object System.Drawing.Point(315, 555)
+$btnCancel.Location = New-Object System.Drawing.Point(455, 555)
 $btnCancel.Size = New-Object System.Drawing.Size(90, 35)
 $btnCancel.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
 $form.Controls.Add($btnCancel)
 
 $btnStart = New-Object System.Windows.Forms.Button
 $btnStart.Text = "Start Selected"
-$btnStart.Location = New-Object System.Drawing.Point(415, 555)
+$btnStart.Location = New-Object System.Drawing.Point(560, 555)
 $btnStart.Size = New-Object System.Drawing.Size(110, 35)
 $btnStart.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
 $btnStart.BackColor = [System.Drawing.Color]::LightGreen
@@ -494,7 +532,6 @@ $btnStart.Add_Click({
                     }
                     $extractArgs = @(
                         "-InputFile",         "`"$slicedFile`"",
-                        "-MasterTsvPath",     "`"$(Join-Path $targetDir 'Master_Data.tsv')`"",
                         "-IndividualTsvPath", "`"$(Join-Path $fileDir "$baseName`_Data.tsv")`""
                     )
                     if (Test-Path $singleFile) { $extractArgs += "-SingleFile",   "`"$singleFile`"" }
