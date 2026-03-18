@@ -193,7 +193,7 @@ $btnRevert.ForeColor = [System.Drawing.Color]::White
 $form.Controls.Add($btnRevert)
 
 $btnCombineTsv = New-Object System.Windows.Forms.Button
-$btnCombineTsv.Text = "Combine TSVs"
+$btnCombineTsv.Text = "Combine Data"
 $btnCombineTsv.Size = New-Object System.Drawing.Size(120, 35)
 $btnCombineTsv.Location = New-Object System.Drawing.Point(270, 555)
 $btnCombineTsv.BackColor = [System.Drawing.Color]::MediumPurple
@@ -822,6 +822,43 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
     $scroll.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
     $rForm.Controls.Add($scroll)
 
+    $scroll.Add_SizeChanged({
+        $availW   = $scroll.ClientSize.Width - 20
+        $newThumb = [int][math]::Max(120, [math]::Min(400, ($availW - 220) / 2))
+        $newRowH  = $newThumb + 60
+        $yPos = 5
+        foreach ($row in $scroll.Controls) {
+            if (-not ($row -is [System.Windows.Forms.Panel])) { continue }
+            $row.Height = $newRowH
+            $row.Location = New-Object System.Drawing.Point(0, $yPos)
+            $yPos += $newRowH + 8
+            foreach ($ctrl in $row.Controls) {
+                if ($ctrl -is [System.Windows.Forms.PictureBox] -and $ctrl.Tag -is [hashtable]) {
+                    if ($ctrl.Tag.Role -eq "plate") {
+                        $ctrl.Location = New-Object System.Drawing.Point(5, 30)
+                        $ctrl.Size = New-Object System.Drawing.Size($newThumb, $newThumb)
+                    } elseif ($ctrl.Tag.Role -eq "pick") {
+                        $ctrl.Location = New-Object System.Drawing.Point(($newThumb + 15), 30)
+                        $ctrl.Size = New-Object System.Drawing.Size($newThumb, $newThumb)
+                    }
+                } elseif ($ctrl -is [System.Windows.Forms.Label] -and $ctrl.Tag -is [string]) {
+                    if ($ctrl.Tag -eq "plate_lbl") {
+                        $ctrl.Location = New-Object System.Drawing.Point(5, ($newThumb + 33))
+                        $ctrl.Size = New-Object System.Drawing.Size($newThumb, 18)
+                    } elseif ($ctrl.Tag -eq "pick_lbl") {
+                        $ctrl.Location = New-Object System.Drawing.Point(($newThumb + 15), ($newThumb + 33))
+                        $ctrl.Size = New-Object System.Drawing.Size($newThumb, 18)
+                    }
+                } elseif ($ctrl -is [System.Windows.Forms.Button]) {
+                    $ctrl.Location = New-Object System.Drawing.Point(($newThumb * 2 + 25), $ctrl.Location.Y)
+                } elseif ($ctrl -is [System.Windows.Forms.Label] -and $ctrl.Tag -eq $null) {
+                    $ctrl.Location = New-Object System.Drawing.Point(($newThumb * 2 + 25), $ctrl.Location.Y)
+                }
+            }
+        }
+        $scroll.AutoScrollMinSize = New-Object System.Drawing.Size(0, $yPos)
+    })
+
     $btnKeepAll = New-Object System.Windows.Forms.Button
     $btnKeepAll.Text = "Keep All & Close"
     $btnKeepAll.Size = New-Object System.Drawing.Size(150, 35)
@@ -905,6 +942,7 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
         $row.Location = New-Object System.Drawing.Point(0, $rowY)
         $row.Size = New-Object System.Drawing.Size(840, $rowHeight)
         $row.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 45)
+        $row.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
         $scroll.Controls.Add($row)
 
         $lblName = New-Object System.Windows.Forms.Label
@@ -929,7 +967,7 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
                 $pbPlate.Image = [System.Drawing.Image]::FromStream($ms)
             } catch {}
         }
-        $pbPlate.Tag = @{ Path = $platePath; Title = "$baseName - Plate Preview" }
+        $pbPlate.Tag = @{ Path = $platePath; Title = "$baseName - Plate Preview"; Role = "plate" }
         $pbPlate.Add_DoubleClick({
             $d = $this.Tag
             if ($d.Path -and (Test-Path $d.Path)) { Show-ImageViewer $d.Path $d.Title }
@@ -938,6 +976,7 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
 
         $lblPlate = New-Object System.Windows.Forms.Label
         $lblPlate.Text = "Plate Preview  (double-click to enlarge)"
+        $lblPlate.Tag = "plate_lbl"
         $lblPlate.ForeColor = [System.Drawing.Color]::LightGray
         $lblPlate.Font = New-Object System.Drawing.Font("Segoe UI", 8)
         $lblPlate.Location = New-Object System.Drawing.Point(5, $($thumbSize + 33))
@@ -968,7 +1007,7 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
             $lblNoPick.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
             $pbPick.Controls.Add($lblNoPick)
         }
-        $pbPick.Tag = @{ Path = $pickPath; Title = "$baseName - Pick / Merge Check" }
+        $pbPick.Tag = @{ Path = $pickPath; Title = "$baseName - Pick / Merge Check"; Role = "pick" }
         $pbPick.Add_DoubleClick({
             $d = $this.Tag
             if ($d.Path -and (Test-Path $d.Path)) { Show-ImageViewer $d.Path $d.Title }
@@ -977,6 +1016,7 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
 
         $lblPick = New-Object System.Windows.Forms.Label
         $lblPick.Text = "Pick / Merge Check  (double-click to enlarge)"
+        $lblPick.Tag = "pick_lbl"
         $lblPick.ForeColor = [System.Drawing.Color]::LightGray
         $lblPick.Font = New-Object System.Drawing.Font("Segoe UI", 8)
         $lblPick.Location = New-Object System.Drawing.Point($($thumbSize + 15), $($thumbSize + 33))
