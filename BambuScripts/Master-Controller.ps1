@@ -940,7 +940,10 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
             try {
                 $batPath = Join-Path $data.ScriptDir "RevertMerge.bat"
                 if (Test-Path $batPath) {
-                    $proc = Start-Process -FilePath $batPath -ArgumentList "`"$($itm.InputPath)`"" -PassThru -NoNewWindow
+                    $env:WORKER_MODE = "1"
+                    $proc = Start-Process -FilePath $batPath `
+                        -ArgumentList "`"$($itm.InputPath)`"" `
+                        -PassThru -NoNewWindow
                     while (-not $proc.HasExited) {
                         [System.Windows.Forms.Application]::DoEvents()
                         Start-Sleep -Milliseconds 100
@@ -999,7 +1002,10 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
             try {
                 $batPath = Join-Path $data.ScriptDir "RevertMerge.bat"
                 if (Test-Path $batPath) {
-                    $proc = Start-Process -FilePath $batPath -ArgumentList "`"$($itm.InputPath)`"" -PassThru -NoNewWindow
+                    $env:WORKER_MODE = "1"
+                    $proc = Start-Process -FilePath $batPath `
+                        -ArgumentList "`"$($itm.InputPath)`"" `
+                        -PassThru -NoNewWindow
                     while (-not $proc.HasExited) {
                         [System.Windows.Forms.Application]::DoEvents()
                         Start-Sleep -Milliseconds 100
