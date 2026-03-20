@@ -428,7 +428,12 @@ $btnStart.Add_Click({
 
                 $tempWork = $null
                 $extractFailed = $false
-                if ($doColors -or $doMerge) {
+                $colorsSafe = $true   # assume safe until post-check proves otherwise
+
+                # Always extract and scan colors when Merge is requested,
+                # OR when the user explicitly checked Scan Colors.
+                # Colors MUST all be library-matched before a merge is allowed.
+                if ($doColors -or $doMerge -or $doImage) {
                     $tempWork = Join-Path $env:TEMP ("merge_work_" + [System.IO.Path]::GetRandomFileName())
                     New-Item -ItemType Directory -Path $tempWork | Out-Null
                     Write-Log "  -> Extracting .3mf archive..." "DarkGray"
@@ -439,25 +444,79 @@ $btnStart.Add_Click({
                         Remove-Item -Path $tempWork -Recurse -Force -ErrorAction SilentlyContinue
                         $extractFailed = $true
                     }
-                    if (-not $extractFailed -and $doColors) {
-                        Write-Log "  -> Scanning Colors..." "Cyan"
+
+                    if (-not $extractFailed) {
+                        # -ForceEditAll only when user explicitly checked Scan Colors.
+                        # Otherwise the worker only prompts for genuinely unknown colors.
+                        $forceFlag = if ($doColors) { "-ForceEditAll" } else { "" }
+                        Write-Log "  -> Scanning Colors$(if ($doColors) { ' (all slots)' } else { ' (unknowns only)' })..." "Cyan"
                         try {
-                            $command = "& `"$scriptDir\update_colors_worker.ps1`" -WorkDir `"$tempWork`" -FileName `"$inputName`" -OriginalZip `"$inputPath`" *>&1"
+                            $command = "& `"$scriptDir\update_colors_worker.ps1`" -WorkDir `"$tempWork`" -FileName `"$inputName`" -OriginalZip `"$inputPath`" $forceFlag *>&1"
                             Invoke-Expression $command | ForEach-Object { Write-Log "     $_" "LightGray"; [System.Windows.Forms.Application]::DoEvents() }
                         } catch { Write-Log "  [!] Error: $_" "Red" }
+
+                        # Post-check: re-read the project_settings.config from the (now updated)
+                        # tempWork dir and verify every active hex is in our color library.
+                        if ($doMerge -or $doImage) {
+                            Write-Log "  -> Verifying all colors are library-matched..." "DarkGray"
+                            try {
+                                # Load library hex values
+                                $libHexes = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                                if (Test-Path (Join-Path $scriptDir "colorNamesCSV.csv")) {
+                                    Import-Csv -Path (Join-Path $scriptDir "colorNamesCSV.csv") -Header @("Name","R","G","B") |
+                                        Where-Object { $_.Name -notmatch '(?i)^name$' -and $_.Name -ne "N/A" -and $_.Name -ne "" } |
+                                        ForEach-Object {
+                                            try {
+                                                $hex = "#{0:X2}{1:X2}{2:X2}FF" -f [int]$_.R, [int]$_.G, [int]$_.B
+                                                $libHexes.Add($hex) | Out-Null
+                                            } catch {}
+                                        }
+                                }
+
+                                # Read active slots from updated project_settings.config
+                                $projPath = Join-Path $tempWork "Metadata\project_settings.config"
+                                $unmatchedHexes = @()
+                                if (Test-Path $projPath) {
+                                    $projContent = [System.IO.File]::ReadAllText($projPath)
+                                    if ($projContent -match '(?is)"filament_colou?r"\s*:\s*\[(.*?)\]') {
+                                        $hexMatches = [regex]::Matches($matches[1], '#[0-9a-fA-F]{6,8}')
+                                        foreach ($m in $hexMatches) {
+                                            $h = $m.Value.ToUpper()
+                                            if ($h.Length -eq 7) { $h = $h + "FF" }
+                                            if (-not $libHexes.Contains($h)) {
+                                                $unmatchedHexes += $m.Value
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if ($unmatchedHexes.Count -gt 0) {
+                                    $colorsSafe = $false
+                                    Write-Log "  [!] UNMATCHED COLORS - Merge blocked for $inputName" "Orange"
+                                    foreach ($uh in $unmatchedHexes) { Write-Log "      Unmatched: $uh" "Orange" }
+                                    Write-Log "      Add these to colorNamesCSV.csv and re-scan before merging." "Orange"
+                                } else {
+                                    Write-Log "  [+] All colors matched. Safe to merge." "LightGreen"
+                                }
+                            } catch {
+                                Write-Log "  [!] Color verification failed: $_. Blocking merge as a precaution." "Orange"
+                                $colorsSafe = $false
+                            }
+                        }
                     }
                 }
                 if ($script:cancelRun) { break }
 
                 if (-not $extractFailed) {
                     $globalQueue += [PSCustomObject]@{
-                        File      = $file
-                        BaseName  = $baseName
-                        InputName = $inputName
-                        InputPath = $inputPath
-                        FileDir   = $fileDir
-                        TempWork  = $tempWork
-                        TargetDir = $targetDir
+                        File        = $file
+                        BaseName    = $baseName
+                        InputName   = $inputName
+                        InputPath   = $inputPath
+                        FileDir     = $fileDir
+                        TempWork    = $tempWork
+                        TargetDir   = $targetDir
+                        ColorsSafe  = $colorsSafe
                     }
                 }
             } # end foreach file
@@ -473,13 +532,14 @@ $btnStart.Add_Click({
 
             foreach ($item in $globalQueue) {
                 if ($script:cancelRun) { Write-Log "`n>>> OPERATION ABORTED <<<" "Red"; break }
-                $file      = $item.File
-                $baseName  = $item.BaseName
-                $inputName = $item.InputName
-                $inputPath = $item.InputPath
-                $fileDir   = $item.FileDir
-                $tempWork  = $item.TempWork
-                $targetDir = $item.TargetDir
+                $file       = $item.File
+                $baseName   = $item.BaseName
+                $inputName  = $item.InputName
+                $inputPath  = $item.InputPath
+                $fileDir    = $item.FileDir
+                $tempWork   = $item.TempWork
+                $targetDir  = $item.TargetDir
+                $colorsSafe = if ($null -ne $item.ColorsSafe) { $item.ColorsSafe } else { $true }
                 Write-Log "`n=== Processing: $inputName ===" "White"
 
                 $basePrefix = $baseName.Substring(0, $baseName.Length - 4)
@@ -487,6 +547,10 @@ $btnStart.Add_Click({
                 $finalBase  = $basePrefix + "Final"
 
                 if ($doMerge) {
+                    if (-not $colorsSafe) {
+                        Write-Log "  [BLOCKED] Merge skipped - unmatched colors detected in Phase 1." "Red"
+                        Write-Log "            Fix colorNamesCSV.csv and re-run Scan Colors before merging." "Orange"
+                    } else {
                     Write-Log "  -> Merging Geometries..." "Cyan"
                     try {
                         $tempOutPath = Join-Path $fileDir "$baseName`_merged_temp.3mf"
@@ -508,7 +572,8 @@ $btnStart.Add_Click({
                         Invoke-Expression $isoCmd | ForEach-Object { Write-Log "     $_" "LightGray"; [System.Windows.Forms.Application]::DoEvents() }
                         Remove-Item -Path $tempSingle -Recurse -Force -ErrorAction SilentlyContinue
                     } catch { Write-Log "  [!] Error: $_" "Red" }
-                }
+                    } # end else (colorsSafe)
+                } # end if ($doMerge)
                 if ($tempWork) { Remove-Item -Path $tempWork -Recurse -Force -ErrorAction SilentlyContinue }
                 if ($script:cancelRun) { break }
 
@@ -551,12 +616,20 @@ $btnStart.Add_Click({
                         Write-Log "  [!] Missing .gcode.3mf files. Falling back to TSV-only mode." "Yellow"
                         $safeToExtract = $false
                     }
+
+                    # Block image generation if any colors are unmatched
+                    $imageAllowed = $doImage
+                    if ($doImage -and -not $colorsSafe) {
+                        $imageAllowed = $false
+                        Write-Log "  [!] Image generation blocked - unmatched colors detected. Fix colorNamesCSV.csv and re-run." "Orange"
+                    }
+
                     $extractArgs = @(
                         "-InputFile",         "`"$slicedFile`"",
                         "-IndividualTsvPath", "`"$(Join-Path $fileDir "$baseName`_Data.tsv")`""
                     )
                     if (Test-Path $singleFile) { $extractArgs += "-SingleFile",   "`"$singleFile`"" }
-                    if ($doImage)              { $extractArgs += "-GenerateImage" }
+                    if ($imageAllowed)         { $extractArgs += "-GenerateImage" }
                     if (-not $safeToExtract)   { $extractArgs += "-SkipExtraction" }
 
                     $previewBaseName    = $baseName -replace '(?i)[ ._-]Full$', ''
