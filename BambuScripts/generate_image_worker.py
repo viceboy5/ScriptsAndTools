@@ -219,14 +219,23 @@ def main():
     x_name = CANVAS_SIZE - MARGIN - bbox_title[2]
     y_name = MARGIN - bbox_title[1]
 
-    RARE_GRADIENT = ["#FFE066", "#FFB700", "#FF8C00", "#FFB700", "#FFE066"]
+    RARE_GRADIENT       = ["#FFE066", "#FFB700", "#FF8C00", "#FFB700", "#FFE066"]
+    EPIC_GRADIENT       = ["#D9A0FF", "#A020F0", "#6A0DAD", "#A020F0", "#D9A0FF"]
+    LEGENDARY_GRADIENT  = ["#FFD700", "#FF8C00", "#FF4500", "#FFFFFF", "#FF4500", "#FF8C00", "#FFD700"]
+
+    SPECIAL_WORDS = {
+        "RARE":        RARE_GRADIENT,
+        "EPIC":        EPIC_GRADIENT,
+        "LEGENDARY":   LEGENDARY_GRADIENT,
+    }
+
     cursor_x = x_name
     for word in clean_name.split(" "):
         word_bbox = ui_draw.textbbox((0, 0), word, font=font_title)
         word_w = word_bbox[2] - word_bbox[0]
         space_w = ui_draw.textbbox((0, 0), " ", font=font_title)[2]
-        if word == "RARE":
-            draw_gradient_text(ui_layer, (cursor_x, y_name), word, font_title, RARE_GRADIENT)
+        if word in SPECIAL_WORDS:
+            draw_gradient_text(ui_layer, (cursor_x, y_name), word, font_title, SPECIAL_WORDS[word])
         else:
             draw_text_with_outline(ui_draw, (cursor_x, y_name), word, font_title, (255, 255, 255))
         cursor_x += word_w + space_w
