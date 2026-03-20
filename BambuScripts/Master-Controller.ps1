@@ -456,50 +456,84 @@ $btnStart.Add_Click({
                         } catch { Write-Log "  [!] Error: $_" "Red" }
 
                         # Post-check: re-read the project_settings.config from the (now updated)
-                        # tempWork dir and verify every active hex is in our color library.
+                        # tempWork dir and verify every ACTIVE (used) hex is in our color library.
+                        # Mirrors the worker's own slot-activity logic so inactive slots are ignored.
                         if ($doMerge -or $doImage) {
-                            Write-Log "  -> Verifying all colors are library-matched..." "DarkGray"
+                            Write-Log "  -> Verifying all active colors are library-matched..." "DarkGray"
                             try {
-                                # Load library hex values
+                                # Load library hex values - parse manually so extra gradient columns
+                                # don't get concatenated onto the B column by Import-Csv
                                 $libHexes = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-                                if (Test-Path (Join-Path $scriptDir "colorNamesCSV.csv")) {
-                                    Import-Csv -Path (Join-Path $scriptDir "colorNamesCSV.csv") -Header @("Name","R","G","B") |
-                                        Where-Object { $_.Name -notmatch '(?i)^name$' -and $_.Name -ne "N/A" -and $_.Name -ne "" } |
-                                        ForEach-Object {
-                                            try {
-                                                $hex = "#{0:X2}{1:X2}{2:X2}FF" -f [int]$_.R, [int]$_.G, [int]$_.B
-                                                $libHexes.Add($hex) | Out-Null
-                                            } catch {}
-                                        }
+                                $csvPath  = Join-Path $scriptDir "colorNamesCSV.csv"
+                                if (Test-Path $csvPath) {
+                                    foreach ($line in (Get-Content $csvPath)) {
+                                        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                                        $cols = $line -split ','
+                                        if ($cols.Count -lt 4) { continue }
+                                        $name = $cols[0].Replace('"','').Trim()
+                                        if ($name -match '(?i)^name$' -or $name -eq 'N/A' -or $name -eq '') { continue }
+                                        try {
+                                            $hex = "#{0:X2}{1:X2}{2:X2}FF" -f ([int]$cols[1].Replace('"','').Trim()), ([int]$cols[2].Replace('"','').Trim()), ([int]$cols[3].Replace('"','').Trim())
+                                            $libHexes.Add($hex) | Out-Null
+                                        } catch { continue }
+                                    }
                                 }
 
-                                # Read active slots from updated project_settings.config
-                                $projPath = Join-Path $tempWork "Metadata\project_settings.config"
-                                $unmatchedHexes = @()
+                                # Build SlotMap: hex -> slot index (from project_settings.config)
+                                $projPath    = Join-Path $tempWork "Metadata\project_settings.config"
+                                $slotMap     = @{}   # hex -> slotIndex (1-based)
+                                $projContent = ""
                                 if (Test-Path $projPath) {
                                     $projContent = [System.IO.File]::ReadAllText($projPath)
                                     if ($projContent -match '(?is)"filament_colou?r"\s*:\s*\[(.*?)\]') {
                                         $hexMatches = [regex]::Matches($matches[1], '#[0-9a-fA-F]{6,8}')
+                                        $si = 1
                                         foreach ($m in $hexMatches) {
-                                            $h = $m.Value.ToUpper()
-                                            if ($h.Length -eq 7) { $h = $h + "FF" }
-                                            if (-not $libHexes.Contains($h)) {
-                                                $unmatchedHexes += $m.Value
-                                            }
+                                            $hk = $m.Value.ToUpper()
+                                            if (-not $slotMap.ContainsKey($hk)) { $slotMap[$hk] = $si }
+                                            $si++
                                         }
                                     }
                                 }
 
+                                # Build UsedSlots from model_settings.config and 3dmodel.model
+                                $usedSlots = [System.Collections.Generic.HashSet[string]]::new()
+                                $usedSlots.Add("1") | Out-Null   # slot 1 always used (base material)
+
+                                $modSetPath = Join-Path $tempWork "Metadata\model_settings.config"
+                                if (Test-Path $modSetPath) {
+                                    $modContent = [System.IO.File]::ReadAllText($modSetPath)
+                                    [regex]::Matches($modContent, '(?i)extruder[^>]*?"(\d+)"') |
+                                        ForEach-Object { $usedSlots.Add($_.Groups[1].Value) | Out-Null }
+                                }
+
+                                $modelFile = (Get-ChildItem -Path $tempWork -Filter '3dmodel.model' -Recurse | Select-Object -First 1)
+                                if ($modelFile) {
+                                    $modelContent = [System.IO.File]::ReadAllText($modelFile.FullName)
+                                    [regex]::Matches($modelContent, '(?i)materialid="(\d+)"') |
+                                        ForEach-Object { $usedSlots.Add($_.Groups[1].Value) | Out-Null }
+                                }
+
+                                # Only check hexes whose slot index is actually used
+                                $unmatchedHexes = @()
+                                foreach ($hk in $slotMap.Keys) {
+                                    $slotIdx = $slotMap[$hk].ToString()
+                                    if (-not $usedSlots.Contains($slotIdx)) { continue }
+                                    $h = $hk
+                                    if ($h.Length -eq 7) { $h = $h + "FF" }
+                                    if (-not $libHexes.Contains($h)) { $unmatchedHexes += $hk }
+                                }
+
                                 if ($unmatchedHexes.Count -gt 0) {
                                     $colorsSafe = $false
-                                    Write-Log "  [!] UNMATCHED COLORS - Merge blocked for $inputName" "Orange"
-                                    foreach ($uh in $unmatchedHexes) { Write-Log "      Unmatched: $uh" "Orange" }
+                                    Write-Log "  [!] UNMATCHED ACTIVE COLORS - Merge/Image blocked for $inputName" "Orange"
+                                    foreach ($uh in $unmatchedHexes) { Write-Log "      Unmatched: $uh  (slot $($slotMap[$uh]))" "Orange" }
                                     Write-Log "      Add these to colorNamesCSV.csv and re-scan before merging." "Orange"
                                 } else {
-                                    Write-Log "  [+] All colors matched. Safe to merge." "LightGreen"
+                                    Write-Log "  [+] All active colors matched. Safe to proceed." "LightGreen"
                                 }
                             } catch {
-                                Write-Log "  [!] Color verification failed: $_. Blocking merge as a precaution." "Orange"
+                                Write-Log "  [!] Color verification failed: $_. Blocking as a precaution." "Orange"
                                 $colorsSafe = $false
                             }
                         }
