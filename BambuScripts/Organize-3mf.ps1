@@ -666,7 +666,10 @@ function script:DoRename {
 
     # Grandparent folders
     foreach ($gk in $script:gpRows.Keys) {
-        $newName = script:NoSpaces $script:gpRows[$gk].NewBox.Text.Trim()
+        $gpRow = $script:gpRows[$gk]
+        # Skip if user checked "Don't rename this folder"
+        if ($gpRow.SkipChk -and $gpRow.SkipChk.Checked) { continue }
+        $newName = script:NoSpaces $gpRow.NewBox.Text.Trim()
         if ($newName -eq '' -or $gk -eq '__ROOT__' -or -not [System.IO.Directory]::Exists($gk)) { continue }
         $parent  = [System.IO.Path]::GetDirectoryName($gk)
         $newPath = [System.IO.Path]::Combine($parent, $newName)
@@ -717,7 +720,7 @@ function script:DoRename {
 # --- Build scrollable panel --------------------------------------------------
 function script:RebuildPanel {
     # Save user-typed values (keyed per parent folder, suffix keyed per file path)
-    $savedChar   = @{}; $savedAdj = @{}; $savedGpNew = @{}; $savedSuffix = @{}
+    $savedChar   = @{}; $savedAdj = @{}; $savedGpNew = @{}; $savedSuffix = @{}; $savedSkipGp = @{}
     foreach ($ppKey in $script:parentRows.Keys) {
         $r = $script:parentRows[$ppKey]
         $savedChar[$ppKey] = $r.Char.Text
@@ -726,7 +729,10 @@ function script:RebuildPanel {
             if ($fp.SuffixBox) { $savedSuffix[$fp.Path] = $fp.SuffixBox.Text }
         }
     }
-    foreach ($gk in $script:gpRows.Keys) { $savedGpNew[$gk] = $script:gpRows[$gk].NewBox.Text }
+    foreach ($gk in $script:gpRows.Keys) {
+        $savedGpNew[$gk]  = $script:gpRows[$gk].NewBox.Text
+        if ($script:gpRows[$gk].SkipChk) { $savedSkipGp[$gk] = $script:gpRows[$gk].SkipChk.Checked }
+    }
 
     $script:gpRows     = @{}
     $script:parentRows = @{}
@@ -758,16 +764,17 @@ function script:RebuildPanel {
 
         $gpRow = @{
             NewBox      = $null
+            SkipChk     = $null
             ThemeLabels = [System.Collections.Generic.List[System.Windows.Forms.Label]]::new()
             ParentKeys  = [System.Collections.Generic.List[string]]::new()
             OldName     = $gd.Name
         }
         $script:gpRows[$gpKey] = $gpRow
 
-        # -- Grandparent header (56px) ----------------------------------------
+        # -- Grandparent header (74px) ----------------------------------------
         $gpPanel           = New-Object System.Windows.Forms.Panel
         $gpPanel.BackColor = $cBG3
-        $gpPanel.Size      = New-Object System.Drawing.Size($innerW, 56)
+        $gpPanel.Size      = New-Object System.Drawing.Size($innerW, 74)
         $gpPanel.Location  = New-Object System.Drawing.Point(4, $y)
 
         $gpNameLbl           = New-Object System.Windows.Forms.Label
@@ -813,6 +820,20 @@ function script:RebuildPanel {
         $gpPanel.Controls.Add($gpNewBox)
         $gpRow.NewBox = $gpNewBox
 
+        # "Don't rename this folder" checkbox (row 3)
+        $gpSkipChk                  = New-Object System.Windows.Forms.CheckBox
+        $gpSkipChk.Text             = "Don't rename this folder  (use Theme name for files/subfolders only)"
+        $gpSkipChk.Font             = New-Object System.Drawing.Font('Segoe UI', 8)
+        $gpSkipChk.ForeColor        = $cMuted
+        $gpSkipChk.AutoSize         = $true
+        $gpSkipChk.Location         = New-Object System.Drawing.Point(10, 54)
+        $gpSkipChk.FlatStyle        = 'Flat'
+        $gpSkipChk.BackColor        = $cBG3
+        # Restore saved state
+        if ($savedSkipGp.ContainsKey($gpKey)) { $gpSkipChk.Checked = $savedSkipGp[$gpKey] }
+        $gpPanel.Controls.Add($gpSkipChk)
+        $gpRow.SkipChk = $gpSkipChk
+
         $script:resizeList.Add(@{ Type="gp"; Panel=$gpPanel; NewBox=$gpNewBox })
 
         $gpNewBox.Add_TextChanged({
@@ -823,7 +844,7 @@ function script:RebuildPanel {
         })
 
         $scroll.Controls.Add($gpPanel)
-        $y += 60
+        $y += 78
 
         foreach ($ppKey in $gd.Parents.Keys) {
             $pd = $gd.Parents[$ppKey]
