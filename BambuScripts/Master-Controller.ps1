@@ -132,14 +132,14 @@ $chkImage.Location = New-Object System.Drawing.Point(390, 155)
 $chkImage.AutoSize = $true
 $form.Controls.Add($chkImage)
 
-# Smart Dependency
-# Smart Dependency
+# Smart Dependencies:
+#   Slice     -> Extract (slicing produces the gcode files Extract needs)
+#   Extract   -> (always reslices Final internally; no separate checkbox needed)
+#   Image     -> Extract (image card requires a fully populated TSV)
 $updateDependencies = {
-    # Image Generation uses the Extractor script, but shouldn't force a TSV overwrite!
-    if ($chkSlice.Checked) { $chkExtract.Checked = $true }
+    if ($chkSlice.Checked)   { $chkExtract.Checked = $true }
+    if ($chkImage.Checked)   { $chkExtract.Checked = $true }
 }
-$chkSlice.Add_CheckedChanged($updateDependencies)
-# (We completely removed the $chkImage dependency here)
 $chkSlice.Add_CheckedChanged($updateDependencies)
 $chkImage.Add_CheckedChanged($updateDependencies)
 
@@ -520,6 +520,27 @@ $btnStart.Add_Click({
                         Invoke-Expression $command | ForEach-Object { Write-Log "     $_" "LightGray"; [System.Windows.Forms.Application]::DoEvents() }
                     } catch { Write-Log "  [!] Error: $_" "Red" }
                 }
+
+                # Always re-slice Final when extracting (required for skip-time math),
+                # unless a full slice already produced it above.
+                if (($doExtract -or $doImage) -and -not $doSlice) {
+                    $isolatedPath    = Join-Path $fileDir "$finalBase.3mf"
+                    $singleFileCheck = Join-Path $fileDir "$finalBase.gcode.3mf"
+                    if (Test-Path $isolatedPath) {
+                        Write-Log "  -> Re-slicing Final for skip-time data..." "Yellow"
+                        try {
+                            $command = "& `"$scriptDir\slicer_automation_worker.ps1`" -InputPath `"$isolatedPath`" *>&1"
+                            Invoke-Expression $command | ForEach-Object { Write-Log "     $_" "LightGray"; [System.Windows.Forms.Application]::DoEvents() }
+                            if (Test-Path $singleFileCheck) {
+                                Write-Log "  -> Final.gcode.3mf ready for skip-time extraction." "Yellow"
+                            } else {
+                                Write-Log "  [!] Re-slice did not produce Final.gcode.3mf. Skip time unavailable." "Yellow"
+                            }
+                        } catch { Write-Log "  [!] Re-slice error: $_" "Red" }
+                    } else {
+                        Write-Log "  [!] Final.3mf not found - skip time will not be calculated." "Yellow"
+                    }
+                }
                 if ($script:cancelRun) { break }
 
                 if ($doExtract -or $doImage) {
@@ -553,6 +574,9 @@ $btnStart.Add_Click({
                         if ($safeToExtract -and (Test-Path $singleFile)) {
                             Remove-Item $singleFile -Force -ErrorAction SilentlyContinue
                             Write-Log "  [+] Cleaned up temporary $finalBase.gcode.3mf" "DarkGray"
+                        } elseif (-not $doSlice -and (Test-Path $singleFile)) {
+                            Remove-Item $singleFile -Force -ErrorAction SilentlyContinue
+                            Write-Log "  [+] Cleaned up re-sliced $finalBase.gcode.3mf" "DarkGray"
                         }
                     } catch { Write-Log "  [!] Error: $_" "Red" }
                 }
