@@ -10,7 +10,7 @@ CANVAS_SIZE = 512
 
 # Layout Ratios
 MARGIN_RATIO = 0.01
-COLOR_BOX_SIZE_RATIO = 0.12
+COLOR_BOX_SIZE_RATIO = 0.155
 FONT_TITLE_RATIO = 0.09
 FONT_NUM_RATIO = 0.06
 FONT_TEXT_RATIO = 0.043
@@ -293,9 +293,9 @@ def main():
     active_colors = [c.split('|') for c in args.colors if len(c.split('|')) == 3 and float(c.split('|')[2]) > 0]
 
     if active_colors:
-        start_y = lowest_title_y + int(CANVAS_SIZE * 0.05)
-        available_height = highest_time_y - start_y - int(CANVAS_SIZE * 0.05)
-        row_spacing = min(COLOR_BOX_SIZE + int(CANVAS_SIZE * 0.04), available_height // len(active_colors))
+        start_y = lowest_title_y + int(CANVAS_SIZE * 0.03)
+        available_height = highest_time_y - start_y - int(CANVAS_SIZE * 0.02)
+        row_spacing = min(COLOR_BOX_SIZE + int(CANVAS_SIZE * 0.02), available_height // len(active_colors))
 
         for idx, (cname, chex, cmass) in enumerate(active_colors):
             y = start_y + (idx * row_spacing)
