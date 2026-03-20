@@ -321,14 +321,16 @@ function script:ScanPath([string]$rawPath) {
 # File:   Character[_Adj]_Theme_Suffix + Extension
 # Parent: Theme_Character[_Adj]
 
-function script:ComputeFileNew([string]$ppKey, [string]$suffix, [string]$ext) {
+function script:ComputeFileNew([string]$ppKey, $fp) {
     $pRow  = $script:parentRows[$ppKey]; if (-not $pRow) { return '' }
     $gpRow = $script:gpRows[$pRow.GpKey]
-    $theme = if ($gpRow) { script:NoSpaces $gpRow.NewBox.Text.Trim() } else { '' }
-    $char  = script:NoSpaces $pRow.Char.Text.Trim()
-    $adj   = script:NoSpaces $pRow.Adj.Text.Trim()
+    $theme  = if ($gpRow) { script:NoSpaces $gpRow.NewBox.Text.Trim() } else { '' }
+    $char   = script:NoSpaces $pRow.Char.Text.Trim()
+    $adj    = script:NoSpaces $pRow.Adj.Text.Trim()
     if ($char -eq '') { return '' }
-    $parts = @($char)
+    $suffix = if ($fp.SuffixBox) { script:NoSpaces $fp.SuffixBox.Text.Trim() } else { $fp.Suffix }
+    $ext    = $fp.Extension
+    $parts  = @($char)
     if ($adj    -ne '') { $parts += $adj    }
     if ($theme  -ne '') { $parts += $theme  }
     if ($suffix -ne '') { $parts += $suffix }
@@ -342,9 +344,9 @@ function script:ComputeParentNew([string]$ppKey) {
     $char  = script:NoSpaces $pRow.Char.Text.Trim()
     $adj   = script:NoSpaces $pRow.Adj.Text.Trim()
     $parts = [System.Collections.Generic.List[string]]::new()
-    if ($theme -ne '') { $parts.Add($theme) }
     if ($char  -ne '') { $parts.Add($char)  }
     if ($adj   -ne '') { $parts.Add($adj)   }
+    if ($theme -ne '') { $parts.Add($theme) }
     if ($parts.Count -eq 0) { return '' }
     return $parts -join '_'
 }
@@ -360,7 +362,7 @@ function script:UpdateFromGp([string]$gpKey) {
             $v = script:ComputeParentNew $ppKey
             $pRow.NewLabel.Text = if ($v) { "NEW:  $v" } else { 'NEW:  (enter fields to preview)' }
             foreach ($fp in $pRow.FilePreviews) {
-                $fv = script:ComputeFileNew $ppKey $fp.Suffix $fp.Extension
+                $fv = script:ComputeFileNew $ppKey $fp
                 $fp.NewLabel.Text = if ($fv) { $fv } else { '(enter Character)' }
             }
         }
@@ -373,7 +375,7 @@ function script:UpdateFromParent([string]$ppKey) {
     $v = script:ComputeParentNew $ppKey
     $pRow.NewLabel.Text = if ($v) { "NEW:  $v" } else { 'NEW:  (enter fields to preview)' }
     foreach ($fp in $pRow.FilePreviews) {
-        $fv = script:ComputeFileNew $ppKey $fp.Suffix $fp.Extension
+        $fv = script:ComputeFileNew $ppKey $fp
         $fp.NewLabel.Text = if ($fv) { $fv } else { '(enter Character)' }
     }
     script:UpdateRenameButton
@@ -587,7 +589,7 @@ function script:DoRename {
     foreach ($ppKey in $script:parentRows.Keys) {
         $pRow = $script:parentRows[$ppKey]
         foreach ($fp in $pRow.FilePreviews) {
-            $newName = script:ComputeFileNew $ppKey $fp.Suffix $fp.Extension
+            $newName = script:ComputeFileNew $ppKey $fp
             if ($newName -eq '' -or -not [System.IO.File]::Exists($fp.Path)) { continue }
             $dir     = [System.IO.Path]::GetDirectoryName($fp.Path)
             $newPath = [System.IO.Path]::Combine($dir, $newName)
@@ -714,12 +716,15 @@ function script:DoRename {
 
 # --- Build scrollable panel --------------------------------------------------
 function script:RebuildPanel {
-    # Save user-typed values (keyed per parent folder)
-    $savedChar  = @{}; $savedAdj = @{}; $savedGpNew = @{}
+    # Save user-typed values (keyed per parent folder, suffix keyed per file path)
+    $savedChar   = @{}; $savedAdj = @{}; $savedGpNew = @{}; $savedSuffix = @{}
     foreach ($ppKey in $script:parentRows.Keys) {
         $r = $script:parentRows[$ppKey]
         $savedChar[$ppKey] = $r.Char.Text
         $savedAdj[$ppKey]  = $r.Adj.Text
+        foreach ($fp in $r.FilePreviews) {
+            if ($fp.SuffixBox) { $savedSuffix[$fp.Path] = $fp.SuffixBox.Text }
+        }
     }
     foreach ($gk in $script:gpRows.Keys) { $savedGpNew[$gk] = $script:gpRows[$gk].NewBox.Text }
 
@@ -831,7 +836,7 @@ function script:RebuildPanel {
 
             $fileCount = $pd.Files.Count
             # Heights: name=22, old/new folder=20, col labels=16, inputs=28, divider=5, files=(38 each), padding=6
-            $pBlockH = 97 + ($fileCount * 38)
+            $pBlockH = 97 + ($fileCount * 54)
 
             # -- Parent block -------------------------------------------------
             $pPanel           = New-Object System.Windows.Forms.Panel
@@ -945,30 +950,42 @@ function script:RebuildPanel {
 
                 $fRow = New-Object System.Windows.Forms.Panel
                 $fRow.BackColor = $rowBg
-                $fRow.Size = New-Object System.Drawing.Size(($innerW - 8), 36)
+                $fRow.Size = New-Object System.Drawing.Size(($innerW - 8), 52)
                 $fRow.Location = New-Object System.Drawing.Point(4, $fy)
                 $pPanel.Controls.Add($fRow)
 
                 $halfW = [int](($innerW - 8 - 60) / 2)
 
-                # Suffix badge
+                # Suffix badge (read-only display, top)
                 $suffixBadge = New-Object System.Windows.Forms.Label
-                $suffixBadge.Text = $fi.Suffix
+                $suffixBadge.Text = if ($fi.Suffix -ne '') { $fi.Suffix } else { '(none)' }
                 $suffixBadge.Font = New-Object System.Drawing.Font('Consolas', 7, [System.Drawing.FontStyle]::Bold)
                 $suffixBadge.ForeColor = $cAmber
                 $suffixBadge.BackColor = clr "#1A1600"
                 $suffixBadge.AutoSize = $false; $suffixBadge.Size = New-Object System.Drawing.Size(52, 16)
-                $suffixBadge.Location = New-Object System.Drawing.Point(4, 10)
+                $suffixBadge.Location = New-Object System.Drawing.Point(4, 4)
                 $suffixBadge.TextAlign = 'MiddleCenter'
                 $suffixBadge.BorderStyle = 'FixedSingle'
                 $fRow.Controls.Add($suffixBadge)
+
+                # Editable suffix box (below badge)
+                $suffixBox = New-Object System.Windows.Forms.TextBox
+                $suffixBox.Font = New-Object System.Drawing.Font('Consolas', 7)
+                $suffixBox.BackColor = $cInput; $suffixBox.ForeColor = $cAmber
+                $suffixBox.BorderStyle = 'FixedSingle'
+                $suffixBox.Size = New-Object System.Drawing.Size(52, 18)
+                $suffixBox.Location = New-Object System.Drawing.Point(4, 24)
+                $suffixBox.TextAlign = 'Center'
+                $suffixBox.Text = if ($savedSuffix.ContainsKey($fi.Path)) { $savedSuffix[$fi.Path] } else { $fi.Suffix }
+                $suffixBox.Tag = $ppKey
+                $fRow.Controls.Add($suffixBox)
 
                 # OLD name
                 $fOldLbl = New-Object System.Windows.Forms.Label
                 $fOldLbl.Text = $fi.Name
                 $fOldLbl.Font = New-Object System.Drawing.Font('Consolas', 8)
                 $fOldLbl.ForeColor = $cOldText; $fOldLbl.AutoSize = $false
-                $fOldLbl.Size = New-Object System.Drawing.Size($halfW, 36)
+                $fOldLbl.Size = New-Object System.Drawing.Size($halfW, 52)
                 $fOldLbl.Location = New-Object System.Drawing.Point(60, 0)
                 $fOldLbl.TextAlign = 'MiddleLeft'
                 $fRow.Controls.Add($fOldLbl)
@@ -978,7 +995,7 @@ function script:RebuildPanel {
                 $fArrow.Text = '->'
                 $fArrow.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9)
                 $fArrow.ForeColor = $cMuted; $fArrow.AutoSize = $true
-                $fArrow.Location = New-Object System.Drawing.Point(($halfW + 62), 10)
+                $fArrow.Location = New-Object System.Drawing.Point(($halfW + 62), 19)
                 $fRow.Controls.Add($fArrow)
 
                 # NEW name
@@ -986,7 +1003,7 @@ function script:RebuildPanel {
                 $fNewLbl.Text = '(enter Character)'
                 $fNewLbl.Font = New-Object System.Drawing.Font('Consolas', 8)
                 $fNewLbl.ForeColor = $cNewText; $fNewLbl.AutoSize = $false
-                $fNewLbl.Size = New-Object System.Drawing.Size($halfW, 36)
+                $fNewLbl.Size = New-Object System.Drawing.Size($halfW, 52)
                 $fNewLbl.Location = New-Object System.Drawing.Point(($halfW + 82), 0)
                 $fNewLbl.TextAlign = 'MiddleLeft'
                 $fRow.Controls.Add($fNewLbl)
@@ -994,6 +1011,7 @@ function script:RebuildPanel {
                 $filePreviews.Add([PSCustomObject]@{
                     Path      = $fi.Path
                     Suffix    = $fi.Suffix
+                    SuffixBox = $suffixBox
                     Extension = $fi.Extension
                     NewLabel  = $fNewLbl
                     OldLabel  = $fOldLbl
@@ -1001,7 +1019,15 @@ function script:RebuildPanel {
                     RowPanel  = $fRow
                 })
 
-                $fy += 38
+                # Strip non-alphanumeric from suffix edit and propagate
+                $suffixBox.Add_TextChanged({
+                    param($s, $e)
+                    $cur = $s.SelectionStart; $old = $s.Text; $n = $old -replace '[^a-zA-Z0-9]', ''
+                    if ($old -ne $n) { $s.Text=$n; $s.SelectionStart=[Math]::Max(0,$cur-($old.Length-$n.Length)); $s.SelectionLength=0 }
+                    script:UpdateFromParent $s.Tag
+                })
+
+                $fy += 54
             }
 
             # Register parent row
