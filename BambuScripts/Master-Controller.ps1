@@ -591,6 +591,30 @@ $btnStart.Add_Click({
                 if (($doExtract -or $doImage) -and -not $doSlice) {
                     $isolatedPath    = Join-Path $fileDir "$finalBase.3mf"
                     $singleFileCheck = Join-Path $fileDir "$finalBase.gcode.3mf"
+
+                    # If Final.3mf is missing, try to create it from Nest.3mf
+                    if (-not (Test-Path $isolatedPath)) {
+                        $nestPath = Join-Path $fileDir "$nestBase.3mf"
+                        if (Test-Path $nestPath) {
+                            Write-Log "  -> Final.3mf missing - isolating from Nest.3mf..." "Yellow"
+                            try {
+                                $tempSingle = Join-Path $env:TEMP ("single_work_" + [System.IO.Path]::GetRandomFileName())
+                                New-Item -ItemType Directory -Path $tempSingle | Out-Null
+                                [System.IO.Compression.ZipFile]::ExtractToDirectory($nestPath, $tempSingle)
+                                $isoCmd = "& `"$scriptDir\isolate_final_worker.ps1`" -WorkDir `"$tempSingle`" -OutputPath `"$isolatedPath`" *>&1"
+                                Invoke-Expression $isoCmd | ForEach-Object { Write-Log "     $_" "LightGray"; [System.Windows.Forms.Application]::DoEvents() }
+                                Remove-Item -Path $tempSingle -Recurse -Force -ErrorAction SilentlyContinue
+                                if (Test-Path $isolatedPath) {
+                                    Write-Log "  -> Final.3mf created successfully." "Yellow"
+                                } else {
+                                    Write-Log "  [!] Isolate step did not produce Final.3mf. Skip time unavailable." "Yellow"
+                                }
+                            } catch { Write-Log "  [!] Error isolating Final.3mf: $_" "Red" }
+                        } else {
+                            Write-Log "  [!] Neither Final.3mf nor Nest.3mf found - skip time unavailable. Run Merge first." "Yellow"
+                        }
+                    }
+
                     if (Test-Path $isolatedPath) {
                         Write-Log "  -> Re-slicing Final for skip-time data..." "Yellow"
                         try {
@@ -602,8 +626,6 @@ $btnStart.Add_Click({
                                 Write-Log "  [!] Re-slice did not produce Final.gcode.3mf. Skip time unavailable." "Yellow"
                             }
                         } catch { Write-Log "  [!] Re-slice error: $_" "Red" }
-                    } else {
-                        Write-Log "  [!] Final.3mf not found - skip time will not be calculated." "Yellow"
                     }
                 }
                 if ($script:cancelRun) { break }
@@ -612,8 +634,9 @@ $btnStart.Add_Click({
                     $slicedFile = Join-Path $fileDir "$baseName.gcode.3mf"
                     $singleFile = Join-Path $fileDir "$finalBase.gcode.3mf"
                     $safeToExtract = $doExtract
-                    if ($safeToExtract -and (-not (Test-Path $slicedFile) -or -not (Test-Path $singleFile))) {
-                        Write-Log "  [!] Missing .gcode.3mf files. Falling back to TSV-only mode." "Yellow"
+                    # Check AFTER the re-slice block above may have created $singleFile
+                    if ($safeToExtract -and -not (Test-Path $slicedFile)) {
+                        Write-Log "  [!] Missing Full.gcode.3mf. Falling back to TSV-only mode." "Yellow"
                         $safeToExtract = $false
                     }
 
