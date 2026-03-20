@@ -186,11 +186,33 @@ def main():
 
     # --- 1. CLEAN NAME LOGIC ---
     original_name = args.name
-    # Added a space before ._-
-    clean_name = re.sub(r'(?i)[ ._-]Full$', '', original_name).replace('.', ' ').replace('_', ' ').strip().upper()
 
-    # Added a space before ._-
-    base_filename = re.sub(r'(?i)[ ._-]Full(\.gcode(\.3mf)?)?$', '', original_name)
+    # Strip _Full suffix (may already be stripped by caller, but safe to repeat)
+    name_stripped = re.sub(r'(?i)[ ._-]Full$', '', original_name)
+
+    # Parse naming structure: Character[_Adj]_Theme
+    #   enforced naming means no underscores inside Character or Adj (CamelCase only)
+    #   so: 3 parts = Character, Adj, Theme | 2 parts = Character, Theme | 1 part = Character
+    parts = name_stripped.split('_')
+    if len(parts) >= 3:
+        character_raw = parts[0]
+        adj_raw       = '_'.join(parts[1:-1])   # handles edge case of extra underscores
+        theme_raw     = parts[-1]
+    elif len(parts) == 2:
+        character_raw = parts[0]
+        adj_raw       = ''
+        theme_raw     = parts[1]
+    else:
+        character_raw = parts[0]
+        adj_raw       = ''
+        theme_raw     = ''
+
+    # CamelCase → space-separated for Character  (e.g. DragonHatchling → Dragon Hatchling)
+    char_display = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', character_raw).upper()
+    adj_display  = adj_raw.upper()
+
+    # Build the base filename (used for output path) - keep original stripped name
+    base_filename  = name_stripped
     output_filename = f"{base_filename}_slicePreview.png"
 
     # RESTORED: This is the line that was missing!
@@ -204,18 +226,21 @@ def main():
     # --- 3. DRAW ALL UI ELEMENTS TO THE TRANSPARENT LAYER ---
 
     # A. TITLE TEXT
+    # Build the display string for sizing: "CHAR PART (ADJ)" or just "CHAR PART"
+    display_for_sizing = char_display + (f" ({adj_display})" if adj_display else "")
+
     current_font_size = int(CANVAS_SIZE * FONT_TITLE_RATIO)
     font_title = load_font(current_font_size)
     max_title_width = CANVAS_SIZE - (MARGIN * 2)
 
-    while ui_draw.textbbox((0, 0), clean_name, font=font_title)[2] > max_title_width and current_font_size > int(
+    while ui_draw.textbbox((0, 0), display_for_sizing, font=font_title)[2] > max_title_width and current_font_size > int(
             CANVAS_SIZE * 0.03):
         current_font_size -= 2
         font_title = load_font(current_font_size)
 
-    bbox_title = ui_draw.textbbox((0, 0), clean_name, font=font_title)
+    bbox_title = ui_draw.textbbox((0, 0), display_for_sizing, font=font_title)
 
-    # Strip invisible padding to lock strictly to Top-Right margin
+    # Lock to top-right margin
     x_name = CANVAS_SIZE - MARGIN - bbox_title[2]
     y_name = MARGIN - bbox_title[1]
 
@@ -224,21 +249,28 @@ def main():
     LEGENDARY_GRADIENT  = ["#FFD700", "#FF8C00", "#FF4500", "#FFFFFF", "#FF4500", "#FF8C00", "#FFD700"]
 
     SPECIAL_WORDS = {
-        "RARE":        RARE_GRADIENT,
-        "EPIC":        EPIC_GRADIENT,
-        "LEGENDARY":   LEGENDARY_GRADIENT,
+        "RARE":      RARE_GRADIENT,
+        "EPIC":      EPIC_GRADIENT,
+        "LEGENDARY": LEGENDARY_GRADIENT,
     }
 
+    space_w = ui_draw.textbbox((0, 0), " ", font=font_title)[2]
     cursor_x = x_name
-    for word in clean_name.split(" "):
-        word_bbox = ui_draw.textbbox((0, 0), word, font=font_title)
-        word_w = word_bbox[2] - word_bbox[0]
-        space_w = ui_draw.textbbox((0, 0), " ", font=font_title)[2]
-        if word in SPECIAL_WORDS:
-            draw_gradient_text(ui_layer, (cursor_x, y_name), word, font_title, SPECIAL_WORDS[word])
-        else:
-            draw_text_with_outline(ui_draw, (cursor_x, y_name), word, font_title, (255, 255, 255))
+
+    # Draw each word of the Character portion (plain white)
+    for word in char_display.split(" "):
+        word_w = ui_draw.textbbox((0, 0), word, font=font_title)[2]
+        draw_text_with_outline(ui_draw, (cursor_x, y_name), word, font_title, (255, 255, 255))
         cursor_x += word_w + space_w
+
+    # Draw the Adj in parentheses, gradient-coloured if it's a special word
+    if adj_display:
+        adj_token = f"({adj_display})"
+        if adj_display in SPECIAL_WORDS:
+            draw_gradient_text(ui_layer, (cursor_x, y_name), adj_token, font_title, SPECIAL_WORDS[adj_display])
+        else:
+            draw_text_with_outline(ui_draw, (cursor_x, y_name), adj_token, font_title, (255, 255, 255))
+
     lowest_title_y = y_name + bbox_title[3]
 
     # B. SKIP TIME TEXT

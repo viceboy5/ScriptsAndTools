@@ -179,7 +179,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 # ---------------------------------------------------------------------------------
 # INITIALIZE VARIABLES
 # ---------------------------------------------------------------------------------
-$projectName = ((Split-Path $InputFile -Leaf) -replace '\.gcode\.3mf$', '')
+$projectName = ((Split-Path $InputFile -Leaf) -replace '\.gcode\.3mf$', '') -replace '(?i)_Full$', ''
 $timeAdd = 0
 $filData = @(
     @{ g = 0; color = ""; rawHex = "" }, @{ g = 0; color = ""; rawHex = "" },
@@ -383,7 +383,7 @@ if ($GenerateImage) {
 
             # 1. Search the folder for a custom PNG (exclude previously generated previews)
             $customPng = Get-ChildItem -Path $inputFolder -Filter "*.png" |
-                         Where-Object { $_.Name -ne "$projectName.png" -and $_.Name -notlike "*_slicePreview.png" } |
+                         Where-Object { $_.Name -notlike "*_slicePreview.png" } |
                          Select-Object -First 1
 
             if ($customPng) {
