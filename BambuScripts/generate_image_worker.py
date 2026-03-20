@@ -244,9 +244,9 @@ def main():
     x_name = CANVAS_SIZE - MARGIN - bbox_title[2]
     y_name = MARGIN - bbox_title[1]
 
-    RARE_GRADIENT       = ["#FFE066", "#FFB700", "#FF8C00", "#FFB700", "#FFE066"]
-    EPIC_GRADIENT       = ["#D9A0FF", "#A020F0", "#6A0DAD", "#A020F0", "#D9A0FF"]
-    LEGENDARY_GRADIENT  = ["#FFD700", "#FF8C00", "#FF4500", "#FFFFFF", "#FF4500", "#FF8C00", "#FFD700"]
+    RARE_GRADIENT       = ["#60B4FF", "#1A6FD4", "#0A3FA8", "#1A6FD4", "#60B4FF"]
+    EPIC_GRADIENT       = ["#FFD700", "#C0C0C0", "#FFD700", "#C0C0C0", "#FFD700"]
+    LEGENDARY_GRADIENT  = ["#ff66c4", "#5170ff", "#4b9941", "#ffb717", "#4b9941", "#5170ff", "#ff66c4"]
 
     SPECIAL_WORDS = {
         "RARE":      RARE_GRADIENT,
@@ -329,16 +329,50 @@ def main():
                 num_txt, font=font_num, fill=num_color)
 
             mass_txt = f"{rounded_mass} g"
-            name_w = ui_draw.textbbox((0, 0), cname, font=font_text)[2]
-            mass_w = ui_draw.textbbox((0, 0), mass_txt, font=font_mass)[2]
 
-            text_x_pos = box_x - int(CANVAS_SIZE * 0.02) - name_w
-            mass_x_pos = box_x - int(CANVAS_SIZE * 0.02) - mass_w
+            # Split color name into brand line and rest line.
+            # Checked longest-match first so "Sunlu Silk" beats "Sunlu".
+            BRAND_PREFIXES = ["Sunlu Silk", "Voxel", "Esun", "Sunlu", "Eryone"]
+            brand_line = cname
+            rest_line  = ""
+            for prefix in BRAND_PREFIXES:
+                if cname.lower().startswith(prefix.lower()):
+                    brand_line = cname[:len(prefix)]
+                    rest_line  = cname[len(prefix):].strip()
+                    break
 
-            draw_text_with_outline(ui_draw, (text_x_pos, y + int(CANVAS_SIZE * 0.008)), cname, font=font_text,
-                                   fill=(255, 255, 255))
-            draw_text_with_outline(ui_draw, (mass_x_pos, y + int(CANVAS_SIZE * 0.058)), mass_txt, font=font_mass,
-                                   fill=(200, 200, 200))
+            # Distribute lines evenly across the full swatch height
+            num_lines = 3 if rest_line else 2
+            slot_h    = COLOR_BOX_SIZE // num_lines
+
+            # Shrink font until brand line fits its slot with a 2px cushion
+            fit_font = font_text
+            fit_size = int(CANVAS_SIZE * FONT_TEXT_RATIO)
+            while ui_draw.textbbox((0, 0), brand_line, font=fit_font)[3] > (slot_h - 2) and fit_size > 8:
+                fit_size -= 1
+                fit_font = load_font(fit_size)
+
+            # Recalculate all widths and x positions with the final font
+            right_edge = box_x - int(CANVAS_SIZE * 0.02)
+            brand_w = ui_draw.textbbox((0, 0), brand_line, font=fit_font)[2]
+            rest_w  = ui_draw.textbbox((0, 0), rest_line,  font=fit_font)[2] if rest_line else 0
+            mass_w  = ui_draw.textbbox((0, 0), mass_txt,   font=fit_font)[2]
+            line_h  = ui_draw.textbbox((0, 0), brand_line, font=fit_font)[3]
+            mass_h  = ui_draw.textbbox((0, 0), mass_txt,   font=fit_font)[3]
+
+            brand_x = right_edge - brand_w
+            rest_x  = right_edge - rest_w
+            mass_x  = right_edge - mass_w
+
+            brand_y = y + (slot_h - line_h) // 2
+            draw_text_with_outline(ui_draw, (brand_x, brand_y), brand_line, font=fit_font, fill=(255, 255, 255))
+
+            if rest_line:
+                rest_y = y + slot_h + (slot_h - line_h) // 2
+                draw_text_with_outline(ui_draw, (rest_x, rest_y), rest_line, font=fit_font, fill=(255, 255, 255))
+
+            mass_y = y + slot_h * (num_lines - 1) + (slot_h - mass_h) // 2
+            draw_text_with_outline(ui_draw, (mass_x, mass_y), mass_txt, font=fit_font, fill=(180, 180, 180))
 
     # --- 4. DYNAMIC SPATIAL COLLISION SCALING ---
     if os.path.exists(args.img):
