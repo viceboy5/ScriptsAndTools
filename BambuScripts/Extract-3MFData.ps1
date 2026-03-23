@@ -211,14 +211,18 @@ if (-not $SkipExtraction) {
             try {
                 [xml]$xml = $configContent
 
-                foreach ($i in 1..4) {
-                    $node = $xml.SelectSingleNode("//filament[@id='$i']")
-                    if ($node) {
+                # Scan all filament nodes and compress used ones into the 4 available slots
+                $activeSlotIndex = 1
+                $filamentNodes = $xml.SelectNodes("//filament")
+
+                if ($filamentNodes) {
+                    foreach ($node in $filamentNodes) {
                         $weight = 0.0
                         [double]::TryParse($node.used_g, [System.Globalization.NumberStyles]::Any, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$weight) | Out-Null
 
-                        if ($weight -gt 0) {
-                            $filData[$i].g = [math]::Round($weight, 2)
+                        # Only process if filament is actually used AND we haven't exceeded our 4 slot maximum
+                        if ($weight -gt 0 -and $activeSlotIndex -le 4) {
+                            $filData[$activeSlotIndex].g = [math]::Round($weight, 2)
 
                             # Normalize hex code to pure alphanumeric for the dictionary match
                             $rawHex = $node.color.Replace('"','').Trim().ToUpper()
@@ -226,13 +230,15 @@ if (-not $SkipExtraction) {
 
                             if ($rawHex.Length -eq 6) { $rawHex += "FF" }
 
-                            $filData[$i].rawHex = "#" + $rawHex
+                            $filData[$activeSlotIndex].rawHex = "#" + $rawHex
 
                             if ($LibraryNames.Contains($rawHex)) {
-                                $filData[$i].color = $LibraryNames[$rawHex]
+                                $filData[$activeSlotIndex].color = $LibraryNames[$rawHex]
                             } else {
-                                $filData[$i].color = "#" + $rawHex
+                                $filData[$activeSlotIndex].color = "#" + $rawHex
                             }
+
+                            $activeSlotIndex++
                         }
                     }
                 }
