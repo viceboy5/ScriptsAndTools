@@ -776,23 +776,28 @@ $btnStart.Add_Click({
                     # Wait for file size to stabilise (download complete)
                     $prevSize = -1
                     $stableCount = 0
-                    $waitSecs = 0
-                    while ($stableCount -lt 3 -and $waitSecs -lt 120) {
+                    $waitMs = 0
+                    $maxWaitMs = 12000   # 12 seconds total timeout
+                    $sleepInterval = 200 # 200 milliseconds per check
+
+                    while ($stableCount -lt 3 -and $waitMs -lt $maxWaitMs) {
                         [System.Windows.Forms.Application]::DoEvents()
                         $curSize = (Get-Item $gf.FullName -ErrorAction SilentlyContinue).Length
+
                         if ($curSize -eq $prevSize) {
                             $stableCount++
                         } else {
                             $stableCount = 0
                             Write-Log "     [WAIT] Downloading... ($([math]::Round($curSize/1MB,1)) MB)" "Yellow"
                         }
+
                         $prevSize = $curSize
-                        $waitSecs += 2
-                        Start-Sleep -Milliseconds 2000
+                        $waitMs += $sleepInterval
+                        Start-Sleep -Milliseconds $sleepInterval
                     }
 
-                    if ($waitSecs -ge 120) {
-                        Write-Log "     [WARN] $($gf.Name) may not be fully downloaded after 2 min." "Orange"
+                    if ($waitMs -ge $maxWaitMs) {
+                        Write-Log "     [WARN] $($gf.Name) may not be fully downloaded after 12 seconds." "Orange"
                     } else {
                         Write-Log "     [OK] $($gf.Name) is local ($([math]::Round((Get-Item $gf.FullName).Length/1MB,1)) MB)" "LightGreen"
                     }
