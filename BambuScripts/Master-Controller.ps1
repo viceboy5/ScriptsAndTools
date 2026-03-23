@@ -155,11 +155,28 @@ $txtLog.Font = New-Object System.Drawing.Font("Consolas", 10)
 $txtLog.ScrollBars = 'Vertical'
 $form.Controls.Add($txtLog)
 
-function Write-Log ($Message, $Color = "LightGray") {
+function Write-Log ($Message, $Color = "LightGray", [switch]$NoNewline) {
     $txtLog.SelectionStart = $txtLog.TextLength
     $txtLog.SelectionLength = 0
     $txtLog.SelectionColor = [System.Drawing.Color]::$Color
-    $txtLog.AppendText("$Message`r`n")
+
+    # 1. Detect if the message is just our heartbeat dot (ignoring the 5-space pipeline indent)
+    $isHeartbeat = ($Message -match "^ {0,5}\.$")
+
+    # 2. If a normal message arrives right after a heartbeat, force a new line first so it looks clean
+    if (-not $isHeartbeat -and $txtLog.TextLength -gt 0 -and $txtLog.Text.EndsWith(".")) {
+        $txtLog.AppendText("`r`n")
+    }
+
+    # 3. Print the text based on what it is
+    if ($isHeartbeat) {
+        $txtLog.AppendText(".")
+    } elseif ($NoNewline) {
+        $txtLog.AppendText($Message)
+    } else {
+        $txtLog.AppendText("$Message`r`n")
+    }
+
     $txtLog.ScrollToCaret()
     [System.Windows.Forms.Application]::DoEvents()
 }
