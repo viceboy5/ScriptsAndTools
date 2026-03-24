@@ -427,7 +427,11 @@ function Refresh-PJob($pJob, $gpJob) {
     }
 
     # 3. Completely Rebuild the File List
-    $pJob.PnlFiles.Controls.Clear()
+    while ($pJob.PnlFiles.Controls.Count -gt 0) {
+        $c = $pJob.PnlFiles.Controls[0]
+        $pJob.PnlFiles.Controls.RemoveAt(0)
+        $c.Dispose()
+    }
     $pJob.FileRows.Clear()
 
     $files = Get-ChildItem -Path $pJob.FolderPath -File | Sort-Object Name
@@ -490,6 +494,16 @@ function Start-NextProcess {
     $pJob.BtnApply.Text = "Processing..."
     $th       = $gpJob.TBTheme.Text -replace '[^a-zA-Z0-9]', ''
     $oldGrand = if ($gpJob.DiGrand) { $gpJob.DiGrand.FullName } else { "" }
+
+    # --- Pre-Flight Color Validation ---
+    $colorsSafe = $true
+    foreach ($slot in $pJob.UISlots) {
+        if ($slot.StatusLbl.Text -eq "[UNMATCHED]") { $colorsSafe = $false }
+    }
+    if (-not $colorsSafe) {
+        $pJob.ChkMerge.Checked = $false
+        $pJob.ChkImage.Checked = $false
+    }
 
     # --- Synchronous Data Prep: Color XML patching ---
     $allTextFiles  = Get-ChildItem -Path $pJob.TempWork -Recurse -File |
@@ -694,7 +708,13 @@ function Start-NextProcess {
         [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value `"IMAGE INJECTION...`" -Force")
         [void]$sb.AppendLine("`$batPath = Join-Path `"$scriptDir`" `"ReplaceImageNew.bat`"")
         [void]$sb.AppendLine("if (Test-Path `$batPath) {")
-        [void]$sb.AppendLine("    Start-Process -FilePath `$batPath -ArgumentList '`"$dir`"' -WindowStyle Hidden -Wait")
+        [void]$sb.AppendLine("    `$psi = New-Object System.Diagnostics.ProcessStartInfo")
+        [void]$sb.AppendLine("    `$psi.FileName = `$batPath")
+        [void]$sb.AppendLine("    `$psi.Arguments = '`"$dir`"'")
+        [void]$sb.AppendLine("    `$psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden")
+        [void]$sb.AppendLine("    `$psi.CreateNoWindow = `$true")
+        [void]$sb.AppendLine("    `$proc = [System.Diagnostics.Process]::Start(`$psi)")
+        [void]$sb.AppendLine("    `$proc.WaitForExit() | Out-Null")
         [void]$sb.AppendLine("}")
     }
 
@@ -729,14 +749,89 @@ $script:queueTimer.Add_Tick({
             $pJob = $wrapper.PJob
             $gpJob = $wrapper.GpJob
 
-            # Trigger auto-refresh to cleanly pull all generated files/images
-            Refresh-PJob $pJob $gpJob
+            # Update file list silently
+            while ($pJob.PnlFiles.Controls.Count -gt 0) {
+                $c = $pJob.PnlFiles.Controls[0]
+                $pJob.PnlFiles.Controls.RemoveAt(0)
+                $c.Dispose()
+            }
+            $pJob.FileRows.Clear()
 
-            # Override the button state so the user knows it successfully finished
+            $files = Get-ChildItem -Path $pJob.FolderPath -File | Sort-Object Name
+            $fy = 0
+            foreach ($fi in $files) {
+                Add-FileRow $pJob $gpJob $fi $fy
+                $fy += 50
+            }
+            $pJob.PnlFiles.Size = New-Object System.Drawing.Size(620, $fy)
+            Update-ParentPreview $pJob $gpJob
+
+            # Extract and show plate_1.png and pick_1.png directly from gcode so they stay visible
+            $dir = $pJob.FolderPath
+            $baseName = [System.IO.Path]::GetFileNameWithoutExtension($pJob.ProcessedAnchorPath)
+            $gcodeFile = Join-Path $dir "$($baseName).gcode.3mf"
+
+            $tempExtract = Join-Path $env:TEMP "finalRead_$([guid]::NewGuid().ToString().Substring(0,8))"
+            New-Item -ItemType Directory -Path $tempExtract | Out-Null
+
+            if (Test-Path $gcodeFile) {
+                try {
+                    $zip = [System.IO.Compression.ZipFile]::OpenRead($gcodeFile)
+
+                    $plateEntry = $zip.Entries | Where-Object { ($_.FullName -replace "\\","/") -match "(?i)Metadata/plate_1\.png$" } | Select-Object -First 1
+                    if ($plateEntry) {
+                        $newPlate = Join-Path $tempExtract "plate_1.png"
+                        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($plateEntry, $newPlate, $true)
+                        $fs = New-Object System.IO.FileStream($newPlate, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
+                        if ($pJob.PbPlate.Image) { $pJob.PbPlate.Image.Dispose() }
+                        $pJob.PbPlate.Image = [System.Drawing.Image]::FromStream($fs)
+                        $fs.Close()
+                        $pJob.PbPlate.Tag.ImgPath = $newPlate
+                        $pJob.ImgStatusLbl.Text = "[COMPILED]"
+                        $pJob.ImgStatusLbl.ForeColor = clr "#4CAF72"
+                    }
+
+                    $pickEntry = $zip.Entries | Where-Object { ($_.FullName -replace "\\","/") -match "(?i)(^|/)pick_1\.png$" } | Select-Object -First 1
+                    if ($pickEntry) {
+                        $rawPickPath = Join-Path $tempExtract "pick_1_raw.png"
+                        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($pickEntry, $rawPickPath, $true)
+                        $newPick = Join-Path $tempExtract "pick_1.png"
+                        Invoke-RandomizePickColors $rawPickPath $newPick | Out-Null
+                        if (-not (Test-Path $newPick)) { $newPick = $rawPickPath }
+
+                        $fs = New-Object System.IO.FileStream($newPick, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
+                        if ($pJob.PbPick.Image) { $pJob.PbPick.Image.Dispose() }
+                        $pJob.PbPick.Image = [System.Drawing.Image]::FromStream($fs)
+                        $fs.Close()
+                        $pJob.PbPick.Tag.Path = $newPick
+
+                        foreach ($ctrl in $pJob.PickCard.Controls) {
+                            if ($ctrl -is [System.Windows.Forms.Label] -and $ctrl.Text -eq "[NO GCODE]") {
+                                $ctrl.Visible = $false
+                            }
+                        }
+                    }
+                    $zip.Dispose()
+                } catch {}
+            }
+
+            # Reset states
+            $pJob.ProcessingOverlay.Visible = $false
+            $pJob.PickProcessingOverlay.Visible = $false
+            $pJob.RowPanel.Enabled = $true
+            $pJob.RowPanel.BackColor = clr "#16171B"
+            $pJob.IsDone = $true
+            $pJob.IsQueued = $false
+            $pJob.ChkMerge.Enabled = $true
+            $pJob.ChkSlice.Enabled = $true
+            $pJob.ChkExtract.Enabled = $true
+            $pJob.ChkImage.Enabled = $true
+
             $pJob.BtnApply.Text = "Finished"
             $pJob.BtnApply.BackColor = clr "#333333"
-            $pJob.IsDone = $true
+            $pJob.BtnApply.Enabled = $true
 
+            $script:resizeTimer.Start()
             $script:activeProcess = $null
             $script:activeProcessJob = $null
         }
@@ -1142,7 +1237,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pJob.ChkMerge = $chkMerge; $pJob.ChkSlice = $chkSlice
     $pJob.ChkExtract = $chkExtract; $pJob.ChkImage = $chkImage
 
-    $tasksData = @{ Merge = $chkMerge; Slice = $chkSlice; Extract = $chkExtract; Image = $chkImage; PJob = $pJob }
+    $tasksData = @{ Merge = $chkMerge; Slice = $chkSlice; Extract = $chkExtract; Image = $chkImage; PJob = $pJob; GpJob = $gpJob }
     $chkSlice.Tag = $tasksData
     $chkSlice.Add_CheckedChanged({ if ($this.Checked) { $this.Tag.Extract.Checked = $true } })
     $chkImage.Tag = $tasksData
@@ -1167,19 +1262,51 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $t.Merge.Enabled = $true; $t.Slice.Enabled = $true; $t.Extract.Enabled = $true; $t.Image.Enabled = $true
         $t.Merge.Checked = $false; $t.Slice.Checked = $false; $t.Extract.Checked = $false; $t.Image.Checked = $false
     })
+
     $btnRevert.Tag = $tasksData
     $btnRevert.Add_Click({
         $t = $this.Tag
-        $t.Merge.Checked = $false; $t.Slice.Checked = $false; $t.Extract.Checked = $false; $t.Image.Checked = $false
-        $t.Merge.Enabled = $false; $t.Slice.Enabled = $false; $t.Extract.Enabled = $false; $t.Image.Enabled = $false
-
         $pj = $t.PJob
+        $gp = $t.GpJob
+
         $batPath = Join-Path $scriptDir "RevertMerge.bat"
         if (Test-Path $batPath) {
-            Start-Process -FilePath $batPath -ArgumentList "'`"$($pj.ProcessedAnchorPath)`"'" -WindowStyle Hidden -Wait
+            $targetPath = if ($pj.ProcessedAnchorPath -ne "") { $pj.ProcessedAnchorPath } else { $pj.AnchorFile.FullName }
+
+            $pj.BtnApply.Text = "Reverting..."
+            $pj.BtnApply.BackColor = clr "#E8A135"
+            $pj.RowPanel.Enabled = $false
+
+            $t.Merge.Checked = $false; $t.Slice.Checked = $false; $t.Extract.Checked = $false; $t.Image.Checked = $false
+            $t.Merge.Enabled = $false; $t.Slice.Enabled = $false; $t.Extract.Enabled = $false; $t.Image.Enabled = $false
+
+            [System.Windows.Forms.Application]::DoEvents()
+
+            try {
+                $psi = New-Object System.Diagnostics.ProcessStartInfo
+                $psi.FileName = $batPath
+                $psi.Arguments = "`"$targetPath`""
+                $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+                $psi.CreateNoWindow = $true
+
+                $proc = [System.Diagnostics.Process]::Start($psi)
+                $timeout = 100
+                while (-not $proc.HasExited -and $timeout -gt 0) {
+                    [System.Windows.Forms.Application]::DoEvents()
+                    Start-Sleep -Milliseconds 100
+                    $timeout--
+                }
+                if (-not $proc.HasExited) { $proc.Kill() }
+            } catch {}
+
+            Refresh-PJob $pj $gp
+
             $pj.ImgStatusLbl.Text = "[REVERTED]"
             $pj.ImgStatusLbl.ForeColor = clr "#D95F5F"
             $pj.RowPanel.BackColor = clr "#2D1C1C"
+            $pj.BtnApply.Text = "Reverted"
+            $pj.BtnApply.Enabled = $false
+            $pj.RowPanel.Enabled = $true
         }
     })
 
