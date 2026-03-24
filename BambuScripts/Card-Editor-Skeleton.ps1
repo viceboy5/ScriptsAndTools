@@ -114,6 +114,8 @@ $cBG      = clr "#000000"; $cUI      = clr "#16171B"
 $cText    = clr "#FFFFFF"; $cMuted   = clr "#A0A0A0"
 $cAccent  = clr "#FFD700"; $cInput   = clr "#1E2028"
 $cGrayTxt = clr "#B4B4B4"
+$cGreen   = clr "#4CAF72"; $cRed     = clr "#D95F5F"
+$cAmber   = clr "#E8A135"
 
 # --- 5. THE SCALING ENGINE ---
 $form = New-Object System.Windows.Forms.Form
@@ -134,15 +136,47 @@ function Add-ScaledElement($ctrl, $bx, $by, $bw, $bh, $bf) {
     $card.Controls.Add($ctrl)
 }
 
-# Image
+# Image (With Drag and Drop Enabled)
 $pbModel = New-Object System.Windows.Forms.PictureBox
 $pbModel.SizeMode = 'Zoom'; $pbModel.BackColor = $cBG
+$pbModel.AllowDrop = $true
+
 if (Test-Path $plateImgPath) {
     $fs = New-Object System.IO.FileStream($plateImgPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
     $pbModel.Image = [System.Drawing.Image]::FromStream($fs)
     $fs.Close()
 }
-Add-ScaledElement $pbModel 10 80 260 360 0
+Add-ScaledElement $pbModel 10 80 250 360 0
+
+# Drag and Drop Events for the PictureBox
+$pbModel.Add_DragEnter({
+    param($s, $e)
+    if ($e.Data.GetDataPresent([System.Windows.Forms.DataFormats]::FileDrop)) {
+        $files = $e.Data.GetData([System.Windows.Forms.DataFormats]::FileDrop)
+        if ($files[0] -match '(?i)\.(png|jpg|jpeg)$') {
+            $e.Effect = [System.Windows.Forms.DragDropEffects]::Copy
+        } else {
+            $e.Effect = [System.Windows.Forms.DragDropEffects]::None
+        }
+    }
+})
+
+$pbModel.Add_DragDrop({
+    param($s, $e)
+    $files = $e.Data.GetData([System.Windows.Forms.DataFormats]::FileDrop)
+    $dropped = $files[0]
+    if ($dropped -match '(?i)\.(png|jpg|jpeg)$') {
+        # Copy to the same directory as the 3MF file
+        $dest = Join-Path $fileDir (Split-Path $dropped -Leaf)
+        if ($dropped -ne $dest) { Copy-Item -Path $dropped -Destination $dest -Force }
+
+        # Safely read into the picture box
+        $fs = New-Object System.IO.FileStream($dest, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
+        if ($s.Image) { $s.Image.Dispose() } # Prevent memory leaks
+        $s.Image = [System.Drawing.Image]::FromStream($fs)
+        $fs.Close()
+    }
+})
 
 # Titles
 $txtAdj = New-Object System.Windows.Forms.TextBox
@@ -156,6 +190,13 @@ $txtChar.Text = $initChar
 $txtChar.BackColor = $cBG; $txtChar.ForeColor = $cText
 $txtChar.BorderStyle = 'None'; $txtChar.TextAlign = 'Right'
 Add-ScaledElement $txtChar 60 15 250 40 18
+
+# Placeholder Skip Time
+$lblSkipTime = New-Object System.Windows.Forms.Label
+$lblSkipTime.Text = "Skip Time: 18 min"
+$lblSkipTime.BackColor = $cBG; $lblSkipTime.ForeColor = $cText
+$lblSkipTime.TextAlign = 'BottomLeft'
+Add-ScaledElement $lblSkipTime 10 472 250 30 14
 
 # Dynamic Slots
 $startY = 80; $boxSize = 76; $slotSpacing = $boxSize + 10; $boxX = 512 - 10 - $boxSize
@@ -176,6 +217,24 @@ for ($i = 0; $i -lt $activeSlots.Count; $i++) {
     })
     Add-ScaledElement $swatch $boxX $startY $boxSize $boxSize 16
 
+    # Validation Status Tag
+    $lblStatus = New-Object System.Windows.Forms.Label
+    $lblStatus.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
+    $lblStatus.TextAlign = 'BottomRight'
+    $lblStatus.BackColor = $cBG
+
+    if ($slotData.Name) {
+        $lblStatus.Text = "[MATCHED]"
+        $lblStatus.ForeColor = $cGreen
+    } else {
+        $lblStatus.Text = "[UNMATCHED]"
+        $lblStatus.ForeColor = $cRed
+    }
+
+    # SHRUNK TO 170px WIDTH, PULLED BACK TO $boxX - 180
+    Add-ScaledElement $lblStatus ($boxX - 180) ($startY) 170 15 8
+
+    # ComboBox
     $combo = New-Object System.Windows.Forms.ComboBox
     $combo.BackColor = $cInput; $combo.ForeColor = $cText
     $combo.DropDownStyle = 'DropDown'
@@ -183,17 +242,41 @@ for ($i = 0; $i -lt $activeSlots.Count; $i++) {
     $combo.AutoCompleteSource = 'ListItems'
     foreach ($k in $LibraryColors.Keys) { [void]$combo.Items.Add($k) }
     if ($slotData.Name) { $combo.Text = $slotData.Name } else { $combo.Text = "Select Color..." }
-    $combo.Tag = $swatch
+
+    $combo.Tag = @{
+        Swatch = $swatch;
+        StatusLbl = $lblStatus;
+        OrigName = $slotData.Name
+    }
 
     $combo.add_TextChanged({
         param($s, $e)
-        if ($LibraryColors.Contains($s.Text)) { $s.Tag.BackColor = clr $LibraryColors[$s.Text] }
+        $data = $s.Tag
+
+        if ($LibraryColors.Contains($s.Text)) {
+            $data.Swatch.BackColor = clr $LibraryColors[$s.Text]
+        }
+
+        if ($s.Text -eq $data.OrigName) {
+            if ($data.OrigName) {
+                $data.StatusLbl.Text = "[MATCHED]"
+                $data.StatusLbl.ForeColor = clr "#4CAF72"
+            } else {
+                $data.StatusLbl.Text = "[UNMATCHED]"
+                $data.StatusLbl.ForeColor = clr "#D95F5F"
+            }
+        } else {
+            $data.StatusLbl.Text = "[CHANGED]"
+            $data.StatusLbl.ForeColor = clr "#E8A135"
+        }
+
         $s.SelectionStart = 0; $s.SelectionLength = 0
     }.GetNewClosure())
 
-    # 230 width pushes it further left, guaranteeing it fits the text
-    Add-ScaledElement $combo ($boxX - 240) ($startY + 15) 230 25 10
+    # SHRUNK TO 170px WIDTH, PULLED BACK TO $boxX - 180
+    Add-ScaledElement $combo ($boxX - 180) ($startY + 15) 170 25 10
 
+    # Grams
     $lblGrams = New-Object System.Windows.Forms.Label
     $lblGrams.Text = "$($slotData.Grams) g"
     $lblGrams.ForeColor = $cGrayTxt
@@ -205,13 +288,12 @@ for ($i = 0; $i -lt $activeSlots.Count; $i++) {
 }
 
 # --- FIX Z-ORDER ---
-# Push the image to the absolute back so the dropdowns draw perfectly on top of it
 $pbModel.SendToBack()
 
 # External Tools
 $lblInstructions = New-Object System.Windows.Forms.Label
-$lblInstructions.Text = "LIVE 3MF EDITOR`n`nData extracted from: $baseName`n`nWhen you click save, the original .3mf will be backed up, colors will be patched, and the file will be renamed based on the canvas."
-$lblInstructions.ForeColor = $cMuted; $lblInstructions.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$lblInstructions.Text = "LIVE 3MF EDITOR`n`n* Drop a .png on the canvas to copy it to the 3mf folder and test it.`n* Orange [CHANGED] tags mean you are altering the XML hex codes.`n`nWhen you click save, the original .3mf will be backed up, colors will be patched, and the file will be renamed based on the canvas."
+$lblInstructions.ForeColor = $cMuted; $lblInstructions.Font = New-Object System.Drawing.Font("Segoe UI", 9)
 $lblInstructions.AutoSize = $false
 $form.Controls.Add($lblInstructions)
 
@@ -224,7 +306,7 @@ $form.Controls.Add($btnSave)
 
 # --- PERFORMANCE DEBOUNCING TIMER ---
 $script:resizeTimer = New-Object System.Windows.Forms.Timer
-$script:resizeTimer.Interval = 50 # Wait 50ms after dragging stops to perform the heavy font math
+$script:resizeTimer.Interval = 50
 $script:resizeTimer.Add_Tick({
     $script:resizeTimer.Stop()
     $form.SuspendLayout()
@@ -251,7 +333,6 @@ $script:resizeTimer.Add_Tick({
             $newFont = [float]($item.Font * $scale)
             if ($newFont -lt 4) { $newFont = 4 }
 
-            # Dispose of the old font cleanly to prevent GDI Memory Leaks (lag)
             $oldFont = $item.Ctrl.Font
             $item.Ctrl.Font = New-Object System.Drawing.Font($oldFont.FontFamily, $newFont, $oldFont.Style)
             $oldFont.Dispose()
@@ -268,7 +349,6 @@ $script:resizeTimer.Add_Tick({
 })
 
 $form.Add_Resize({
-    # Rapidly reset the timer while the user is actively dragging the window
     $script:resizeTimer.Stop()
     $script:resizeTimer.Start()
 })
@@ -320,7 +400,6 @@ $btnSave.Add_Click({
 
 $form.Add_Shown({
     $btnSave.Focus()
-    # Trigger an initial resize to lock everything into place
     $form.Width = $form.Width + 1
 })
 
