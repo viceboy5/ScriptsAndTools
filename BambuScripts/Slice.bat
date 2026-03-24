@@ -2,15 +2,16 @@
 setlocal EnableDelayedExpansion
 
 if "%~1"=="" (
-    echo Usage: Drag and drop a .3mf file or folder onto this script.
+    echo Usage: Drag and drop one or more .3mf files or folders onto this script.
     pause
     exit /b 1
 )
 
-set "BAMBU_GUI=C:\Program Files\Bambu Studio\bambu-studio.exe"
+set "SCRIPT_DIR=%~dp0"
+set "WORKER=%SCRIPT_DIR%slicer_automation_worker.ps1"
 
 echo --------------------------------------------------
-echo BAMBU STUDIO LIVE-FEED SLICER
+echo BAMBU STUDIO BATCH SLICER
 echo --------------------------------------------------
 echo [ Ensuring background instances are closed... ]
 taskkill /im bambu-studio.exe /f >nul 2>&1
@@ -18,37 +19,55 @@ timeout /t 2 >nul
 echo --------------------------------------------------
 echo.
 
-:process_loop
-if "%~1"=="" goto finish
+:: Collect all .3mf files from every dropped item (file or folder)
+set "COUNT=0"
+
+:collect_loop
+if "%~1"=="" goto run_slice
 
 if exist "%~1\" (
-    echo [ Scanning Directory: %~nx1 ]
+    echo [ Scanning folder: %~nx1 ]
     for /R "%~1" %%F in (*.3mf) do (
-        REM Prevent slicing files that are already sliced
         echo "%%F" | findstr /i /v "\.gcode\.3mf" >nul
-        if not errorlevel 1 call :slice_target "%%F"
+        if not errorlevel 1 (
+            set /a COUNT+=1
+            set "FILE_!COUNT!=%%F"
+        )
     )
 ) else (
-    call :slice_target "%~1"
+    echo "%~1" | findstr /i /v "\.gcode\.3mf" >nul
+    if not errorlevel 1 (
+        set /a COUNT+=1
+        set "FILE_!COUNT!=%~1"
+    )
 )
 
 shift
-goto process_loop
+goto collect_loop
 
-:slice_target
-set "INPUT=%~1"
-set "INPUTDIR=%~dp1"
-set "INPUTBASE=%~n1"
-set "OUTPUT=!INPUTDIR!!INPUTBASE!.gcode.3mf"
+:run_slice
+if %COUNT%==0 (
+    echo [!] No valid .3mf files found to slice.
+    pause
+    exit /b 1
+)
 
-echo Target File : !INPUT!
-echo Slicing Plate 1 (Bypassing safety checks)...
-
-"!BAMBU_GUI!" --debug 3 --no-check --slice 1 --min-save --export-3mf "!OUTPUT!" "!INPUT!" | findstr "^"
+echo [ Found %COUNT% file(s) to slice ]
 echo.
-exit /b
 
-:finish
+:: Build PowerShell array string
+set "PS_PATHS="
+for /L %%I in (1,1,%COUNT%) do (
+    if defined PS_PATHS (
+        set "PS_PATHS=!PS_PATHS!, '!FILE_%%I!'"
+    ) else (
+        set "PS_PATHS='!FILE_%%I!'"
+    )
+)
+
+powershell.exe -ExecutionPolicy Bypass -NoProfile -Command "& '%WORKER%' -InputPaths @(%PS_PATHS%)"
+
+echo.
 echo --------------------------------------------------
-echo Slicing complete!
+echo All done!
 pause
