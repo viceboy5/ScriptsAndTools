@@ -30,8 +30,6 @@ function Invoke-SliceFile([string]$filePath, [string]$label) {
     $logOut    = Join-Path $env:TEMP "slice_log_out_$baseName.txt"
     $logErr    = Join-Path $env:TEMP "slice_log_err_$baseName.txt"
 
-    Start-Sleep -Seconds 3
-
     Write-Host "  -> Slicing $label`: $baseName " -ForegroundColor Cyan -NoNewline
 
     $procArgs = "--debug 3 --no-check --slice 1 --min-save --export-3mf `"$slicedOut`" `"$filePath`""

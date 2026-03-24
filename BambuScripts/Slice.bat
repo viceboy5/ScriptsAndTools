@@ -13,10 +13,6 @@ set "WORKER=%SCRIPT_DIR%slicer_automation_worker.ps1"
 echo --------------------------------------------------
 echo BAMBU STUDIO BATCH SLICER
 echo --------------------------------------------------
-echo [ Ensuring background instances are closed... ]
-taskkill /im bambu-studio.exe /f >nul 2>&1
-timeout /t 2 >nul
-echo --------------------------------------------------
 echo.
 
 :: Collect all .3mf files from every dropped item (file or folder)
