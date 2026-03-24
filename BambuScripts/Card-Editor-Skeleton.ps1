@@ -1,3 +1,14 @@
+$ErrorActionPreference = 'Stop'
+trap {
+    try { Add-Type -AssemblyName System.Windows.Forms } catch {}
+    [System.Windows.Forms.MessageBox]::Show(
+        "STARTUP ERROR:`n`n$($_.Exception.Message)`n`nLine: $($_.InvocationInfo.ScriptLineNumber)",
+        "Card Editor - Fatal Error",
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Error
+    ) | Out-Null
+    exit 1
+}
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -31,6 +42,7 @@ if (Test-Path $colorCsvPath) {
 }
 
 # --- 2. Advanced Helpers ---
+if (-not ('ModernFolderPicker' -as [type])) {
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
@@ -46,31 +58,10 @@ public static class ModernFolderPicker {
     [ComImport, Guid("D57C7288-D4AD-4768-BE02-9D969532D960"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IFileOpenDialog {
         [PreserveSig] int Show(IntPtr hwndOwner);
-        void SetFileTypes(uint cFileTypes, IntPtr rgFilterSpec);
-        void SetFileTypeIndex(uint iFileType);
-        void GetFileTypeIndex(out uint piFileType);
-        void Advise(IntPtr pfde, out uint pdwCookie);
-        void Unadvise(uint dwCookie);
         void SetOptions(uint fos);
         void GetOptions(out uint pfos);
-        void SetDefaultFolder(IntPtr psi);
-        void SetFolder(IntPtr psi);
-        void GetFolder(out IntPtr ppsi);
-        void GetCurrentSelection(out IntPtr ppsi);
-        void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string pszName);
-        void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string pszName);
         void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string pszTitle);
-        void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string pszText);
-        void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string pszLabel);
         void GetResult(out IShellItem ppsi);
-        void AddPlace(IntPtr psi, int fdap);
-        void SetDefaultExtension([MarshalAs(UnmanagedType.LPWStr)] string pszDefaultExtension);
-        void Close(int hr);
-        void SetClientGuid(ref Guid guid);
-        void ClearClientData();
-        void SetFilter(IntPtr pFilter);
-        void GetResults(out IntPtr ppenum);
-        void GetSelectedItems(out IntPtr ppsai);
     }
     static readonly Guid CLSID_FileOpenDialog = new Guid("DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7");
     const uint FOS_PICKFOLDERS = 0x00000020;
@@ -95,6 +86,7 @@ public static class ModernFolderPicker {
     }
 }
 '@
+}
 
 function ParseFile([string]$filename) {
     $compoundExts = @('.gcode.3mf', '.gcode.stl', '.gcode.step', '.f3d.3mf')
@@ -115,7 +107,6 @@ function SmartFill([string]$anchorName, [string]$gpName) {
     $stem = $anchorName -replace '(?i)\.gcode\.3mf$|\.3mf$', ''
     $stem = $stem -replace '(?i)_Full$', ''
     $escaped = [regex]::Escape($gpName)
-
     if ($gpName -ne '' -and $stem -imatch "^(.+)_${escaped}$") { $prefix = $Matches[1] } else { $prefix = $stem }
     $parts = $prefix -split '_'
     if ($parts.Count -ge 2) { return @{ Char = $parts[0]; Adj = ($parts[1..($parts.Count-1)] -join '') } }
@@ -229,7 +220,7 @@ $lblGlobalTitle.Location = New-Object System.Drawing.Point(15, 15)
 $pnlTop.Controls.Add($lblGlobalTitle)
 
 $btnProcessAll = New-Object System.Windows.Forms.Button
-$btnProcessAll.Text = "Process All Remaining"
+$btnProcessAll.Text = "Add All To Queue"
 $btnProcessAll.BackColor = clr "#4CAF72"; $btnProcessAll.ForeColor = clr "#FFFFFF"
 $btnProcessAll.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $btnProcessAll.FlatStyle = 'Flat'; $btnProcessAll.FlatAppearance.BorderSize = 0
@@ -244,15 +235,18 @@ $mainScroll.Dock = 'Fill'; $mainScroll.AutoScroll = $true; $mainScroll.BackColor
 $form.Controls.Add($mainScroll)
 $mainScroll.BringToFront()
 
-$script:jobs = [System.Collections.Generic.List[object]]::new()
+# --- 5. Async Worker Engine Data ---
+$script:jobs = New-Object System.Collections.ArrayList
+$script:processQueue = New-Object System.Collections.Queue
+$script:activeProcess = $null
+$script:activeProcessJob = $null
 
 function Add-ScaledElement($pJob, $targetPanel, $ctrl, $bx, $by, $bw, $bh, $bf) {
-    $pJob.ScaleElements.Add([PSCustomObject]@{ Target = $targetPanel; Ctrl = $ctrl; X = $bx; Y = $by; W = $bw; H = $bh; Font = $bf })
+    $pJob.ScaleElements.Add([PSCustomObject]@{ Target = $targetPanel; Ctrl = $ctrl; X = $bx; Y = $by; W = $bw; H = $bh; Font = $bf }) | Out-Null
     $ctrl.AutoSize = $false
     $targetPanel.Controls.Add($ctrl)
 }
 
-# --- 5. Sync Functions ---
 function Update-ParentPreview($pJob, $gpJob) {
     $ch = $pJob.TBChar.Text -replace '[^a-zA-Z0-9]', ''
     $ad = $pJob.TBAdj.Text -replace '[^a-zA-Z0-9]', ''
@@ -260,105 +254,424 @@ function Update-ParentPreview($pJob, $gpJob) {
 
     $pJob.LblChar.Text = $ch
     $pJob.LblAdj.Text  = if ($ad) { "($ad)" } else { "" }
+    if ($pJob.LblThemeCard) { $pJob.LblThemeCard.Text = $th }
 
     foreach ($r in $pJob.FileRows) {
         $sf = $r.SuffixBox.Text -replace '[^a-zA-Z0-9]', ''
-        $parts = [System.Collections.Generic.List[string]]::new()
-        if ($ch) { $parts.Add($ch) }
-        if ($ad) { $parts.Add($ad) }
-        if ($th) { $parts.Add($th) }
-        if ($sf) { $parts.Add($sf) }
-        $r.NewLbl.Text = ($parts -join '_') + $r.Ext
+        $parts = New-Object System.Collections.ArrayList
+        if ($ch) { $parts.Add($ch) | Out-Null }
+        if ($ad) { $parts.Add($ad) | Out-Null }
+        if ($th) { $parts.Add($th) | Out-Null }
+        if ($sf) { $parts.Add($sf) | Out-Null }
+        $r.NewLbl.Text = ($parts.ToArray() -join '_') + $r.Ext
     }
 }
 
-# --- 6. Global Apply Function ---
-function Apply-GpJob($gpJob) {
-    if ($gpJob.IsDone -or $gpJob.Container.IsDisposed) { return }
-    $gpJob.BtnApply.Text = "Processing..."; $gpJob.BtnApply.Enabled = $false
-    $gpJob.Container.BackColor = clr "#2A2C35"
-    [System.Windows.Forms.Application]::DoEvents()
+function Refresh-PJob($pJob, $gpJob) {
+    $pJob.ProcessingOverlay.Visible = $false
+    $pJob.PickProcessingOverlay.Visible = $false
 
-    $th = $gpJob.TBTheme.Text -replace '[^a-zA-Z0-9]', ''
-    $oldGrand  = if ($gpJob.DiGrand) { $gpJob.DiGrand.FullName } else { "" }
-    $newGrand  = $oldGrand
+    # 1. Update Left Canvas (Plate)
+    $localPng = Get-ChildItem -Path $pJob.FolderPath -Filter "*.png" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    $isReplaced = $false
+    if ($localPng) {
+        $plateImgPath = $localPng.FullName
+        $isReplaced = $true
+    } else {
+        $plateImgPath = Join-Path $pJob.TempWork "Metadata\plate_1.png"
+    }
 
-    # Process all parents sequentially
-    foreach ($pJob in $gpJob.Parents) {
-        $allTextFiles = Get-ChildItem -Path $pJob.TempWork -Recurse -File | Where-Object { $_.Name -match '\.(xml|model|config|json)$' }
-        foreach ($file in $allTextFiles) {
-            $content = [System.IO.File]::ReadAllText($file.FullName, [System.Text.Encoding]::UTF8)
-            $modified = $false
-            foreach ($slot in $pJob.UISlots) {
-                $selName = $slot.Combo.Text
-                if ($LibraryColors.Contains($selName)) {
-                    $newHex = $LibraryColors[$selName].ToUpper()
-                    $oldHex = $slot.OldHex.ToUpper()
-                    $oldHex6 = $oldHex.Substring(0,7); $newHex6 = $newHex.Substring(0,7)
-                    if ($content -match "(?i)$oldHex") { $content = $content -ireplace [regex]::Escape($oldHex), $newHex; $modified = $true }
-                    if ($content -match "(?i)$oldHex6") { $content = $content -ireplace [regex]::Escape($oldHex6), $newHex6; $modified = $true }
+    if (Test-Path $plateImgPath) {
+        $fs = New-Object System.IO.FileStream($plateImgPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
+        if ($pJob.PbPlate.Image) { $pJob.PbPlate.Image.Dispose() }
+        $pJob.PbPlate.Image = [System.Drawing.Image]::FromStream($fs)
+        $fs.Close()
+        $pJob.PbPlate.Tag.ImgPath = $plateImgPath
+    }
+
+    if ($isReplaced) {
+        $pJob.ImgStatusLbl.Text = "[REPLACED]"; $pJob.ImgStatusLbl.ForeColor = $cGreen
+    } else {
+        $pJob.ImgStatusLbl.Text = "[DEFAULT]"; $pJob.ImgStatusLbl.ForeColor = $cAmber
+    }
+
+    # 2. Update Middle Canvas (Pick)
+    $gcodeFile = Get-ChildItem -Path $pJob.FolderPath -Filter "*Full.gcode.3mf" | Select-Object -First 1
+    $pickPath = $null
+    if ($gcodeFile) {
+        $zip = $null
+        try {
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($gcodeFile.FullName)
+            $pickEntry = $zip.Entries | Where-Object { ($_.FullName -replace "\\","/") -match "(?i)(^|/)pick_1\.png$" } | Select-Object -First 1
+            if ($pickEntry) {
+                $rawPickPath = Join-Path $pJob.TempWork "pick_1_raw.png"
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($pickEntry, $rawPickPath, $true)
+                $pickPath = Join-Path $pJob.TempWork "pick_1.png"
+                Invoke-RandomizePickColors $rawPickPath $pickPath | Out-Null
+                if (-not (Test-Path $pickPath)) { $pickPath = $rawPickPath }
+            }
+        } catch {} finally { if ($null -ne $zip) { $zip.Dispose() } }
+    }
+
+    if ($pickPath -and (Test-Path $pickPath)) {
+        $fs = New-Object System.IO.FileStream($pickPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
+        if ($pJob.PbPick.Image) { $pJob.PbPick.Image.Dispose() }
+        $pJob.PbPick.Image = [System.Drawing.Image]::FromStream($fs)
+        $fs.Close()
+        $pJob.PbPick.Tag.Path = $pickPath
+        foreach ($ctrl in $pJob.PickCard.Controls) {
+            if ($ctrl -is [System.Windows.Forms.Label] -and $ctrl.Text -eq "[NO GCODE]") { $ctrl.Visible = $false }
+        }
+    } else {
+        if ($pJob.PbPick.Image) { $pJob.PbPick.Image.Dispose(); $pJob.PbPick.Image = $null }
+        foreach ($ctrl in $pJob.PickCard.Controls) {
+            if ($ctrl -is [System.Windows.Forms.Label] -and $ctrl.Text -eq "[NO GCODE]") { $ctrl.Visible = $true; $ctrl.BringToFront() }
+        }
+    }
+
+    # 3. Reset UI States
+    $pJob.BtnApply.Text = "Add to Queue"
+    $pJob.BtnApply.BackColor = clr "#4CAF72"
+    $pJob.BtnApply.Enabled = $true
+
+    $pJob.RowPanel.Enabled = $true
+    $pJob.RowPanel.BackColor = clr "#16171B"
+    $pJob.IsDone = $false
+    $pJob.IsQueued = $false
+
+    $pJob.ChkMerge.Enabled = $true
+    $pJob.ChkSlice.Enabled = $true
+    $pJob.ChkExtract.Enabled = $true
+    $pJob.ChkImage.Enabled = $true
+}
+
+# --- 6. Async Execution Framework ---
+function Enqueue-PJob($pJob, $gpJob) {
+    if ($pJob.IsDone -or $pJob.IsQueued) { return }
+    $pJob.IsQueued = $true
+    $pJob.BtnApply.Text = "Queued..."
+    $pJob.BtnApply.BackColor = $cAmber
+    $pJob.RowPanel.Enabled = $false
+
+    $pJob.ProcessingOverlay.Text = "[ PREPARING ]"
+    $pJob.ProcessingOverlay.BringToFront()
+    $pJob.ProcessingOverlay.Visible = $true
+
+    $pJob.PickProcessingOverlay.Text = "[ PREPARING ]"
+    $pJob.PickProcessingOverlay.BringToFront()
+    $pJob.PickProcessingOverlay.Visible = $true
+
+    $script:processQueue.Enqueue(@{ PJob = $pJob; GpJob = $gpJob })
+}
+
+function Start-NextProcess {
+    if ($script:activeProcess -ne $null -or $script:processQueue.Count -eq 0) { return }
+
+    $jobWrapper = $script:processQueue.Dequeue()
+    $pJob = $jobWrapper.PJob
+    $gpJob = $jobWrapper.GpJob
+    $script:activeProcessJob = $jobWrapper
+
+    $pJob.BtnApply.Text = "Processing..."
+    $th       = $gpJob.TBTheme.Text -replace '[^a-zA-Z0-9]', ''
+    $oldGrand = if ($gpJob.DiGrand) { $gpJob.DiGrand.FullName } else { "" }
+
+    # --- Pre-Flight Color Validation ---
+    $colorsSafe = $true
+    foreach ($slot in $pJob.UISlots) {
+        if ($slot.StatusLbl.Text -eq "[UNMATCHED]") { $colorsSafe = $false }
+    }
+    if (-not $colorsSafe) {
+        $pJob.ChkMerge.Checked = $false
+        $pJob.ChkImage.Checked = $false
+    }
+
+    # --- Synchronous Data Prep: Color XML patching ---
+    $allTextFiles  = Get-ChildItem -Path $pJob.TempWork -Recurse -File |
+                     Where-Object { $_.Name -match '\.(xml|model|config|json)$' }
+    $modifiedFiles = New-Object System.Collections.ArrayList
+
+    foreach ($file in $allTextFiles) {
+        $content  = [System.IO.File]::ReadAllText($file.FullName, [System.Text.Encoding]::UTF8)
+        $modified = $false
+        foreach ($slot in $pJob.UISlots) {
+            $selName = $slot.Combo.Text
+            if ($LibraryColors.Contains($selName)) {
+                $newHex  = $LibraryColors[$selName].ToUpper()
+                $oldHex  = $slot.OldHex.ToUpper()
+                $oldHex6 = $oldHex.Substring(0,7)
+                $newHex6 = $newHex.Substring(0,7)
+                if ($content -match "(?i)$oldHex") {
+                    $content  = $content -ireplace [regex]::Escape($oldHex), $newHex
+                    $modified = $true
+                }
+                if ($content -match "(?i)$oldHex6") {
+                    $content  = $content -ireplace [regex]::Escape($oldHex6), $newHex6
+                    $modified = $true
                 }
             }
-            if ($modified) { [System.IO.File]::WriteAllText($file.FullName, $content, (New-Object System.Text.UTF8Encoding($false))) }
         }
+        if ($modified) {
+            [System.IO.File]::WriteAllText($file.FullName, $content, (New-Object System.Text.UTF8Encoding($false)))
+            $modifiedFiles.Add($file) | Out-Null
+        }
+    }
 
-        Rename-Item $pJob.AnchorFile.FullName "$($pJob.AnchorFile.BaseName)_old.3mf" -Force
-        $cleanChar = $pJob.TBChar.Text -replace '[^a-zA-Z0-9]', ''
-        $cleanAdj  = $pJob.TBAdj.Text -replace '[^a-zA-Z0-9]', ''
-        $newName = if ($cleanAdj) { "${cleanChar}_${cleanAdj}_Full.3mf" } else { "${cleanChar}_Full.3mf" }
-        $newFilePath = Join-Path $pJob.FolderPath $newName
+    # --- Resolve anchor target name from the UI grid ---
+    $anchorTargetName = ""
+    $anchorFileRow    = $null
+    foreach ($r in $pJob.FileRows) {
+        if ($r.OldPath -eq $pJob.AnchorFile.FullName) {
+            $anchorTargetName = $r.NewLbl.Text
+            $anchorFileRow    = $r
+            break
+        }
+    }
+    if ($anchorTargetName -eq "") { $anchorTargetName = $pJob.AnchorFile.Name }
 
-        $zip = [System.IO.Compression.ZipFile]::Open($newFilePath, 'Create')
-        Get-ChildItem $pJob.TempWork -Recurse -File | ForEach-Object {
-            $rel = $_.FullName.Substring($pJob.TempWork.Length).TrimStart('\','/').Replace('\','/')
-            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $rel) | Out-Null
+    $newFilePath = Join-Path $pJob.FolderPath $anchorTargetName
+
+    # 1. Rename anchor file
+    if ($pJob.AnchorFile.FullName -ne $newFilePath) {
+        if (Test-Path $newFilePath) { Remove-Item $newFilePath -Force -ErrorAction SilentlyContinue }
+        Rename-Item $pJob.AnchorFile.FullName $anchorTargetName -Force
+    }
+
+    # FIX: Update OldPath in the anchor FileRow to the new path so the
+    #      "skip anchor" guard below works correctly after rename.
+    if ($null -ne $anchorFileRow) { $anchorFileRow.OldPath = $newFilePath }
+
+    # 2. Inject color XML updates into the correctly-named archive
+    if ($modifiedFiles.Count -gt 0) {
+        $zip = [System.IO.Compression.ZipFile]::Open($newFilePath, 'Update')
+        foreach ($file in $modifiedFiles) {
+            $rel   = $file.FullName.Substring($pJob.TempWork.Length).TrimStart('\','/').Replace('\','/')
+            $entry = $zip.GetEntry($rel)
+            if ($entry) { $entry.Delete() }
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $file.FullName, $rel) | Out-Null
         }
         $zip.Dispose()
-        Remove-Item $pJob.TempWork -Recurse -Force -ErrorAction SilentlyContinue
+    }
 
-        foreach ($r in $pJob.FileRows) {
-            $oldPath = $r.OldPath
-            $targetName = $r.NewLbl.Text
-            $newPath = Join-Path $pJob.FolderPath $targetName
-            if ($oldPath -ne $newPath -and (Test-Path $oldPath)) { Rename-Item $oldPath $targetName -Force }
-        }
+    $pJob.ProcessedAnchorPath = $newFilePath
+    [System.GC]::Collect()
+    Start-Sleep -Milliseconds 100
 
-        $pParts = @(); if ($cleanChar) { $pParts += $cleanChar }; if ($cleanAdj) { $pParts += $cleanAdj }; if ($th) { $pParts += $th }
-        $newParentName = $pParts -join '_'
-        $oldFolder = $pJob.FolderPath
-        if ($newParentName -ne '' -and $newParentName -ne (Split-Path $oldFolder -Leaf)) {
-            $newFolder = Join-Path (Split-Path $oldFolder -Parent) $newParentName
-            Rename-Item $oldFolder $newParentName -Force
-            $pJob.FolderPath = $newFolder
+    # 3. Rename all other files in the folder
+    #    Uses the UPDATED OldPath values so the anchor is correctly skipped.
+    foreach ($r in $pJob.FileRows) {
+        if ($r.OldPath -eq $pJob.ProcessedAnchorPath) { continue }   # skip anchor (now uses updated path)
+        $targetName = $r.NewLbl.Text
+        $newPath    = Join-Path $pJob.FolderPath $targetName
+        if ($r.OldPath -ne $newPath -and (Test-Path $r.OldPath)) {
+            Rename-Item $r.OldPath $targetName -Force
+            $r.OldPath = $newPath    # keep in sync for any subsequent operations
         }
     }
 
-    # Rename Grandparent Folder
-    if (-not $gpJob.ChkSkip.Checked -and $th -ne '' -and $oldGrand -ne '' -and $th -ne (Split-Path $oldGrand -Leaf)) {
+    # 4. Rename parent folder
+    $cleanChar     = $pJob.TBChar.Text -replace '[^a-zA-Z0-9]', ''
+    $cleanAdj      = $pJob.TBAdj.Text  -replace '[^a-zA-Z0-9]', ''
+    $pParts        = New-Object System.Collections.ArrayList
+    if ($cleanChar) { $pParts.Add($cleanChar) | Out-Null }
+    if ($cleanAdj)  { $pParts.Add($cleanAdj)  | Out-Null }
+    if ($th)        { $pParts.Add($th)         | Out-Null }
+    $newParentName = $pParts.ToArray() -join '_'
+
+    $oldFolder = $pJob.FolderPath
+    if ($newParentName -ne '' -and $newParentName -ne (Split-Path $oldFolder -Leaf)) {
+        $newFolder = Join-Path (Split-Path $oldFolder -Parent) $newParentName
+        try {
+            Rename-Item $oldFolder $newParentName -Force -ErrorAction Stop
+            $pJob.FolderPath          = $newFolder
+            $pJob.ProcessedAnchorPath = $pJob.ProcessedAnchorPath.Replace($oldFolder, $newFolder)
+            foreach ($r in $pJob.FileRows) { $r.OldPath = $r.OldPath.Replace($oldFolder, $newFolder) }
+        } catch {
+            # Folder locked - keep old paths for worker integrity
+        }
+    }
+
+    # 5. Rename grandparent folder
+    if (-not $gpJob.ChkSkip.Checked -and $th -ne '' -and $oldGrand -ne '' -and
+        $th -ne (Split-Path $oldGrand -Leaf)) {
         $newGrand = Join-Path (Split-Path $oldGrand -Parent) $th
-        Rename-Item $oldGrand $th -Force
-    }
+        try {
+            Rename-Item $oldGrand $th -Force -ErrorAction Stop
+            $gpJob.GpPath  = $newGrand
+            $gpJob.DiGrand = [System.IO.DirectoryInfo]::new($newGrand)
 
-    # Update Path Hierarchy for Downstream Queues
-    if ($oldGrand -ne '' -and $oldGrand -ne $newGrand) {
-        foreach ($otherGp in $script:jobs) {
-            if (-not $otherGp.IsDone -and -not $otherGp.Container.IsDisposed) {
-                if ($otherGp.GpPath.StartsWith($oldGrand)) {
-                    $otherGp.GpPath = $otherGp.GpPath.Replace($oldGrand, $newGrand)
+            foreach ($p in $gpJob.Parents) {
+                $p.FolderPath = $p.FolderPath.Replace($oldGrand, $newGrand)
+                if ($p.ProcessedAnchorPath) {
+                    $p.ProcessedAnchorPath = $p.ProcessedAnchorPath.Replace($oldGrand, $newGrand)
+                }
+                foreach ($fr in $p.FileRows) { $fr.OldPath = $fr.OldPath.Replace($oldGrand, $newGrand) }
+            }
+
+            foreach ($otherGp in $script:jobs) {
+                if ($otherGp -ne $gpJob -and $otherGp.GpPath.StartsWith($oldGrand)) {
+                    $otherGp.GpPath  = $otherGp.GpPath.Replace($oldGrand, $newGrand)
                     $otherGp.DiGrand = [System.IO.DirectoryInfo]::new($otherGp.GpPath)
                     foreach ($otherP in $otherGp.Parents) {
                         $otherP.FolderPath = $otherP.FolderPath.Replace($oldGrand, $newGrand)
+                        if ($otherP.ProcessedAnchorPath) {
+                            $otherP.ProcessedAnchorPath = $otherP.ProcessedAnchorPath.Replace($oldGrand, $newGrand)
+                        }
                         foreach ($fr in $otherP.FileRows) { $fr.OldPath = $fr.OldPath.Replace($oldGrand, $newGrand) }
                     }
                 }
             }
-        }
+        } catch {}
     }
 
-    $gpJob.BtnApply.Text = "Applied"
-    $gpJob.Container.Enabled = $false
-    $gpJob.IsDone = $true
+    # --- Generate Async Worker Script ---
+    $workerScript = Join-Path $env:TEMP "AsyncWorker_$([guid]::NewGuid().ToString().Substring(0,8)).ps1"
+    $sb           = New-Object System.Text.StringBuilder
+
+    # NOTE: $baseName and $dir are resolved AFTER all renames complete so paths are final.
+    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($pJob.ProcessedAnchorPath)
+    $dir      = $pJob.FolderPath
+
+    [void]$sb.AppendLine("`$ErrorActionPreference = 'Continue'")
+    [void]$sb.AppendLine("Add-Type -AssemblyName System.IO.Compression.FileSystem")
+    [void]$sb.AppendLine("Start-Transcript -Path `"$dir\AsyncWorker_Log.txt`" -Force")
+
+    $doMerge   = $pJob.ChkMerge.Checked
+    $doSlice   = $pJob.ChkSlice.Checked
+    $doExtract = $pJob.ChkExtract.Checked
+    $doImage   = $pJob.ChkImage.Checked
+
+    $anchorPath = $pJob.ProcessedAnchorPath  # e.g. ...\Dolphin_Ocean\Dolphin_Ocean_Full.3mf
+    $nestPath   = Join-Path $dir "$($baseName)_Nest.3mf"
+    $finalPath  = Join-Path $dir "$($baseName)_Final.3mf"
+    $tempOut    = Join-Path $dir "$($baseName)_merged_temp.3mf"
+    $tempIso    = Join-Path $env:TEMP "iso_$([guid]::NewGuid().ToString().Substring(0,8))"
+    $slicedFile = Join-Path $dir "$($baseName).gcode.3mf"
+    $singleFile = Join-Path $dir "$($baseName)_Final.gcode.3mf"
+    $tsvFile    = Join-Path $dir "$($baseName)_Data.tsv"
+
+    if ($doMerge) {
+        # Merge writes to a temp file, then we rename: original -> _Nest, temp -> original
+        [void]$sb.AppendLine("& `"$scriptDir\merge_3mf_worker.ps1`" -WorkDir `"$($pJob.TempWork)`" -InputPath `"$anchorPath`" -OutputPath `"$tempOut`" -DoColors `"0`"")
+        [void]$sb.AppendLine("if (Test-Path `"$tempOut`") {")
+        [void]$sb.AppendLine("    if (Test-Path `"$nestPath`") { Remove-Item `"$nestPath`" -Force }")
+        [void]$sb.AppendLine("    Rename-Item -Path `"$anchorPath`" -NewName `"$($baseName)_Nest.3mf`" -Force")
+        [void]$sb.AppendLine("    Rename-Item -Path `"$tempOut`"    -NewName `"$($baseName).3mf`"      -Force")
+        [void]$sb.AppendLine("} else { Write-Host '[ERROR] Merge produced no output - aborting.' -ForegroundColor Red; Stop-Transcript; exit 1 }")
+
+        # Isolate the center object from the Nest file to create _Final.3mf
+        [void]$sb.AppendLine("New-Item -ItemType Directory -Path `"$tempIso`" -Force | Out-Null")
+        [void]$sb.AppendLine("[System.IO.Compression.ZipFile]::ExtractToDirectory(`"$nestPath`", `"$tempIso`")")
+        [void]$sb.AppendLine("& `"$scriptDir\isolate_final_worker.ps1`" -WorkDir `"$tempIso`" -OutputPath `"$finalPath`"")
+        [void]$sb.AppendLine("Remove-Item `"$tempIso`" -Recurse -Force -ErrorAction SilentlyContinue")
+    }
+
+    if ($doSlice) {
+        # Slice both the full merged file and the isolated final
+        [void]$sb.AppendLine("& `"$scriptDir\slicer_automation_worker.ps1`" -InputPath `"$anchorPath`" -IsolatedPath `"$finalPath`"")
+    } elseif ($doExtract -or $doImage) {
+        # Extract/Image only - still need the Final sliced for single-object stats
+        [void]$sb.AppendLine("if (Test-Path `"$finalPath`") {")
+        [void]$sb.AppendLine("    & `"$scriptDir\slicer_automation_worker.ps1`" -InputPath `"$finalPath`"")
+        [void]$sb.AppendLine("}")
+    }
+
+    if ($doExtract) {
+        $imageFlag = if ($doImage) { "-GenerateImage" } else { "" }
+        [void]$sb.AppendLine("& `"$scriptDir\Extract-3MFData.ps1`" -InputFile `"$slicedFile`" -SingleFile `"$singleFile`" -IndividualTsvPath `"$tsvFile`" $imageFlag")
+    }
+
+    [void]$sb.AppendLine("Remove-Item `"$($pJob.TempWork)`" -Recurse -Force -ErrorAction SilentlyContinue")
+    [void]$sb.AppendLine("Stop-Transcript")
+
+    Set-Content -Path $workerScript -Value $sb.ToString()
+    $script:activeProcess = Start-Process powershell.exe -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$workerScript`"" -PassThru -WindowStyle Hidden
 }
+
+# The Polling Engine
+$script:queueTimer = New-Object System.Windows.Forms.Timer
+$script:queueTimer.Interval = 500
+$script:queueTimer.Add_Tick({
+    if ($script:activeProcess -ne $null) {
+        if (-not $script:activeProcess.HasExited) {
+            # Polling Live Status
+            $wrapper = $script:activeProcessJob
+            $pJob = $wrapper.PJob
+            $statusFile = Join-Path $pJob.FolderPath "AsyncWorker_Status.txt"
+            if (Test-Path $statusFile) {
+                $statusText = Get-Content $statusFile -Raw -ErrorAction SilentlyContinue
+                if ($statusText) {
+                    $pJob.ProcessingOverlay.Text = "[ $($statusText.Trim()) ]"
+                    $pJob.PickProcessingOverlay.Text = "[ $($statusText.Trim()) ]"
+                }
+            }
+        } else {
+            # Finished Task Cleanup
+            $wrapper = $script:activeProcessJob
+            $pJob = $wrapper.PJob
+
+            $dir = $pJob.FolderPath
+            $baseName = [System.IO.Path]::GetFileNameWithoutExtension($pJob.ProcessedAnchorPath)
+            $gcodeFile = Join-Path $dir "$($baseName).gcode.3mf"
+
+            $tempExtract = Join-Path $env:TEMP "finalRead_$([guid]::NewGuid().ToString().Substring(0,8))"
+            New-Item -ItemType Directory -Path $tempExtract | Out-Null
+
+            if (Test-Path $gcodeFile) {
+                try {
+                    $zip = [System.IO.Compression.ZipFile]::OpenRead($gcodeFile)
+
+                    $plateEntry = $zip.Entries | Where-Object { ($_.FullName -replace "\\","/") -match "(?i)Metadata/plate_1\.png$" } | Select-Object -First 1
+                    if ($plateEntry) {
+                        $newPlate = Join-Path $tempExtract "plate_1.png"
+                        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($plateEntry, $newPlate, $true)
+                        $fs = New-Object System.IO.FileStream($newPlate, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
+                        if ($pJob.PbPlate.Image) { $pJob.PbPlate.Image.Dispose() }
+                        $pJob.PbPlate.Image = [System.Drawing.Image]::FromStream($fs)
+                        $fs.Close()
+                        $pJob.PbPlate.Tag.ImgPath = $newPlate
+                        $pJob.ImgStatusLbl.Text = "[COMPILED]"
+                        $pJob.ImgStatusLbl.ForeColor = clr "#4CAF72"
+                    }
+
+                    $pickEntry = $zip.Entries | Where-Object { ($_.FullName -replace "\\","/") -match "(?i)(^|/)pick_1\.png$" } | Select-Object -First 1
+                    if ($pickEntry) {
+                        $rawPickPath = Join-Path $tempExtract "pick_1_raw.png"
+                        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($pickEntry, $rawPickPath, $true)
+                        $newPick = Join-Path $tempExtract "pick_1.png"
+                        Invoke-RandomizePickColors $rawPickPath $newPick | Out-Null
+                        if (-not (Test-Path $newPick)) { $newPick = $rawPickPath }
+
+                        $fs = New-Object System.IO.FileStream($newPick, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
+                        if ($pJob.PbPick.Image) { $pJob.PbPick.Image.Dispose() }
+                        $pJob.PbPick.Image = [System.Drawing.Image]::FromStream($fs)
+                        $fs.Close()
+                        $pJob.PbPick.Tag.Path = $newPick
+
+                        foreach ($ctrl in $pJob.PickCard.Controls) {
+                            if ($ctrl -is [System.Windows.Forms.Label] -and $ctrl.Text -eq "[NO GCODE]") {
+                                $ctrl.Visible = $false
+                            }
+                        }
+                    }
+                    $zip.Dispose()
+                } catch {}
+            }
+
+            $pJob.ProcessingOverlay.Visible = $false
+            $pJob.PickProcessingOverlay.Visible = $false
+
+            $pJob.BtnApply.Text = "Finished"
+            $pJob.BtnApply.BackColor = clr "#333333"
+            $pJob.IsDone = $true
+
+            $script:activeProcess = $null
+            $script:activeProcessJob = $null
+        }
+    } else {
+        if ($script:processQueue.Count -gt 0) { Start-NextProcess }
+    }
+})
 
 # --- 7. Build Job Rows ---
 function Build-PJob($parentPath, $anchorFile, $gpJob) {
@@ -366,10 +679,9 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     New-Item -ItemType Directory -Path $tempWork | Out-Null
     [System.IO.Compression.ZipFile]::ExtractToDirectory($anchorFile.FullName, $tempWork)
 
-    $activeSlots = @()
+    $activeSlots = New-Object System.Collections.ArrayList
     $projPath   = Join-Path $tempWork "Metadata\project_settings.config"
     $modSetPath = Join-Path $tempWork "Metadata\model_settings.config"
-    $modelFile  = (Get-ChildItem -Path $tempWork -Filter '3dmodel.model' -Recurse | Select-Object -First 1)
 
     $SlotMap = [ordered]@{}
     if (Test-Path $projPath) {
@@ -400,29 +712,25 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             foreach ($m in $extMatches) { $UsedSlots.Add($m.Groups[1].Value) | Out-Null }
         }
     }
-    if ($modelFile -and (Test-Path $modelFile.FullName)) {
-        try {
-            $modelContent = [System.IO.File]::ReadAllText($modelFile.FullName)
-            $matMatches = [regex]::Matches($modelContent, '(?i)materialid="(\d+)"')
-            foreach ($m in $matMatches) { $UsedSlots.Add($m.Groups[1].Value) | Out-Null }
-        } catch {}
-    }
 
     foreach ($hex in $SlotMap.Keys) {
         $slotId = $SlotMap[$hex]
         if ($UsedSlots.Contains($slotId)) {
             $checkHex = if ($hex.Length -eq 7) { $hex + "FF" } else { $hex }
             $matchedName = if ($HexToName.Contains($checkHex)) { $HexToName[$checkHex] } else { "" }
-            $activeSlots += [PSCustomObject]@{ OldHex = $checkHex; Name = $matchedName; Grams = 0 }
+            $activeSlots.Add([PSCustomObject]@{ OldHex = $checkHex; Name = $matchedName; Grams = 0 }) | Out-Null
         }
     }
     if ($activeSlots.Count -gt 4) { $activeSlots = $activeSlots[0..3] }
 
     $pJob = @{
         FolderPath = $parentPath; AnchorFile = $anchorFile; TempWork = $tempWork
-        UISlots = [System.Collections.Generic.List[object]]::new()
-        FileRows = [System.Collections.Generic.List[object]]::new()
-        ScaleElements = [System.Collections.Generic.List[object]]::new()
+        ProcessedAnchorPath = ""
+        UISlots = New-Object System.Collections.ArrayList
+        FileRows = New-Object System.Collections.ArrayList
+        ScaleElements = New-Object System.Collections.ArrayList
+        IsDone = $false
+        IsQueued = $false
     }
 
     $rowPanel = New-Object System.Windows.Forms.Panel
@@ -445,6 +753,29 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $rowPanel.Controls.Add($pnlRight)
     $pJob.PnlRight = $pnlRight
 
+    # -- PROCESSING OVERLAYS --
+    $overlay = New-Object System.Windows.Forms.Label
+    $overlay.Text = "PROCESSING IN BACKGROUND..."
+    $overlay.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
+    $overlay.BackColor = [System.Drawing.Color]::FromArgb(220, 232, 161, 53)
+    $overlay.ForeColor = [System.Drawing.Color]::Black
+    $overlay.TextAlign = 'MiddleCenter'
+    $overlay.Dock = 'Fill'
+    $overlay.Visible = $false
+    $card.Controls.Add($overlay)
+    $pJob.ProcessingOverlay = $overlay
+
+    $pickOverlay = New-Object System.Windows.Forms.Label
+    $pickOverlay.Text = "PROCESSING IN BACKGROUND..."
+    $pickOverlay.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
+    $pickOverlay.BackColor = [System.Drawing.Color]::FromArgb(220, 232, 161, 53)
+    $pickOverlay.ForeColor = [System.Drawing.Color]::Black
+    $pickOverlay.TextAlign = 'MiddleCenter'
+    $pickOverlay.Dock = 'Fill'
+    $pickOverlay.Visible = $false
+    $pickCard.Controls.Add($pickOverlay)
+    $pJob.PickProcessingOverlay = $pickOverlay
+
     # --- Left Canvas: Plate Image Handling ---
     $localPng = Get-ChildItem -Path $parentPath -Filter "*.png" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     $isReplaced = $false
@@ -465,6 +796,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $pbModel.Add_DoubleClick({ $t = $this.Tag; Show-ImageViewer $t.ImgPath "Plate Preview" })
     }
     Add-ScaledElement $pJob $card $pbModel 10 80 250 360 0
+    $pJob.PbPlate = $pbModel
 
     $lblImgStatus = New-Object System.Windows.Forms.Label
     $lblImgStatus.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
@@ -500,6 +832,11 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             $p.ImgStatusLbl.Text = "[REPLACED]"; $p.ImgStatusLbl.ForeColor = clr "#4CAF72"
         }
     })
+
+    $lblThemeCard = New-Object System.Windows.Forms.Label
+    $lblThemeCard.BackColor = $cBG; $lblThemeCard.ForeColor = clr "#808080"; $lblThemeCard.TextAlign = 'TopRight'
+    Add-ScaledElement $pJob $card $lblThemeCard 320 50 180 18 10
+    $pJob.LblThemeCard = $lblThemeCard
 
     $lblAdjTitle = New-Object System.Windows.Forms.Label
     $lblAdjTitle.BackColor = $cBG; $lblAdjTitle.ForeColor = $cAccent; $lblAdjTitle.TextAlign = 'TopRight'
@@ -575,7 +912,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $lblGrams.Text = "$($slotData.Grams) g"; $lblGrams.ForeColor = $cGrayTxt; $lblGrams.TextAlign = 'TopRight'
         Add-ScaledElement $pJob $card $lblGrams ($boxX - 90) ($startY + 45) 80 25 10
 
-        $pJob.UISlots.Add([PSCustomObject]@{ OldHex = $slotData.OldHex; Combo = $combo })
+        $pJob.UISlots.Add([PSCustomObject]@{ OldHex = $slotData.OldHex; Combo = $combo }) | Out-Null
         $startY += $slotSpacing
     }
     $pbModel.SendToBack()
@@ -601,6 +938,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pbPick = New-Object System.Windows.Forms.PictureBox
     $pbPick.SizeMode = 'Zoom'; $pbPick.BackColor = clr "#0D0E10"
     Add-ScaledElement $pJob $pickCard $pbPick 0 0 512 512 0
+    $pJob.PbPick = $pbPick
 
     if ($pickPath -and (Test-Path $pickPath)) {
         $fs = New-Object System.IO.FileStream($pickPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
@@ -617,7 +955,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $lblNoPick.BringToFront()
     }
 
-    # --- Right Panel (Tasks, Rename Settings, File List) ---
+    # --- Right Panel ---
     $diParent = [System.IO.DirectoryInfo]::new($parentPath)
     $gpName = if ($gpJob.DiGrand) { $gpJob.DiGrand.Name } else { "" }
     $fills = SmartFill $anchorFile.Name $gpName
@@ -629,6 +967,20 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $lblFolder.ForeColor = $cText; $lblFolder.AutoSize = $true
     $lblFolder.Location = New-Object System.Drawing.Point(10, $y)
     $pnlRight.Controls.Add($lblFolder)
+
+    $btnRefreshP = New-Object System.Windows.Forms.Button
+    $btnRefreshP.Text = "Refresh"
+    $btnRefreshP.BackColor = clr "#2A2C35"; $btnRefreshP.ForeColor = clr "#FFFFFF"
+    $btnRefreshP.FlatStyle = 'Flat'; $btnRefreshP.FlatAppearance.BorderSize = 0
+    $btnRefreshP.Size = New-Object System.Drawing.Size(100, 25)
+    $btnRefreshP.Location = New-Object System.Drawing.Point(390, $y)
+    $pnlRight.Controls.Add($btnRefreshP)
+    $btnRefreshP.Tag = @{ P = $pJob; G = $gpJob }
+    $btnRefreshP.Add_Click({
+        $t = $this.Tag
+        Refresh-PJob $t.P $t.G
+    })
+    $pJob.BtnRefresh = $btnRefreshP
 
     $btnRemoveP = New-Object System.Windows.Forms.Button
     $btnRemoveP.Text = "Remove Folder"
@@ -716,7 +1068,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pJob.ChkMerge = $chkMerge; $pJob.ChkSlice = $chkSlice
     $pJob.ChkExtract = $chkExtract; $pJob.ChkImage = $chkImage
 
-    $tasksData = @{ Merge = $chkMerge; Slice = $chkSlice; Extract = $chkExtract; Image = $chkImage }
+    $tasksData = @{ Merge = $chkMerge; Slice = $chkSlice; Extract = $chkExtract; Image = $chkImage; PJob = $pJob }
     $chkSlice.Tag = $tasksData
     $chkSlice.Add_CheckedChanged({ if ($this.Checked) { $this.Tag.Extract.Checked = $true } })
     $chkImage.Tag = $tasksData
@@ -746,6 +1098,15 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $t = $this.Tag
         $t.Merge.Checked = $false; $t.Slice.Checked = $false; $t.Extract.Checked = $false; $t.Image.Checked = $false
         $t.Merge.Enabled = $false; $t.Slice.Enabled = $false; $t.Extract.Enabled = $false; $t.Image.Enabled = $false
+
+        $pj = $t.PJob
+        $batPath = Join-Path $scriptDir "RevertMerge.bat"
+        if (Test-Path $batPath) {
+            Start-Process -FilePath $batPath -ArgumentList "`"$($pj.ProcessedAnchorPath)`"" -WindowStyle Hidden -Wait
+            $pj.ImgStatusLbl.Text = "[REVERTED]"
+            $pj.ImgStatusLbl.ForeColor = clr "#D95F5F"
+            $pj.RowPanel.BackColor = clr "#2D1C1C"
+        }
     })
 
     $y += 85
@@ -809,7 +1170,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $lNew.Location = New-Object System.Drawing.Point(330, 15); $lNew.Size = New-Object System.Drawing.Size(260, 20)
         $fRow.Controls.Add($lNew)
 
-        $pJob.FileRows.Add([PSCustomObject]@{ OldPath = $fi.FullName; SuffixBox = $sBadge; NewLbl = $lNew; Ext = $parsed.Extension })
+        $pJob.FileRows.Add([PSCustomObject]@{ OldPath = $fi.FullName; SuffixBox = $sBadge; NewLbl = $lNew; Ext = $parsed.Extension }) | Out-Null
 
         $sBadge.Tag = @{ P = $pJob; G = $gpJob }
         $sBadge.Add_TextChanged({ $t = $this.Tag; Update-ParentPreview $t.P $t.G })
@@ -817,8 +1178,19 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $fy += 50
     }
 
-    # Auto-size the height of the files list based entirely on contents
     $pnlFiles.Size = New-Object System.Drawing.Size(620, $fy)
+
+    $btnApplyP = New-Object System.Windows.Forms.Button
+    $btnApplyP.Text = "Add to Queue"
+    $btnApplyP.BackColor = clr "#4CAF72"; $btnApplyP.ForeColor = clr "#FFFFFF"
+    $btnApplyP.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    $btnApplyP.FlatStyle = 'Flat'; $btnApplyP.FlatAppearance.BorderSize = 0
+    $btnApplyP.Size = New-Object System.Drawing.Size(150, 35)
+    $pnlRight.Controls.Add($btnApplyP)
+    $pJob.BtnApply = $btnApplyP
+
+    $btnApplyP.Tag = @{ P = $pJob; G = $gpJob }
+    $btnApplyP.Add_Click({ Enqueue-PJob $this.Tag.P $this.Tag.G })
 
     $tbChar.Tag = @{ P = $pJob; G = $gpJob }; $tbChar.Add_TextChanged({ $t = $this.Tag; Update-ParentPreview $t.P $t.G })
     $tbAdj.Tag = @{ P = $pJob; G = $gpJob };  $tbAdj.Add_TextChanged({ $t = $this.Tag; Update-ParentPreview $t.P $t.G })
@@ -833,10 +1205,9 @@ function Build-GpJob($gpPath, $parentDict) {
 
     $gpJob = @{
         GpPath = $gpPath; DiGrand = $diGrand
-        Parents = [System.Collections.Generic.List[object]]::new()
-        IsDone = $false
+        Parents = New-Object System.Collections.ArrayList
     }
-    $script:jobs.Add($gpJob)
+    $script:jobs.Add($gpJob) | Out-Null
 
     $container = New-Object System.Windows.Forms.Panel
     $container.BackColor = clr "#1C1D23"; $container.BorderStyle = 'FixedSingle'
@@ -878,6 +1249,7 @@ function Build-GpJob($gpPath, $parentDict) {
     $btnRemove.Anchor = [System.Windows.Forms.AnchorStyles]"Top, Right"
     $btnRemove.Location = New-Object System.Drawing.Point(1300, 15)
     $header.Controls.Add($btnRemove)
+    $gpJob.BtnRemove = $btnRemove
     $btnRemove.Tag = $gpJob
     $btnRemove.Add_Click({
         $j = $this.Tag
@@ -894,7 +1266,7 @@ function Build-GpJob($gpPath, $parentDict) {
 
     foreach ($pKey in $parentDict.Keys) {
         $pJob = Build-PJob $pKey $parentDict[$pKey] $gpJob
-        $gpJob.Parents.Add($pJob)
+        $gpJob.Parents.Add($pJob) | Out-Null
     }
 
     # Theme Sync Event
@@ -905,37 +1277,17 @@ function Build-GpJob($gpPath, $parentDict) {
             Update-ParentPreview $p $this.Tag
         }
     })
-
-    # Footer
-    $footer = New-Object System.Windows.Forms.Panel
-    $footer.BackColor = clr "#2A2C35"; $footer.Height = 60
-    $container.Controls.Add($footer)
-    $gpJob.Footer = $footer
-
-    $btnApply = New-Object System.Windows.Forms.Button
-    $btnApply.Text = "Apply & Save Group"
-    $btnApply.BackColor = clr "#4CAF72"; $btnApply.ForeColor = clr "#FFFFFF"
-    $btnApply.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-    $btnApply.FlatStyle = 'Flat'; $btnApply.FlatAppearance.BorderSize = 0
-    $btnApply.Size = New-Object System.Drawing.Size(200, 40)
-    $btnApply.Location = New-Object System.Drawing.Point(10, 10)
-    $footer.Controls.Add($btnApply)
-    $gpJob.BtnApply = $btnApply
-
-    $btnApply.Tag = $gpJob
-    $btnApply.Add_Click({ Apply-GpJob $this.Tag })
 }
 
 # --- 8. Dynamic Loading & Form Events ---
 $btnProcessAll.Add_Click({
-    $btnProcessAll.Text = "Processing Queue..."; $btnProcessAll.Enabled = $false
     foreach ($gpJob in $script:jobs) {
-        if (-not $gpJob.IsDone -and -not $gpJob.Container.IsDisposed) {
-            Apply-GpJob $gpJob
-            [System.Windows.Forms.Application]::DoEvents()
+        if (-not $gpJob.Container.IsDisposed) {
+            foreach ($pJob in $gpJob.Parents) {
+                Enqueue-PJob $pJob $gpJob
+            }
         }
     }
-    $btnProcessAll.Text = "All Items Processed!"
 })
 
 $form.Add_Shown({
@@ -951,6 +1303,7 @@ $form.Add_Shown({
     $btnProcessAll.Enabled = $true
     $form.ResumeLayout()
     $form.Width += 1
+    $script:queueTimer.Start()
 })
 
 $script:resizeTimer = New-Object System.Windows.Forms.Timer
@@ -977,15 +1330,12 @@ $script:resizeTimer.Add_Tick({
         if ($gpJob.Container.IsDisposed) { continue }
 
         $gpJob.Header.Width = $mainScroll.ClientSize.Width - 25
-        $gpJob.Footer.Width = $mainScroll.ClientSize.Width - 25
-        $gpJob.Footer.Controls[0].Left = $gpJob.Footer.Width - 220
-        $gpJob.Header.Controls[3].Left = $gpJob.Header.Width - 180
+        if ($gpJob.BtnRemove) { $gpJob.BtnRemove.Left = $gpJob.Header.Width - 180 }
 
         $pyOffset = 0
         foreach ($pJob in $gpJob.Parents) {
-            # Calculate necessary height for the right panel based purely on file count
             $pnlFilesHeight = $pJob.FileRows.Count * 50
-            $rightH = 215 + $pnlFilesHeight + 10 # 215 offsets all the textboxes above the file list
+            $rightH = 215 + $pnlFilesHeight + 60
             $rowH = [math]::Max(($sq + 20), $rightH)
 
             $pJob.RowPanel.Location = New-Object System.Drawing.Point(0, $pyOffset)
@@ -1001,7 +1351,9 @@ $script:resizeTimer.Add_Tick({
             $pJob.PnlRight.Size = New-Object System.Drawing.Size(640, $rightH)
             $pJob.PnlFiles.Size = New-Object System.Drawing.Size(620, $pnlFilesHeight)
 
+            if ($pJob.BtnRefresh) { $pJob.BtnRefresh.Left = 640 - 240 }
             if ($pJob.BtnRemove) { $pJob.BtnRemove.Left = 640 - 130 }
+            if ($pJob.BtnApply)  { $pJob.BtnApply.Location = New-Object System.Drawing.Point((640 - 160), ($rightH - 45)) }
 
             foreach ($item in $pJob.ScaleElements) {
                 $item.Ctrl.Location = New-Object System.Drawing.Point([int]($item.X * $scale), [int]($item.Y * $scale))
@@ -1021,9 +1373,7 @@ $script:resizeTimer.Add_Tick({
         $gpJob.ParentListPanel.Location = New-Object System.Drawing.Point(0, $gpJob.Header.Height)
         $gpJob.ParentListPanel.Size = New-Object System.Drawing.Size(($mainScroll.ClientSize.Width - 25), $pyOffset)
 
-        $gpJob.Footer.Location = New-Object System.Drawing.Point(0, ($gpJob.Header.Height + $gpJob.ParentListPanel.Height))
-
-        $gpContainerH = $gpJob.Header.Height + $gpJob.ParentListPanel.Height + $gpJob.Footer.Height
+        $gpContainerH = $gpJob.Header.Height + $gpJob.ParentListPanel.Height
         $gpJob.Container.Location = New-Object System.Drawing.Point(10, $yOffset)
         $gpJob.Container.Size = New-Object System.Drawing.Size(($mainScroll.ClientSize.Width - 25), $gpContainerH)
 
@@ -1038,6 +1388,10 @@ $script:resizeTimer.Add_Tick({
 $form.Add_Resize({ $script:resizeTimer.Stop(); $script:resizeTimer.Start() })
 
 $form.Add_FormClosed({
+    $script:queueTimer.Stop()
+    if ($script:activeProcess -ne $null -and -not $script:activeProcess.HasExited) {
+        Stop-Process -Id $script:activeProcess.Id -Force -ErrorAction SilentlyContinue
+    }
     foreach ($gpJob in $script:jobs) {
         foreach ($pJob in $gpJob.Parents) {
             if (Test-Path $pJob.TempWork) { Remove-Item $pJob.TempWork -Recurse -Force -ErrorAction SilentlyContinue }
