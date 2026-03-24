@@ -3,7 +3,7 @@ Set objFSO = CreateObject("Scripting.FileSystemObject")
 
 ' Get the exact folder where this VBScript lives
 strScriptFolder = objFSO.GetParentFolderName(WScript.ScriptFullName)
-strPs1 = objFSO.BuildPath(strScriptFolder, "Batch-Card-Editor.ps1")
+strPs1 = objFSO.BuildPath(strScriptFolder, "Card-Editor-Skeleton.ps1")
 
 ' Build the silent PowerShell command
 strCmd = "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -NoProfile -File """ & strPs1 & """"
