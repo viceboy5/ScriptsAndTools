@@ -7,11 +7,9 @@
 #
 # Settings applied to Metadata/project_settings.config:
 #
-#   filament_retraction_length  -> 0.8       (Direct Drive Standard slots only)
-#   filament_z_hop              -> 0.12      (Direct Drive Standard slots only)
-#   filament_z_hop_types        -> Slope Lift(Direct Drive Standard slots only)
-#   supertack_plate_temp        -> 50        (all filament slots)
-#   supertack_plate_temp_initial_layer -> 55 (all filament slots)
+#   additional_cooling_fan_speed -> 40  (auxiliary part cooling fan)
+#   fan_min_speed                -> 40  (minimum fan speed threshold)
+#   fan_max_speed                -> 60  (max fan speed threshold)
 #
 #   Also registers all of the above in different_settings_to_system
 #   so Bambu Studio recognises them as active overrides.
@@ -27,25 +25,20 @@ $ALLOWED_SUFFIXES = @("Final.3mf", "Full.3mf")
 
 # Keys that go in the filament 8-element array (Standard slots only = even indices)
 # Value = what to set at even indices; odd indices stay "nil"
-$FILAMENT_OVERRIDE_PATCHES = [ordered]@{
-    "filament_retraction_length" = "0.8"
-    "filament_z_hop"             = "0.12"
-    "filament_z_hop_types"       = "Slope Lift"
-}
+$FILAMENT_OVERRIDE_PATCHES = [ordered]@{}
 
 # Keys that use a simple 4-element array (one per filament, all slots set)
 $PLATE_TEMP_PATCHES = [ordered]@{
-    "supertack_plate_temp"               = "50"
-    "supertack_plate_temp_initial_layer" = "55"
+    "additional_cooling_fan_speed" = "40"
+    "fan_min_speed"                = "40"
+    "fan_max_speed"                = "60"
 }
 
 # All override keys that must be registered in different_settings_to_system
 $OVERRIDE_KEYS_TO_REGISTER = @(
-    "filament_retraction_length",
-    "filament_z_hop",
-    "filament_z_hop_types",
-    "supertack_plate_temp",
-    "supertack_plate_temp_initial_layer"
+    "additional_cooling_fan_speed",
+    "fan_min_speed",
+    "fan_max_speed"
 )
 
 # ------------------------------------------------------------
@@ -292,12 +285,9 @@ Write-Host ""
 Write-Host "Found $($targets.Count) matching file(s) to process."
 Write-Host ""
 Write-Host "Target settings:"
-Write-Host "  filament_retraction_length         -> 0.8       (Standard extruder slots)"
-Write-Host "  filament_z_hop                     -> 0.12      (Standard extruder slots)"
-Write-Host "  filament_z_hop_types               -> Slope Lift(Standard extruder slots)"
-Write-Host "  supertack_plate_temp               -> 50        (all filament slots)"
-Write-Host "  supertack_plate_temp_initial_layer -> 55        (all filament slots)"
-Write-Host "  different_settings_to_system       -> override keys registered per filament"
+Write-Host "  additional_cooling_fan_speed -> 40  (auxiliary part cooling fan)"
+Write-Host "  fan_min_speed                -> 40  (minimum fan speed threshold)"
+Write-Host "  fan_max_speed                -> 60  (max fan speed threshold)"
 
 $changed = 0
 foreach ($f in $targets) {
