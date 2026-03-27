@@ -270,6 +270,19 @@ function Update-ParentPreview($pJob, $gpJob) {
     $pJob.LblAdj.Text  = if ($ad) { "($ad)" } else { "" }
     if ($pJob.LblThemeCard) { $pJob.LblThemeCard.Text = $th }
 
+    # --- UPDATE FOLDER LABEL IN ui
+    $pParts = New-Object System.Collections.ArrayList
+    if ($ch) { $pParts.Add($ch) | Out-Null }
+    if ($ad) { $pParts.Add($ad) | Out-Null }
+    if ($th) { $pParts.Add($th) | Out-Null }
+
+    $projectedFolder = $pParts.ToArray() -join '_'
+    if ($projectedFolder -eq '') { $projectedFolder = Split-Path $pJob.FolderPath -Leaf }
+
+    if ($pJob.LblFolder) {
+        $pJob.LblFolder.Text = "Folder: $projectedFolder"
+    }
+
     $nameCounts = @{}
 
     foreach ($r in $pJob.FileRows) {
@@ -1556,6 +1569,7 @@ function Build-GpJob($gpPath, $parentDict) {
     $lblGP.ForeColor = $cAmber; $lblGP.AutoSize = $true
     $lblGP.Location = New-Object System.Drawing.Point(10, 20)
     $header.Controls.Add($lblGP)
+    $gpJob.LblGP = $lblGP
 
     $tbTheme = New-Object System.Windows.Forms.TextBox
     $tbTheme.Text = $gpName; $tbTheme.Font = New-Object System.Drawing.Font("Segoe UI", 10)
@@ -1603,7 +1617,7 @@ function Build-GpJob($gpPath, $parentDict) {
     $tbTheme.Tag = $gpJob
     $tbTheme.Add_TextChanged({
         foreach ($p in $this.Tag.Parents) {
-            if ($p.LblThVal) { $p.LblThVal.Text = $this.Text }
+            if ($p.LblThemeCard) { $p.LblThemeCard.Text = $this.Text }
             Update-ParentPreview $p $this.Tag
         }
     })
@@ -1661,6 +1675,15 @@ $script:resizeTimer.Add_Tick({
 
         $gpJob.Header.Width = $mainScroll.ClientSize.Width - 25
         if ($gpJob.BtnRemove) { $gpJob.BtnRemove.Left = $gpJob.Header.Width - 180 }
+
+        # --- NEW: PERFECT DYNAMIC SPACING ---
+        if ($gpJob.LblGP -and $gpJob.TBTheme) {
+            $tbX = $gpJob.LblGP.Right + 15
+            if ($tbX -lt 220) { $tbX = 220 }
+            $gpJob.TBTheme.Left = $tbX
+            if ($gpJob.ChkSkip) { $gpJob.ChkSkip.Left = $gpJob.TBTheme.Right + 20 }
+        }
+        # ------------------------------------
 
         $pyOffset = 0
         foreach ($pJob in $gpJob.Parents) {
