@@ -332,38 +332,29 @@ function Validate-PJob($pJob) {
 }
 
 function Update-ParentPreview($pJob, $gpJob) {
+    # 1. Read values from edit boxes (Preserve original casing)
     $ch = $pJob.TBChar.Text -replace '[^a-zA-Z0-9]', ''
     $ad = $pJob.TBAdj.Text -replace '[^a-zA-Z0-9]', ''
     $th = $gpJob.TBTheme.Text -replace '[^a-zA-Z0-9]', ''
 
-    $pJob.LblChar.Text = $ch
-    $pJob.LblAdj.Text  = if ($ad) { "($ad)" } else { "" }
-    if ($pJob.LblThemeCard) { $pJob.LblThemeCard.Text = $th }
+    # 2. Update component labels on the Card (Top Right, ALL CAPS)
+    $pJob.LblCharCard.Text = $ch.ToUpper()
+    $pJob.LblAdjCard.Text  = if ($ad) { "($($ad.ToUpper()))" } else { "" }
+    $pJob.LblThemeCard.Text = $th.ToUpper()
 
-    # --- UPDATE FOLDER LABEL IN ui
-    $pParts = New-Object System.Collections.ArrayList
-    if ($ch) { $pParts.Add($ch) | Out-Null }
-    if ($ad) { $pParts.Add($ad) | Out-Null }
-    if ($th) { $pParts.Add($th) | Out-Null }
+    # 3. Update the combined name label in the edit bar (Top Right)
+    $pJob.LblFolderName.Text = "$ch $ad".Trim()
 
-    $projectedFolder = $pParts.ToArray() -join '_'
-    if ($projectedFolder -eq '') { $projectedFolder = Split-Path $pJob.FolderPath -Leaf }
-
-    if ($pJob.LblFolder) {
-        $pJob.LblFolder.Text = "Folder: $projectedFolder"
-    }
-
+    # 4. Collision detection & Target Name building
     $nameCounts = @{}
-
     foreach ($r in $pJob.FileRows) {
         $sf = $r.SuffixBox.Text -replace '[^a-zA-Z0-9]', ''
         $parts = New-Object System.Collections.ArrayList
-        if ($ch) { $parts.Add($ch) | Out-Null }
-        if ($ad) { $parts.Add($ad) | Out-Null }
-        if ($th) { $parts.Add($th) | Out-Null }
-        if ($sf) { $parts.Add($sf) | Out-Null }
+        if ($ch) { [void]$parts.Add($ch) }
+        if ($ad) { [void]$parts.Add($ad) }
+        if ($th) { [void]$parts.Add($th) }
+        if ($sf) { [void]$parts.Add($sf) }
         $r.TargetName = ($parts.ToArray() -join '_') + $r.Ext
-
         if (-not $nameCounts.ContainsKey($r.TargetName)) { $nameCounts[$r.TargetName] = 0 }
         $nameCounts[$r.TargetName]++
     }
@@ -374,11 +365,8 @@ function Update-ParentPreview($pJob, $gpJob) {
         if ($nameCounts[$r.TargetName] -gt 1) {
             $r.NewLbl.ForeColor = clr "#D95F5F"
             $hasCollision = $true
-        } else {
-            $r.NewLbl.ForeColor = clr "#4CAF72"
-        }
+        } else { $r.NewLbl.ForeColor = clr "#4CAF72" }
     }
-
     $pJob.HasCollision = $hasCollision
     Validate-PJob $pJob
 }
@@ -479,41 +467,63 @@ function Refresh-PJob($pJob, $gpJob) {
     }
     # --------------------------------------------------
 
-    $gcodeFile = Get-ChildItem -Path $pJob.FolderPath -Filter "*Full.gcode.3mf" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    $plateImgPath = $null
-    $statusText = "[DEFAULT]"
-    $statusColor = $cAmber
+    $diParent = [System.IO.DirectoryInfo]::new($pJob.FolderPath)
+    $customPng = Get-ChildItem -Path $pJob.FolderPath -Filter "*.png" | Where-Object { $_.Name -notmatch "(?i)_slicePreview\.png" } | Select-Object -First 1
 
-    if ($pJob.CustomImagePath -and (Test-Path $pJob.CustomImagePath)) {
-        $plateImgPath = $pJob.CustomImagePath
-        $statusText = "[CUSTOM BASE]"
-        $statusColor = clr "#4CAF72"
-    } elseif ($gcodeFile) {
+    $gcodeFile = Get-ChildItem -Path $pJob.FolderPath -Filter "*Full.gcode.3mf" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+
+    # 1. Update [CURRENT] Thumbnail (Gcode Image)
+    $gcodeImgPath = $null
+    if ($gcodeFile) {
         $extractedGcodePlate = Join-Path $pJob.TempWork "plate_1_gcode.png"
         try {
             $zip = [System.IO.Compression.ZipFile]::OpenRead($gcodeFile.FullName)
             $entry = $zip.Entries | Where-Object { ($_.FullName -replace "\\","/") -match "(?i)Metadata/plate_1\.png$" } | Select-Object -First 1
             if ($entry) {
                 [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $extractedGcodePlate, $true)
-                $plateImgPath = $extractedGcodePlate
-                $statusText = "[COMPILED]"
-                $statusColor = clr "#4CAF72"
+                $gcodeImgPath = $extractedGcodePlate
             }
         } catch {} finally { if ($null -ne $zip) { $zip.Dispose() } }
     }
 
-    if (-not $plateImgPath -or -not (Test-Path $plateImgPath)) {
-        $plateImgPath = Join-Path $pJob.TempWork "Metadata\plate_1.png"
-        $statusText = "[DEFAULT]"
-        $statusColor = $cAmber
+    if ($gcodeImgPath -and (Test-Path $gcodeImgPath)) {
+        $fs = New-Object System.IO.FileStream($gcodeImgPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
+        if ($pJob.PbCurrent.Image) { $pJob.PbCurrent.Image.Dispose() }
+        $pJob.PbCurrent.Image = [System.Drawing.Image]::FromStream($fs)
+        $fs.Close()
+        $pJob.PbCurrent.Tag = @{ Path = $gcodeImgPath }
+        $pJob.PbCurrent.Visible = $true
+        $pJob.LblCurrent.Visible = $true
+    } else {
+        if ($pJob.PbCurrent.Image) { $pJob.PbCurrent.Image.Dispose(); $pJob.PbCurrent.Image = $null }
+        $pJob.PbCurrent.Visible = $false
+        $pJob.LblCurrent.Visible = $false
     }
 
-    if (Test-Path $plateImgPath) {
-        $fs = New-Object System.IO.FileStream($plateImgPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
+    # 2. Update Editable Sketched Area (Custom Base PNG)
+    $statusText = "[SKETCH]"
+    $statusColor = $cAmber
+
+    if ($pJob.CustomImagePath -and (Test-Path $pJob.CustomImagePath)) {
         if ($pJob.PbPlate.Image) { $pJob.PbPlate.Image.Dispose() }
+        $fs = New-Object System.IO.FileStream($pJob.CustomImagePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
         $pJob.PbPlate.Image = [System.Drawing.Image]::FromStream($fs)
         $fs.Close()
-        $pJob.PbPlate.Tag.ImgPath = $plateImgPath
+        $pJob.PbPlate.Tag.ImgPath = $pJob.CustomImagePath
+        $statusText = "[CUSTOM SKETCH]"
+        $statusColor = clr "#4CAF72"
+    } elseif ($customPng) {
+        if ($pJob.PbPlate.Image) { $pJob.PbPlate.Image.Dispose() }
+        $pJob.CustomImagePath = $customPng.FullName
+        $fs = New-Object System.IO.FileStream($pJob.CustomImagePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
+        $pJob.PbPlate.Image = [System.Drawing.Image]::FromStream($fs)
+        $fs.Close()
+        $pJob.PbPlate.Tag.ImgPath = $pJob.CustomImagePath
+        $statusText = "[CUSTOM SKETCH]"
+        $statusColor = clr "#4CAF72"
+    } else {
+        if ($pJob.PbPlate.Image) { $pJob.PbPlate.Image.Dispose(); $pJob.PbPlate.Image = $null }
+        $pJob.CustomImagePath = $null
     }
 
     $pJob.ImgStatusLbl.Text = $statusText
@@ -1164,17 +1174,35 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pickCard.Controls.Add($pickOverlay)
     $pJob.PickProcessingOverlay = $pickOverlay
 
+    # --- ADD THE NEW [CURRENT] THUMBNAIL UI (TOP LEFT) ---
+    $lblCurrent = New-Object System.Windows.Forms.Label
+    $lblCurrent.Text = "[CURRENT]"
+    $lblCurrent.ForeColor = $cAmber; $lblCurrent.BackColor = $cBG
+    $lblCurrent.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
+    $lblCurrent.TextAlign = 'TopLeft'
+    Add-ScaledElement $pJob $card $lblCurrent 10 10 110 15 8
+    $pJob.LblCurrent = $lblCurrent
+
+    $pbCurrent = New-Object System.Windows.Forms.PictureBox
+    $pbCurrent.SizeMode = 'Zoom'; $pbCurrent.BackColor = clr "#0D0E10"
+    $pbCurrent.BorderStyle = 'FixedSingle'; $pbCurrent.Cursor = 'Hand'
+    Add-ScaledElement $pJob $card $pbCurrent 10 25 110 110 0
+    $pJob.PbCurrent = $pbCurrent
+    $pbCurrent.Add_DoubleClick({ $t = $this.Tag; if ($t.Path -and (Test-Path $t.Path)) { Show-ImageViewer $t.Path "Current Compiled Image" } })
+    # -----------------------------------------------------
+
     $pbPlateFinished = New-Object System.Windows.Forms.PictureBox
-    $pbPlateFinished.SizeMode = 'Zoom'
-    $pbPlateFinished.BackColor = $cBG
-    $pbPlateFinished.Visible = $false
+    $pbPlateFinished.SizeMode = 'Zoom'; $pbPlateFinished.BackColor = $cBG; $pbPlateFinished.Visible = $false
     Add-ScaledElement $pJob $card $pbPlateFinished 0 0 512 512 0
     $pJob.PbPlateFinished = $pbPlateFinished
-    $pbPlateFinished.Add_DoubleClick({ $t = $this.Tag; Show-ImageViewer $t.ImgPath "Final Card Preview" })
+    $pbPlateFinished.Add_DoubleClick({ $t = $this.Tag; if ($t.ImgPath -and (Test-Path $t.ImgPath)) { Show-ImageViewer $t.ImgPath "Final Card Preview" } })
 
+    # --- EXTRACT AND LOAD IMAGES ---
+    $diParent = [System.IO.DirectoryInfo]::new($parentPath)
+    $customPng = Get-ChildItem -Path $parentPath -Filter "*.png" | Where-Object { $_.Name -notmatch "(?i)_slicePreview\.png" } | Select-Object -First 1
     $gcodeFile = Get-ChildItem -Path $parentPath -Filter "*Full.gcode.3mf" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 
-    # 1. Load Current Gcode Image (For Thumbnail)
+    # 1. Update [CURRENT] Thumbnail (Gcode Image)
     $gcodeImgPath = $null
     if ($gcodeFile) {
         $extractedGcodePlate = Join-Path $tempWork "plate_1_gcode.png"
@@ -1188,36 +1216,45 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         } catch {} finally { if ($null -ne $zip) { $zip.Dispose() } }
     }
 
-    # 2. Load Base Source Image (For Main Editable Area)
-    $baseImgPath = $null
-    $statusText = "[DEFAULT 3D]"
-    $statusColor = $cAmber
-
-    $customPng = Get-ChildItem -Path $parentPath -Filter "*.png" | Where-Object { $_.Name -notmatch "(?i)_slicePreview\.png" } | Select-Object -First 1
-    if ($pJob.CustomImagePath -and (Test-Path $pJob.CustomImagePath)) {
-        $baseImgPath = $pJob.CustomImagePath
-        $statusText = "[CUSTOM BASE]"
-        $statusColor = clr "#4CAF72"
-    } elseif ($customPng) {
-        $baseImgPath = $customPng.FullName
-        $pJob.CustomImagePath = $baseImgPath
-        $statusText = "[CUSTOM BASE]"
-        $statusColor = clr "#4CAF72"
+    if ($gcodeImgPath -and (Test-Path $gcodeImgPath)) {
+        $fs = New-Object System.IO.FileStream($gcodeImgPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
+        $pbCurrent.Image = [System.Drawing.Image]::FromStream($fs)
+        $fs.Close()
+        $pbCurrent.Tag = @{ Path = $gcodeImgPath }
+        $pbCurrent.Visible = $true
+        $lblCurrent.Visible = $true
     } else {
-        $baseImgPath = Join-Path $tempWork "Metadata\plate_1.png"
+        $pbCurrent.Visible = $false
+        $lblCurrent.Visible = $false
     }
+
+    # 2. Update Editable Sketched Area (Custom Base PNG or Default)
+    $statusText = "[SKETCH]"
+    $statusColor = $cAmber
 
     $pbModel = New-Object System.Windows.Forms.PictureBox
     $pbModel.SizeMode = 'Zoom'; $pbModel.BackColor = $cBG; $pbModel.AllowDrop = $true
-    if (Test-Path $baseImgPath) {
-        $fs = New-Object System.IO.FileStream($baseImgPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
-        $pbModel.Image = [System.Drawing.Image]::FromStream($fs)
-        $fs.Close()
-        $pbModel.Tag = @{ P = $pJob; ImgPath = $baseImgPath }
-        $pbModel.Add_DoubleClick({ $t = $this.Tag; Show-ImageViewer $t.ImgPath "Base Plate Preview" })
-    }
     Add-ScaledElement $pJob $card $pbModel 10 80 250 360 0
     $pJob.PbPlate = $pbModel
+
+    if ($customPng) {
+        $pJob.CustomImagePath = $customPng.FullName
+        $fs = New-Object System.IO.FileStream($pJob.CustomImagePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
+        $pbModel.Image = [System.Drawing.Image]::FromStream($fs)
+        $fs.Close()
+        $pbModel.Tag = @{ P = $pJob; ImgPath = $pJob.CustomImagePath }
+        $statusText = "[CUSTOM SKETCH]"
+        $statusColor = clr "#4CAF72"
+    } else {
+        $baseImgPath = Join-Path $tempWork "Metadata\plate_1.png"
+        if (Test-Path $baseImgPath) {
+            $fs = New-Object System.IO.FileStream($baseImgPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
+            $pbModel.Image = [System.Drawing.Image]::FromStream($fs)
+            $fs.Close()
+            $pbModel.Tag = @{ P = $pJob; ImgPath = $baseImgPath }
+        }
+    }
+    $pbModel.Add_DoubleClick({ $t = $this.Tag; if ($t.ImgPath -and (Test-Path $t.ImgPath)) { Show-ImageViewer $t.ImgPath "Plate Preview" } })
 
     $lblImgStatus = New-Object System.Windows.Forms.Label
     $lblImgStatus.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
@@ -1226,34 +1263,6 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $lblImgStatus.ForeColor = $statusColor
     Add-ScaledElement $pJob $card $lblImgStatus 15 85 100 15 8
     $pJob.ImgStatusLbl = $lblImgStatus
-
-    # --- ADD THE [CURRENT] THUMBNAIL UI ---
-    $lblCurrent = New-Object System.Windows.Forms.Label
-    $lblCurrent.Text = "[CURRENT]"
-    $lblCurrent.ForeColor = $cAmber; $lblCurrent.BackColor = $cBG
-    $lblCurrent.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
-    $lblCurrent.TextAlign = 'BottomRight'
-    Add-ScaledElement $pJob $card $lblCurrent 382 367 120 15 8
-    $pJob.LblCurrent = $lblCurrent
-
-    $pbCurrent = New-Object System.Windows.Forms.PictureBox
-    $pbCurrent.SizeMode = 'Zoom'; $pbCurrent.BackColor = clr "#0D0E10"
-    $pbCurrent.BorderStyle = 'FixedSingle'; $pbCurrent.Cursor = 'Hand'
-    if ($gcodeImgPath -and (Test-Path $gcodeImgPath)) {
-        $fs = New-Object System.IO.FileStream($gcodeImgPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
-        $pbCurrent.Image = [System.Drawing.Image]::FromStream($fs)
-        $fs.Close()
-        $pbCurrent.Tag = @{ ImgPath = $gcodeImgPath }
-        $pbCurrent.Add_DoubleClick({ $t = $this.Tag; Show-ImageViewer $t.ImgPath "Current Compiled Image" })
-    } else {
-        $lblCurrent.Visible = $false
-        $pbCurrent.Visible = $false
-    }
-    Add-ScaledElement $pJob $card $pbCurrent 382 382 120 120 0
-    $pJob.PbCurrent = $pbCurrent
-    $pbCurrent.BringToFront()
-    $lblCurrent.BringToFront()
-    # --------------------------------------
 
     $pbModel.Add_DragEnter({
         param($s, $e)
@@ -1286,15 +1295,20 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     Add-ScaledElement $pJob $card $lblThemeCard 320 50 180 18 10
     $pJob.LblThemeCard = $lblThemeCard
 
-    $lblAdjTitle = New-Object System.Windows.Forms.Label
-    $lblAdjTitle.BackColor = $cBG; $lblAdjTitle.ForeColor = $cAccent; $lblAdjTitle.TextAlign = 'TopRight'
-    Add-ScaledElement $pJob $card $lblAdjTitle 320 15 180 40 18
-    $pJob.LblAdj = $lblAdjTitle
+    $lblCharCard = New-Object System.Windows.Forms.Label
+    $lblCharCard.BackColor = $cBG; $lblCharCard.ForeColor = $cAccent; $lblCharCard.TextAlign = 'TopRight'
+    Add-ScaledElement $pJob $card $lblCharCard 320 15 180 40 18
+    $pJob.LblCharCard = $lblCharCard
 
-    $lblCharTitle = New-Object System.Windows.Forms.Label
-    $lblCharTitle.BackColor = $cBG; $lblCharTitle.ForeColor = $cText; $lblCharTitle.TextAlign = 'TopRight'
-    Add-ScaledElement $pJob $card $lblCharTitle 60 15 250 40 18
-    $pJob.LblChar = $lblCharTitle
+    $lblAdjCard = New-Object System.Windows.Forms.Label
+    $lblAdjCard.BackColor = $cBG; $lblAdjCard.ForeColor = $cText; $lblAdjCard.TextAlign = 'TopRight'
+    Add-ScaledElement $pJob $card $lblAdjCard 60 15 250 40 18
+    $pJob.LblAdjCard = $lblAdjCard
+
+    $lblThemeCard = New-Object System.Windows.Forms.Label
+    $lblThemeCard.BackColor = $cBG; $lblThemeCard.ForeColor = clr "#808080"; $lblThemeCard.TextAlign = 'TopRight'
+    Add-ScaledElement $pJob $card $lblThemeCard 320 50 180 18 10
+    $pJob.LblThemeCard = $lblThemeCard
 
     $lblSkipTime = New-Object System.Windows.Forms.Label
     $lblSkipTime.Text = "Skip Time: 18 min"
