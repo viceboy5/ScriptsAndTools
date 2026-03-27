@@ -92,41 +92,53 @@ public static class SearchAssemblies {
 '@
 
 # --- THE MISSING LOGIC BLOCK ---
+# --- THE POST-MERGE COLOR MAPPING BLOCK ---
 try {
     Add-Type -TypeDefinition @'
     using System;
     using System.Drawing;
     using System.Collections.Generic;
 
+    public class ColorAnchor {
+        public Point Pt;
+        public Color PostColor;
+    }
+
     public class FastMergeMap {
-        public static Dictionary<string, List<Point>> GetPoints(Bitmap pre, Bitmap post) {
-            var samples = new Dictionary<int, Point>();
+        public static List<ColorAnchor> GetPostColoredAnchors(Bitmap pre, Bitmap post) {
+            var anchors = new Dictionary<int, Point>();
             int w = pre.Width; int h = pre.Height;
+
+            // 1. Find the first occurrence of every color in the PRE-merge image
             for (int y = 0; y < h; y++) {
                 for (int x = 0; x < w; x++) {
                     Color c = pre.GetPixel(x, y);
                     if (c.A < 255 || (c.R < 10 && c.G < 10 && c.B < 10)) continue;
+
                     int argb = c.ToArgb();
-                    if (!samples.ContainsKey(argb)) { samples[argb] = new Point(x, y); }
+                    if (!anchors.ContainsKey(argb)) {
+                        anchors[argb] = new Point(x, y);
+                    }
                 }
             }
-            var groups = new Dictionary<string, List<Point>>();
-            foreach (Point pt in samples.Values) {
-                Color postC = post.GetPixel(pt.X, pt.Y);
-                if (postC.A < 255 || (postC.R < 10 && postC.G < 10 && postC.B < 10)) continue;
-                string key = string.Format("{0},{1},{2}", postC.R, postC.G, postC.B);
-                if (!groups.ContainsKey(key)) groups[key] = new List<Point>();
-                groups[key].Add(pt);
+
+            // 2. Sample the colors at those exact coordinates from the POST-merge image
+            var results = new List<ColorAnchor>();
+            foreach (var pt in anchors.Values) {
+                // Bounds check to prevent crashes if images are different sizes
+                if (pt.X < post.Width && pt.Y < post.Height) {
+                    results.Add(new ColorAnchor {
+                        Pt = pt,
+                        PostColor = post.GetPixel(pt.X, pt.Y)
+                    });
+                }
             }
-            return groups;
+            return results;
         }
     }
-'@ -ReferencedAssemblies "System.Drawing", "System.Windows.Forms"
+'@ -ReferencedAssemblies "System.Drawing"
 } catch {
-    # If it's already loaded, we ignore the error
-    if ($_.Exception.Message -notmatch "already exists") {
-        Write-Error "C# Compilation Failed: $($_.Exception.Message)"
-    }
+    if ($_.Exception.Message -notmatch "already exists") { Write-Error $_.Exception.Message }
 }
 
 function ParseFile([string]$filename) {
@@ -169,34 +181,29 @@ function Get-ImageBasedMergeMap {
         $bmpPre = New-Object System.Drawing.Bitmap($preMergePath)
         $bmpPost = New-Object System.Drawing.Bitmap($postMergePath)
 
-        # 1. Get the mapping data from the C# class
-        $groups = [FastMergeMap]::GetPoints($bmpPre, $bmpPost)
+        # 1. Get the list of anchors and their post-merge colors
+        $anchors = [FastMergeMap]::GetPostColoredAnchors($bmpPre, $bmpPost)
 
-        # 2. Setup the Graphics "Painter"
+        # 2. Setup the "Painter" to draw on top of the Post-Merge image
         $g = [System.Drawing.Graphics]::FromImage($bmpPost)
-        $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::Magenta, 2)
 
-        # 3. Draw crosshairs ONLY
-        foreach ($key in $groups.Keys) {
-            $pointsList = $groups[$key]
+        # 3. Draw each crosshair using the color found in the Post-Merge image
+        foreach ($a in $anchors) {
+            # Use the color sampled from the post-merge image
+            $pen = New-Object System.Drawing.Pen($a.PostColor, 2)
 
-            foreach ($pt in $pointsList) {
-                # Draw the horizontal line of the crosshair
-                $g.DrawLine($pen, ($pt.X - 5), $pt.Y, ($pt.X + 5), $pt.Y)
-                # Draw the vertical line of the crosshair
-                $g.DrawLine($pen, $pt.X, ($pt.Y - 5), $pt.X, ($pt.Y + 5))
-            }
-            # TEXT DRAWING REMOVED FROM THIS SECTION
+            $g.DrawLine($pen, ($a.Pt.X - 8), $a.Pt.Y, ($a.Pt.X + 8), $a.Pt.Y)
+            $g.DrawLine($pen, $a.Pt.X, ($a.Pt.Y - 8), $a.Pt.X, ($a.Pt.Y + 8))
+
+            $pen.Dispose()
         }
 
-        # Clean up resources
+        # Clean up
         $g.Dispose()
-        $pen.Dispose()
         $bmpPre.Dispose()
 
         return $bmpPost
     } catch {
-        [System.Windows.Forms.MessageBox]::Show("Draw Error: $($_.Exception.Message)")
         return $null
     }
 }
@@ -1551,67 +1558,29 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $pbPick.Add_DoubleClick({
     $t = $this.Tag
     try {
-        if (-not $t.Path -or -not (Test-Path $t.Path)) {
-            [System.Windows.Forms.MessageBox]::Show("Step 0 Fail: Post-merge image path invalid: $($t.Path)")
-            return
-        }
-
         [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
 
-        # 1. Resolve candidate paths
+        # 1. Extract Pre-Merge source (Nest or Full)
         $dir = Split-Path $t.Original3mf -Parent
         $base = (Split-Path $t.Original3mf -Leaf) -replace '(?i)_?Full\.gcode\.3mf$|_?Full\.3mf$', ''
-        $candidates = @(
-            (Join-Path $dir "${base}Nest.3mf"),
-            (Get-ChildItem -Path $dir -Filter "*Full.gcode.3mf" | Select-Object -ExpandProperty FullName -First 1)
-        )
+        $nestFile = Join-Path $dir "${base}Nest.3mf"
+        $source3mf = if (Test-Path $nestFile) { $nestFile } else { $t.Original3mf }
 
-        # 2. Try to extract
-        $preMergePickPath = Join-Path $env:TEMP "debug_sample_$([guid]::NewGuid().ToString().Substring(0,8)).png"
-        $foundSource = $false
-        foreach ($c in $candidates) {
-            if ($c -and (Test-Path $c)) {
-                try {
-                    $zip = [System.IO.Compression.ZipFile]::OpenRead($c)
-                    # Look for pick_1.png with case-insensitivity and normalize slashes
-                    $pickEntry = $zip.Entries | Where-Object { ($_.FullName -replace "\\","/") -match "pick_1\.png$" } | Select-Object -First 1
-                    if ($pickEntry) {
-                        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($pickEntry, $preMergePickPath, $true)
-                        $foundSource = $true
-                        $zip.Dispose(); break
-                    }
-                    $zip.Dispose()
-                } catch {
-                    [System.Windows.Forms.MessageBox]::Show("Step 2 Error extracting from $c : $($_.Exception.Message)")
-                }
-            }
-        }
+        $preMergePath = Join-Path $env:TEMP "pre_verify_$([guid]::NewGuid().ToString().Substring(0,8)).png"
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($source3mf)
+        $pickEntry = $zip.Entries | Where-Object { ($_.FullName -replace "\\","/") -match "pick_1\.png$" } | Select-Object -First 1
+        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($pickEntry, $preMergePath, $true)
+        $zip.Dispose()
 
-        if (-not $foundSource) {
-            [System.Windows.Forms.MessageBox]::Show("Step 3 Fail: Could not find pick_1.png in Nest or Full.gcode candidates.")
-            [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
-            return
-        }
+        # 2. The Post-Merge path is already in the PictureBox Tag
+        $postMergePath = $t.Path
 
-        # 4. Map the images
-        [System.Windows.Forms.MessageBox]::Show("Step 4: Found Pre-Merge image. Starting Pixel Map...")
-
-        # Check if the class is loaded using standard .NET instead of [SearchAssemblies]
-        $isLoaded = [AppDomain]::CurrentDomain.GetAssemblies() | ForEach-Object { $_.GetTypes() } | Where-Object { $_.Name -eq "FastMergeMap" }
-
-        if (-not $isLoaded) {
-            [System.Windows.Forms.MessageBox]::Show("CRITICAL ERROR: FastMergeMap class is not loaded in memory. Please restart PowerShell.")
-            return
-        }
-
-        $annotatedBmp = Get-ImageBasedMergeMap -preMergePath $preMergePickPath -postMergePath $t.Path
-
-        # 5. Final Display
-        [System.Windows.Forms.MessageBox]::Show("Step 6: Processing Complete. Opening Viewer...")
-        Show-ImageViewerObj -imageObj $annotatedBmp -title "Verified Merge Pairs"
+        # 3. Generate the verification image
+        $annotatedBmp = Get-ImageBasedMergeMap -preMergePath $preMergePath -postMergePath $postMergePath
+        Show-ImageViewerObj -imageObj $annotatedBmp -title "Merged RGB Verification Overlay"
 
     } catch {
-        [System.Windows.Forms.MessageBox]::Show("CRITICAL EVENT ERROR: $($_.Exception.Message)`n`nStack: $($_.ScriptStackTrace)")
+        [System.Windows.Forms.MessageBox]::Show("Error: $($_.Exception.Message)")
     } finally {
         [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
     }
