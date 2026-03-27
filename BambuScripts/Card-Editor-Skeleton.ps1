@@ -1174,10 +1174,8 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
     $gcodeFile = Get-ChildItem -Path $parentPath -Filter "*Full.gcode.3mf" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 
-    $plateImgPath = $null
-    $statusText = "[DEFAULT]"
-    $statusColor = $cAmber
-
+    # 1. Load Current Gcode Image (For Thumbnail)
+    $gcodeImgPath = $null
     if ($gcodeFile) {
         $extractedGcodePlate = Join-Path $tempWork "plate_1_gcode.png"
         try {
@@ -1185,27 +1183,38 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             $entry = $zip.Entries | Where-Object { ($_.FullName -replace "\\","/") -match "(?i)Metadata/plate_1\.png$" } | Select-Object -First 1
             if ($entry) {
                 [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $extractedGcodePlate, $true)
-                $plateImgPath = $extractedGcodePlate
-                $statusText = "[COMPILED]"
-                $statusColor = clr "#4CAF72"
+                $gcodeImgPath = $extractedGcodePlate
             }
         } catch {} finally { if ($null -ne $zip) { $zip.Dispose() } }
     }
 
-    if (-not $plateImgPath -or -not (Test-Path $plateImgPath)) {
-        $plateImgPath = Join-Path $tempWork "Metadata\plate_1.png"
-        $statusText = "[DEFAULT]"
-        $statusColor = $cAmber
+    # 2. Load Base Source Image (For Main Editable Area)
+    $baseImgPath = $null
+    $statusText = "[DEFAULT 3D]"
+    $statusColor = $cAmber
+
+    $customPng = Get-ChildItem -Path $parentPath -Filter "*.png" | Where-Object { $_.Name -notmatch "(?i)_slicePreview\.png" } | Select-Object -First 1
+    if ($pJob.CustomImagePath -and (Test-Path $pJob.CustomImagePath)) {
+        $baseImgPath = $pJob.CustomImagePath
+        $statusText = "[CUSTOM BASE]"
+        $statusColor = clr "#4CAF72"
+    } elseif ($customPng) {
+        $baseImgPath = $customPng.FullName
+        $pJob.CustomImagePath = $baseImgPath
+        $statusText = "[CUSTOM BASE]"
+        $statusColor = clr "#4CAF72"
+    } else {
+        $baseImgPath = Join-Path $tempWork "Metadata\plate_1.png"
     }
 
     $pbModel = New-Object System.Windows.Forms.PictureBox
     $pbModel.SizeMode = 'Zoom'; $pbModel.BackColor = $cBG; $pbModel.AllowDrop = $true
-    if (Test-Path $plateImgPath) {
-        $fs = New-Object System.IO.FileStream($plateImgPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
+    if (Test-Path $baseImgPath) {
+        $fs = New-Object System.IO.FileStream($baseImgPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
         $pbModel.Image = [System.Drawing.Image]::FromStream($fs)
         $fs.Close()
-        $pbModel.Tag = @{ P = $pJob; ImgPath = $plateImgPath }
-        $pbModel.Add_DoubleClick({ $t = $this.Tag; Show-ImageViewer $t.ImgPath "Plate Preview" })
+        $pbModel.Tag = @{ P = $pJob; ImgPath = $baseImgPath }
+        $pbModel.Add_DoubleClick({ $t = $this.Tag; Show-ImageViewer $t.ImgPath "Base Plate Preview" })
     }
     Add-ScaledElement $pJob $card $pbModel 10 80 250 360 0
     $pJob.PbPlate = $pbModel
@@ -1217,6 +1226,34 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $lblImgStatus.ForeColor = $statusColor
     Add-ScaledElement $pJob $card $lblImgStatus 15 85 100 15 8
     $pJob.ImgStatusLbl = $lblImgStatus
+
+    # --- ADD THE [CURRENT] THUMBNAIL UI ---
+    $lblCurrent = New-Object System.Windows.Forms.Label
+    $lblCurrent.Text = "[CURRENT]"
+    $lblCurrent.ForeColor = $cAmber; $lblCurrent.BackColor = $cBG
+    $lblCurrent.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
+    $lblCurrent.TextAlign = 'BottomRight'
+    Add-ScaledElement $pJob $card $lblCurrent 382 367 120 15 8
+    $pJob.LblCurrent = $lblCurrent
+
+    $pbCurrent = New-Object System.Windows.Forms.PictureBox
+    $pbCurrent.SizeMode = 'Zoom'; $pbCurrent.BackColor = clr "#0D0E10"
+    $pbCurrent.BorderStyle = 'FixedSingle'; $pbCurrent.Cursor = 'Hand'
+    if ($gcodeImgPath -and (Test-Path $gcodeImgPath)) {
+        $fs = New-Object System.IO.FileStream($gcodeImgPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
+        $pbCurrent.Image = [System.Drawing.Image]::FromStream($fs)
+        $fs.Close()
+        $pbCurrent.Tag = @{ ImgPath = $gcodeImgPath }
+        $pbCurrent.Add_DoubleClick({ $t = $this.Tag; Show-ImageViewer $t.ImgPath "Current Compiled Image" })
+    } else {
+        $lblCurrent.Visible = $false
+        $pbCurrent.Visible = $false
+    }
+    Add-ScaledElement $pJob $card $pbCurrent 382 382 120 120 0
+    $pJob.PbCurrent = $pbCurrent
+    $pbCurrent.BringToFront()
+    $lblCurrent.BringToFront()
+    # --------------------------------------
 
     $pbModel.Add_DragEnter({
         param($s, $e)
@@ -1484,8 +1521,18 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $chkImage.Tag = $tasksData
     $chkImage.Add_CheckedChanged({
         if ($this.Checked) {
-            $this.Tag.Extract.Checked = $true
-            $this.Tag.Slice.Checked = $true
+            $t = $this.Tag
+            $pj = $t.PJob
+
+            # Check if any TSV data file already exists in this folder
+            $tsvExists = (Get-ChildItem -Path $pj.FolderPath -Filter "*_Data.tsv" -ErrorAction SilentlyContinue).Count -gt 0
+
+            $t.Extract.Checked = $true
+
+            # Only force a slice if we don't have a TSV to read from!
+            if (-not $tsvExists) {
+                $t.Slice.Checked = $true
+            }
         }
     })
 
