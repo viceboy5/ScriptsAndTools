@@ -370,12 +370,31 @@ function Refresh-PJob($pJob, $gpJob) {
     $pJob.ProcessingOverlay.Visible = $false
     $pJob.PickProcessingOverlay.Visible = $false
 
+    # --- 1. RESET ANCHOR FILE TRACKING FIRST ---
+    $pJob.ProcessedAnchorPath = ""
+    $newAnchor = Get-ChildItem -Path $pJob.FolderPath -File | Where-Object { $_.Name -match '(?i)Full\.3mf$' -and $_.Name -notmatch '(?i)\.gcode\.3mf$' } | Select-Object -First 1
+    if ($newAnchor) { $pJob.AnchorFile = $newAnchor }
+
     if ($pJob.PbPlateFinished) {
         if ($pJob.PbPlateFinished.Image) { $pJob.PbPlateFinished.Image.Dispose(); $pJob.PbPlateFinished.Image = $null }
         $pJob.PbPlateFinished.Visible = $false
     }
 
-    if (-not (Test-Path $pJob.TempWork)) { New-Item -ItemType Directory -Path $pJob.TempWork -Force | Out-Null }
+    # --- 2. RE-EXTRACT METADATA TO FIX INSTANT FAIL ---
+    if (Test-Path $pJob.TempWork) {
+        Remove-Item $pJob.TempWork -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    # Do NOT use New-Item here! Let the ZipFile class create the folder itself to prevent .NET crashes.
+    try {
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($pJob.AnchorFile.FullName, $pJob.TempWork)
+    } catch {}
+
+    # Keep the UI Folder Label perfectly in sync!
+    if ($pJob.LblFolder) {
+        $pJob.LblFolder.Text = "Folder: " + (Split-Path $pJob.FolderPath -Leaf)
+    }
+    # --------------------------------------------------
 
     $gcodeFile = Get-ChildItem -Path $pJob.FolderPath -Filter "*Full.gcode.3mf" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     $plateImgPath = $null
@@ -478,6 +497,13 @@ function Refresh-PJob($pJob, $gpJob) {
     $pJob.ChkExtract.Enabled = $true
     $pJob.ChkImage.Enabled = $true
 
+    # --- ADD THESE 4 LINES TO RESTORE TASK STATE ---
+    $pJob.ChkMerge.Checked = $true
+    $pJob.ChkSlice.Checked = $true
+    $pJob.ChkExtract.Checked = $true
+    $pJob.ChkImage.Checked = $true
+    # -----------------------------------------------
+
     $script:resizeTimer.Start()
 }
 
@@ -566,10 +592,14 @@ function Start-NextProcess {
 
     $anchorTargetName = ""
     $anchorFileRow    = $null
+    $currentAnchorLocation = $pJob.AnchorFile.FullName # Fallback
+
     foreach ($r in $pJob.FileRows) {
-        if ($r.OldPath -eq $pJob.AnchorFile.FullName) {
+        # Match by name instead of full path, since parent folders might have been renamed by previous jobs
+        if ((Split-Path $r.OldPath -Leaf) -eq $pJob.AnchorFile.Name) {
             $anchorTargetName = $r.NewLbl.Text
             $anchorFileRow    = $r
+            $currentAnchorLocation = $r.OldPath
             break
         }
     }
@@ -577,9 +607,9 @@ function Start-NextProcess {
 
     $newFilePath = Join-Path $pJob.FolderPath $anchorTargetName
 
-    if ($pJob.AnchorFile.FullName -ne $newFilePath) {
+    if ($currentAnchorLocation -ne $newFilePath) {
         if (Test-Path $newFilePath) { Remove-Item $newFilePath -Force -ErrorAction SilentlyContinue }
-        Rename-Item $pJob.AnchorFile.FullName $anchorTargetName -Force
+        try { Rename-Item $currentAnchorLocation $anchorTargetName -Force } catch {}
     }
 
     if ($null -ne $anchorFileRow) { $anchorFileRow.OldPath = $newFilePath }
@@ -628,6 +658,7 @@ function Start-NextProcess {
             Rename-Item $oldFolder $newParentName -Force -ErrorAction Stop
             $pJob.FolderPath          = $newFolder
             $pJob.ProcessedAnchorPath = $pJob.ProcessedAnchorPath.Replace($oldFolder, $newFolder)
+            if ($pJob.CustomImagePath) { $pJob.CustomImagePath = $pJob.CustomImagePath.Replace($oldFolder, $newFolder) }
             foreach ($r in $pJob.FileRows) { $r.OldPath = $r.OldPath.Replace($oldFolder, $newFolder) }
         } catch {}
     }
@@ -644,6 +675,9 @@ function Start-NextProcess {
                 $p.FolderPath = $p.FolderPath.Replace($oldGrand, $newGrand)
                 if ($p.ProcessedAnchorPath) {
                     $p.ProcessedAnchorPath = $p.ProcessedAnchorPath.Replace($oldGrand, $newGrand)
+                }
+                if ($p.CustomImagePath) {
+                    $p.CustomImagePath = $p.CustomImagePath.Replace($oldGrand, $newGrand)
                 }
                 foreach ($fr in $p.FileRows) { $fr.OldPath = $fr.OldPath.Replace($oldGrand, $newGrand) }
             }
@@ -719,6 +753,7 @@ function Start-NextProcess {
 
     if ($doSlice) {
         [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value `"SLICING $($baseName)...`" -Force")
+        [void]$sb.AppendLine("Start-Sleep -Seconds 3") # Let the Slicer CLI breathe between files
         [void]$sb.AppendLine("& `"$scriptDir\slicer_automation_worker.ps1`" -InputPath `"$anchorPath`" -IsolatedPath `"$finalPath`"")
     } elseif ($doExtract -or $doImage) {
         # Re-slice Final for skip-time data. If Final.3mf is missing, isolate it from Nest first.
@@ -731,19 +766,21 @@ function Start-NextProcess {
         [void]$sb.AppendLine("    Remove-Item `$tempIsoR -Recurse -Force -ErrorAction SilentlyContinue")
         [void]$sb.AppendLine("}")
         [void]$sb.AppendLine("if (Test-Path `"$finalPath`") {")
+        [void]$sb.AppendLine("    Start-Sleep -Seconds 3")
         [void]$sb.AppendLine("    & `"$scriptDir\slicer_automation_worker.ps1`" -InputPath `"$finalPath`"")
         [void]$sb.AppendLine("}")
     }
 
     if ($doExtract -or $doImage) {
-        # Extract-3MFData handles TSV writing AND image card generation (when -GenerateImage passed).
-        # It already knows how to read skip time, grams, and color names from the gcode — no TSV parsing needed here.
         [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value `"EXTRACTING DATA...`" -Force")
         $imageFlag = if ($doImage) { "-GenerateImage" } else { "" }
         [void]$sb.AppendLine("if (Test-Path `"$slicedFile`") {")
         [void]$sb.AppendLine("    Remove-Item `"$tsvFile`" -Force -ErrorAction SilentlyContinue")
         [void]$sb.AppendLine("    & `"$scriptDir\Extract-3MFData.ps1`" -InputFile `"$slicedFile`" -SingleFile `"$singleFile`" -IndividualTsvPath `"$tsvFile`" $imageFlag")
         [void]$sb.AppendLine("    Remove-Item `"$singleFile`" -Force -ErrorAction SilentlyContinue")
+        [void]$sb.AppendLine("} else {")
+        [void]$sb.AppendLine("    Set-Content -Path `"$statusFile`" -Value `"[ERROR] SLICE FAILED - MISSING GCODE`" -Force")
+        [void]$sb.AppendLine("    Start-Sleep -Seconds 4")
         [void]$sb.AppendLine("}")
     }
 
@@ -1254,6 +1291,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $lblFolder.ForeColor = $cText; $lblFolder.AutoSize = $true
     $lblFolder.Location = New-Object System.Drawing.Point(10, $y)
     $pnlRight.Controls.Add($lblFolder)
+    $pJob.LblFolder = $lblFolder
 
     $btnRefreshP = New-Object System.Windows.Forms.Button
     $btnRefreshP.Text = "Refresh"
