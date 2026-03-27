@@ -377,15 +377,13 @@ function Refresh-PJob($pJob, $gpJob) {
 
     if (-not (Test-Path $pJob.TempWork)) { New-Item -ItemType Directory -Path $pJob.TempWork -Force | Out-Null }
 
-    $slicePreviewPath = Join-Path $pJob.FolderPath "slicepreview.png"
     $gcodeFile = Get-ChildItem -Path $pJob.FolderPath -Filter "*Full.gcode.3mf" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-
     $plateImgPath = $null
     $statusText = "[DEFAULT]"
     $statusColor = $cAmber
 
-    if (Test-Path $slicePreviewPath) {
-        $plateImgPath = $slicePreviewPath
+    if ($pJob.CustomImagePath -and (Test-Path $pJob.CustomImagePath)) {
+        $plateImgPath = $pJob.CustomImagePath
         $statusText = "[CUSTOM BASE]"
         $statusColor = clr "#4CAF72"
     } elseif ($gcodeFile) {
@@ -540,16 +538,22 @@ function Start-NextProcess {
         foreach ($slot in $pJob.UISlots) {
             $selName = $slot.Combo.Text
             if ($LibraryColors.Contains($selName)) {
-                $newHex  = $LibraryColors[$selName].ToUpper()
-                $oldHex  = $slot.OldHex.ToUpper()
-                $oldHex6 = $oldHex.Substring(0,7)
-                $newHex6 = $newHex.Substring(0,7)
-                if ($content -match "(?i)$oldHex") {
-                    $content  = $content -ireplace [regex]::Escape($oldHex), $newHex
+                $newHex = $LibraryColors[$selName].ToUpper()
+                $oldHex = $slot.OldHex.ToUpper()
+
+                # Strict 7-char and 9-char mapping to prevent regex bleeding
+                $oldHex9 = if ($oldHex.Length -eq 7) { $oldHex + "FF" } else { $oldHex }
+                $oldHex7 = $oldHex.Substring(0,7)
+                $newHex9 = if ($newHex.Length -eq 7) { $newHex + "FF" } else { $newHex }
+                $newHex7 = $newHex.Substring(0,7)
+
+                # Prioritize replacing the full 9-char hex first, then the 7-char
+                if ($content -match "(?i)$oldHex9") {
+                    $content  = $content -ireplace [regex]::Escape($oldHex9), $newHex9
                     $modified = $true
                 }
-                if ($content -match "(?i)$oldHex6") {
-                    $content  = $content -ireplace [regex]::Escape($oldHex6), $newHex6
+                if ($content -match "(?i)$oldHex7") {
+                    $content  = $content -ireplace [regex]::Escape($oldHex7), $newHex7
                     $modified = $true
                 }
             }
@@ -589,6 +593,10 @@ function Start-NextProcess {
             [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $file.FullName, $rel) | Out-Null
         }
         $zip.Dispose()
+
+        # CRITICAL FIX: Force garbage collection to release the ZipArchive lock
+        [System.GC]::Collect()
+        [System.GC]::WaitForPendingFinalizers()
     }
 
     $pJob.ProcessedAnchorPath = $newFilePath
@@ -669,9 +677,11 @@ function Start-NextProcess {
     $dir        = $pJob.FolderPath
     $statusFile = Join-Path $dir "AsyncWorker_Status.txt"
 
+    # NOTE: ALL paths written to the builder must evaluate $dir NOW (use "$dir")
+    # instead of passing the literal string `$dir` which evaluates to $null in the background process.
+
     [void]$sb.AppendLine("`$ErrorActionPreference = 'Continue'")
     [void]$sb.AppendLine("Add-Type -AssemblyName System.IO.Compression.FileSystem")
-    [void]$sb.AppendLine("Start-Transcript -Path `"$dir\AsyncWorker_Log.txt`" -Force")
 
     $doMerge   = $pJob.ChkMerge.Checked
     $doSlice   = $pJob.ChkSlice.Checked
@@ -685,7 +695,10 @@ function Start-NextProcess {
     $tempIso    = Join-Path $env:TEMP "iso_$([guid]::NewGuid().ToString().Substring(0,8))"
     $slicedFile = Join-Path $dir "$($baseName).gcode.3mf"
     $singleFile = Join-Path $dir "$($basePrefix)Final.gcode.3mf"
-    $tsvFile    = Join-Path $dir "$($baseName)_Data.tsv"
+
+    # TSV name strips _Full so it saves as Character_Adj_Theme_Data.tsv
+    $tsvBaseName = $baseName -replace '(?i)_Full$', ''
+    $tsvFile     = Join-Path $dir "${tsvBaseName}_Data.tsv"
 
     if ($doMerge) {
         [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value `"MERGING...`" -Force")
@@ -694,7 +707,8 @@ function Start-NextProcess {
         [void]$sb.AppendLine("    if (Test-Path `"$nestPath`") { Remove-Item `"$nestPath`" -Force }")
         [void]$sb.AppendLine("    Rename-Item -Path `"$anchorPath`" -NewName `"$($basePrefix)Nest.3mf`" -Force")
         [void]$sb.AppendLine("    Rename-Item -Path `"$tempOut`"    -NewName `"$($baseName).3mf`"      -Force")
-        [void]$sb.AppendLine("} else { Write-Host '[ERROR] Merge produced no output - aborting.' -ForegroundColor Red; Stop-Transcript; exit 1 }")
+        [void]$sb.AppendLine("    Get-ChildItem -Path `"$dir`" -Filter `"*MergeReport*.txt`" -ErrorAction SilentlyContinue | ForEach-Object { Remove-Item `$_.FullName -Force -ErrorAction SilentlyContinue }")
+        [void]$sb.AppendLine("} else { Write-Host '[ERROR] Merge produced no output - aborting.' -ForegroundColor Red; exit 1 }")
 
         [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value `"ISOLATING FINAL...`" -Force")
         [void]$sb.AppendLine("New-Item -ItemType Directory -Path `"$tempIso`" -Force | Out-Null")
@@ -707,43 +721,45 @@ function Start-NextProcess {
         [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value `"SLICING $($baseName)...`" -Force")
         [void]$sb.AppendLine("& `"$scriptDir\slicer_automation_worker.ps1`" -InputPath `"$anchorPath`" -IsolatedPath `"$finalPath`"")
     } elseif ($doExtract -or $doImage) {
+        # Re-slice Final for skip-time data. If Final.3mf is missing, isolate it from Nest first.
         [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value `"RE-SLICING FINAL FOR DATA...`" -Force")
+        [void]$sb.AppendLine("if (-not (Test-Path `"$finalPath`") -and (Test-Path `"$nestPath`")) {")
+        [void]$sb.AppendLine("    `$tempIsoR = Join-Path `$env:TEMP `"iso_reslice_$([guid]::NewGuid().ToString().Substring(0,8))`"")
+        [void]$sb.AppendLine("    New-Item -ItemType Directory -Path `$tempIsoR -Force | Out-Null")
+        [void]$sb.AppendLine("    [System.IO.Compression.ZipFile]::ExtractToDirectory(`"$nestPath`", `$tempIsoR)")
+        [void]$sb.AppendLine("    & `"$scriptDir\isolate_final_worker.ps1`" -WorkDir `$tempIsoR -OutputPath `"$finalPath`"")
+        [void]$sb.AppendLine("    Remove-Item `$tempIsoR -Recurse -Force -ErrorAction SilentlyContinue")
+        [void]$sb.AppendLine("}")
         [void]$sb.AppendLine("if (Test-Path `"$finalPath`") {")
         [void]$sb.AppendLine("    & `"$scriptDir\slicer_automation_worker.ps1`" -InputPath `"$finalPath`"")
         [void]$sb.AppendLine("}")
     }
 
-    if ($doExtract) {
+    if ($doExtract -or $doImage) {
+        # Extract-3MFData handles TSV writing AND image card generation (when -GenerateImage passed).
+        # It already knows how to read skip time, grams, and color names from the gcode — no TSV parsing needed here.
         [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value `"EXTRACTING DATA...`" -Force")
         $imageFlag = if ($doImage) { "-GenerateImage" } else { "" }
-        [void]$sb.AppendLine("Remove-Item `"$tsvFile`" -Force -ErrorAction SilentlyContinue")
-        [void]$sb.AppendLine("& `"$scriptDir\Extract-3MFData.ps1`" -InputFile `"$slicedFile`" -SingleFile `"$singleFile`" -IndividualTsvPath `"$tsvFile`" $imageFlag")
-        [void]$sb.AppendLine("Remove-Item `"$singleFile`" -Force -ErrorAction SilentlyContinue")
+        [void]$sb.AppendLine("if (Test-Path `"$slicedFile`") {")
+        [void]$sb.AppendLine("    Remove-Item `"$tsvFile`" -Force -ErrorAction SilentlyContinue")
+        [void]$sb.AppendLine("    & `"$scriptDir\Extract-3MFData.ps1`" -InputFile `"$slicedFile`" -SingleFile `"$singleFile`" -IndividualTsvPath `"$tsvFile`" $imageFlag")
+        [void]$sb.AppendLine("    Remove-Item `"$singleFile`" -Force -ErrorAction SilentlyContinue")
+        [void]$sb.AppendLine("}")
     }
 
     if ($doImage) {
+        # ReplaceImageNew.bat handles Synology cloud stubs with retry logic.
+        # It finds *Full.gcode.3mf in the folder and injects the matching _slicePreview.png.
         [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value `"IMAGE INJECTION...`" -Force")
-        [void]$sb.AppendLine("`$slicePreview = Join-Path `$dir `"slicepreview.png`"")
-        [void]$sb.AppendLine("if (Test-Path `$slicePreview) {")
-        [void]$sb.AppendLine("    [System.GC]::Collect()")
-        [void]$sb.AppendLine("    [System.GC]::WaitForPendingFinalizers()")
-        [void]$sb.AppendLine("    `$gcodeFile = Join-Path `$dir `"$($baseName).gcode.3mf`"")
-        [void]$sb.AppendLine("    if (Test-Path `$gcodeFile) {")
-        [void]$sb.AppendLine("        try {")
-        [void]$sb.AppendLine("            `$zip = [System.IO.Compression.ZipFile]::Open(`$gcodeFile, 'Update')")
-        [void]$sb.AppendLine("            `$entry = `$zip.GetEntry('Metadata/plate_1.png')")
-        [void]$sb.AppendLine("            if (`$null -ne `$entry) { `$entry.Delete() }")
-        [void]$sb.AppendLine("            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(`$zip, `$slicePreview, 'Metadata/plate_1.png') | Out-Null")
-        [void]$sb.AppendLine("            `$zip.Dispose()")
-        [void]$sb.AppendLine("        } catch { if (`$null -ne `$zip) { `$zip.Dispose() } }")
-        [void]$sb.AppendLine("    }")
-        [void]$sb.AppendLine("    Remove-Item `$slicePreview -Force -ErrorAction SilentlyContinue")
+        [void]$sb.AppendLine("`$batPath = Join-Path `"$scriptDir`" `"ReplaceImageNew.bat`"")
+        [void]$sb.AppendLine("if (Test-Path `$batPath) {")
+        [void]$sb.AppendLine("    `$argList = '/c `"`"' + `$batPath + '`" `"' + `"$dir`" + '`"`"'")
+        [void]$sb.AppendLine("    Start-Process -FilePath `"cmd.exe`" -ArgumentList `$argList -Wait -WindowStyle Hidden")
         [void]$sb.AppendLine("}")
     }
 
     [void]$sb.AppendLine("Remove-Item `"$statusFile`" -Force -ErrorAction SilentlyContinue")
     [void]$sb.AppendLine("Remove-Item `"$($pJob.TempWork)`" -Recurse -Force -ErrorAction SilentlyContinue")
-    [void]$sb.AppendLine("Stop-Transcript")
 
     Set-Content -Path $workerScript -Value $sb.ToString()
     $script:activeProcess = Start-Process powershell.exe -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$workerScript`"" -PassThru -WindowStyle Hidden
@@ -937,6 +953,8 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
     $UsedSlots = New-Object System.Collections.Generic.HashSet[string]
     $UsedSlots.Add("1") | Out-Null
+
+    # 1. Check model_settings.config for extruder overrides
     if (Test-Path $modSetPath) {
         try {
             [xml]$modXml = [System.IO.File]::ReadAllText($modSetPath, [System.Text.Encoding]::UTF8)
@@ -947,8 +965,18 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         } catch {
             $modContent = [System.IO.File]::ReadAllText($modSetPath, [System.Text.Encoding]::UTF8)
             $extMatches = [regex]::Matches($modContent, '(?i)extruder[^>]*?"(\d+)"')
-            foreach ($m in $extMatches) { $UsedSlots.Add($m.Groups[1].Value) | Out-Null }
+            foreach ($m in $extMatches) { $UsedSlots.Add($m.Groups.Value) | Out-Null }
         }
+    }
+
+    # 2. Check 3dmodel.model for native object colors (CRITICAL FIX)
+    $modelFile = (Get-ChildItem -Path $tempWork -Filter '3dmodel.model' -Recurse | Select-Object -First 1)
+    if ($modelFile -and (Test-Path $modelFile.FullName)) {
+        try {
+            $modelContent = [System.IO.File]::ReadAllText($modelFile.FullName, [System.Text.Encoding]::UTF8)
+            $matMatches = [regex]::Matches($modelContent, '(?i)materialid="(\d+)"')
+            foreach ($m in $matMatches) { $UsedSlots.Add($m.Groups.Value) | Out-Null }
+        } catch {}
     }
 
     foreach ($hex in $SlotMap.Keys) {
@@ -964,6 +992,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pJob = @{
         FolderPath = $parentPath; AnchorFile = $anchorFile; TempWork = $tempWork
         ProcessedAnchorPath = ""
+        CustomImagePath = $null
         UISlots = New-Object System.Collections.ArrayList
         FileRows = New-Object System.Collections.ArrayList
         ScaleElements = New-Object System.Collections.ArrayList
@@ -1022,18 +1051,13 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pJob.PbPlateFinished = $pbPlateFinished
     $pbPlateFinished.Add_DoubleClick({ $t = $this.Tag; Show-ImageViewer $t.ImgPath "Final Card Preview" })
 
-    $slicePreviewPath = Join-Path $parentPath "slicepreview.png"
     $gcodeFile = Get-ChildItem -Path $parentPath -Filter "*Full.gcode.3mf" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 
     $plateImgPath = $null
     $statusText = "[DEFAULT]"
     $statusColor = $cAmber
 
-    if (Test-Path $slicePreviewPath) {
-        $plateImgPath = $slicePreviewPath
-        $statusText = "[CUSTOM BASE]"
-        $statusColor = clr "#4CAF72"
-    } elseif ($gcodeFile) {
+    if ($gcodeFile) {
         $extractedGcodePlate = Join-Path $tempWork "plate_1_gcode.png"
         try {
             $zip = [System.IO.Compression.ZipFile]::OpenRead($gcodeFile.FullName)
@@ -1080,22 +1104,24 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             if ($files[0] -match '(?i)\.(png|jpg|jpeg)$') { $e.Effect = [System.Windows.Forms.DragDropEffects]::Copy }
         }
     })
-    $pb.Add_DragDrop({
-    param($s, $e)
-    $dropped = $e.Data.GetData([System.Windows.Forms.DataFormats]::FileDrop)
-    foreach ($item in $dropped) {
-        if ($item -match '\.(png|jpg|jpeg)$') {
-            # FIX: Retain original name
-            $fileName = Split-Path $item -Leaf
-            $targetPath = Join-Path $pJob.FolderPath $fileName
-            Copy-Item $item $targetPath -Force
-
-            # Update the UI to show THIS image, but don't call it slicePreview yet
-            $pJob.CustomImagePath = $targetPath
-            Refresh-PJob $pJob $gpJob
+    $pbModel.Add_DragDrop({
+        param($s, $e)
+        $p = $s.Tag.P
+        $files = $e.Data.GetData([System.Windows.Forms.DataFormats]::FileDrop)
+        $dropped = $files[0]
+        if ($dropped -match '(?i)\.(png|jpg|jpeg)$') {
+            $dest = Join-Path $p.FolderPath (Split-Path $dropped -Leaf)
+            if ($dropped -ne $dest) { Copy-Item -Path $dropped -Destination $dest -Force }
+            $fs = New-Object System.IO.FileStream($dest, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
+            if ($s.Image) { $s.Image.Dispose() }
+            $s.Image = [System.Drawing.Image]::FromStream($fs)
+            $s.Tag.ImgPath = $dest
+            $fs.Close()
+            $p.ImgStatusLbl.Text = "[CUSTOM BASE]"
+            $p.ImgStatusLbl.ForeColor = clr "#4CAF72"
+            $p.CustomImagePath = $dest
         }
-    }
-})
+    })
 
     $lblThemeCard = New-Object System.Windows.Forms.Label
     $lblThemeCard.BackColor = $cBG; $lblThemeCard.ForeColor = clr "#808080"; $lblThemeCard.TextAlign = 'TopRight'
@@ -1383,7 +1409,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
             try {
                 $argList = '/c ""' + $batPath + '" "' + $targetPath + '""'
-                $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $argList -Wait -WindowStyle Hidden -PassThru
+                $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $argList -WindowStyle Hidden -PassThru
                 $timeout = 100
                 while (-not $proc.HasExited -and $timeout -gt 0) {
                     [System.Windows.Forms.Application]::DoEvents()
