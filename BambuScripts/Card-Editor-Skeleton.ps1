@@ -501,8 +501,6 @@ function Refresh-PJob($pJob, $gpJob) {
     }
 
     # 2. Update Editable Sketched Area (Custom Base PNG)
-    $statusText = "[SKETCH]"
-    $statusColor = $cAmber
 
     if ($pJob.CustomImagePath -and (Test-Path $pJob.CustomImagePath)) {
         if ($pJob.PbPlate.Image) { $pJob.PbPlate.Image.Dispose() }
@@ -510,8 +508,6 @@ function Refresh-PJob($pJob, $gpJob) {
         $pJob.PbPlate.Image = [System.Drawing.Image]::FromStream($fs)
         $fs.Close()
         $pJob.PbPlate.Tag.ImgPath = $pJob.CustomImagePath
-        $statusText = "[CUSTOM SKETCH]"
-        $statusColor = clr "#4CAF72"
     } elseif ($customPng) {
         if ($pJob.PbPlate.Image) { $pJob.PbPlate.Image.Dispose() }
         $pJob.CustomImagePath = $customPng.FullName
@@ -519,8 +515,6 @@ function Refresh-PJob($pJob, $gpJob) {
         $pJob.PbPlate.Image = [System.Drawing.Image]::FromStream($fs)
         $fs.Close()
         $pJob.PbPlate.Tag.ImgPath = $pJob.CustomImagePath
-        $statusText = "[CUSTOM SKETCH]"
-        $statusColor = clr "#4CAF72"
     } else {
         if ($pJob.PbPlate.Image) { $pJob.PbPlate.Image.Dispose(); $pJob.PbPlate.Image = $null }
         $pJob.CustomImagePath = $null
@@ -1229,8 +1223,6 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     }
 
     # 2. Update Editable Sketched Area (Custom Base PNG or Default)
-    $statusText = "[SKETCH]"
-    $statusColor = $cAmber
 
     $pbModel = New-Object System.Windows.Forms.PictureBox
     $pbModel.SizeMode = 'Zoom'; $pbModel.BackColor = $cBG; $pbModel.AllowDrop = $true
@@ -1255,14 +1247,6 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         }
     }
     $pbModel.Add_DoubleClick({ $t = $this.Tag; if ($t.ImgPath -and (Test-Path $t.ImgPath)) { Show-ImageViewer $t.ImgPath "Plate Preview" } })
-
-    $lblImgStatus = New-Object System.Windows.Forms.Label
-    $lblImgStatus.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
-    $lblImgStatus.BackColor = $cBG; $lblImgStatus.TextAlign = 'TopLeft'
-    $lblImgStatus.Text = $statusText
-    $lblImgStatus.ForeColor = $statusColor
-    Add-ScaledElement $pJob $card $lblImgStatus 15 85 100 15 8
-    $pJob.ImgStatusLbl = $lblImgStatus
 
     $pbModel.Add_DragEnter({
         param($s, $e)
@@ -1311,7 +1295,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pJob.LblThemeCard = $lblThemeCard
 
     $lblSkipTime = New-Object System.Windows.Forms.Label
-    $lblSkipTime.Text = "Skip Time: 18 min"
+    $lblSkipTime.Text = "Skip Time: -- min"
     $lblSkipTime.BackColor = $cBG; $lblSkipTime.ForeColor = $cText; $lblSkipTime.TextAlign = 'BottomLeft'
     Add-ScaledElement $pJob $card $lblSkipTime 10 472 250 30 14
 
@@ -1775,7 +1759,7 @@ $form.Add_Shown({
         Build-GpJob $gpPath $gpQueue[$gpPath]
         $idx++
     }
-    $lblGlobalTitle.Text = "Queue Dashboard ($($gpQueue.Count) Group(s) found)"
+    $lblGlobalTitle.Text = "Queue Dashboard ($($gpQueue.Count) Theme(s) found)"
     $btnProcessAll.Enabled = $true
     $form.ResumeLayout()
     $form.Width += 1
