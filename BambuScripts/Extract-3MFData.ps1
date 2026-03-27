@@ -180,6 +180,25 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 # INITIALIZE VARIABLES
 # ---------------------------------------------------------------------------------
 $projectName = ((Split-Path $InputFile -Leaf) -replace '\.gcode\.3mf$', '') -replace '(?i)_Full$', ''
+
+# --- NEW: PARSE THEME AND RARITY FROM FILENAME ---
+$nameParts = $projectName -split '_'
+$themeSlot = ""
+$adjSlot   = ""
+
+if ($nameParts.Count -ge 3) {
+    $themeSlot = $nameParts[-1]
+    $adjSlot   = $nameParts[-2]
+} elseif ($nameParts.Count -eq 2) {
+    $themeSlot = $nameParts[-1] # Assuming Character_Theme if no adjective
+}
+
+$themeOutput = $themeSlot
+if ($adjSlot -match '(?i)Rare|Legendary|Epic') {
+    $themeOutput = "RARE " + $themeSlot
+}
+# -------------------------------------------------
+
 $timeAdd = 0
 $filData = @(
     @{ g = 0; color = ""; rawHex = "" }, @{ g = 0; color = ""; rawHex = "" },
@@ -323,13 +342,15 @@ if (-not $SkipExtraction) {
         }
 
         $outputValues = @(
-            $projectName, "", (Get-Date).ToString("M/d/yyyy"),
+            $projectName, $themeOutput, (Get-Date).ToString("M/d/yyyy"),
             $h, $m,
             $(if ($filData[1].g -gt 0) { $filData[1].g } else { 0 }), $filData[1].color,
             $(if ($filData[2].g -gt 0) { $filData[2].g } else { 0 }), $filData[2].color,
             $(if ($filData[3].g -gt 0) { $filData[3].g } else { 0 }), $filData[3].color,
             $(if ($filData[4].g -gt 0) { $filData[4].g } else { 0 }), $filData[4].color,
-            "", $actualColorSwaps, $objCount, [math]::Round($modelGrams, 2), "", $timeAdd
+            $actualColorSwaps, $objCount, [math]::Round($modelGrams, 2),
+            '=SUM(INDIRECT("G"&ROW()&":N"&ROW()))',
+            $timeAdd
         )
     } catch {
         Write-Error "Failed to process .gcode.3mf archive: $_"
