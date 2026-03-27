@@ -207,19 +207,21 @@ function Get-ImageBasedMergeMap {
         # 3. Draw the mapping
         foreach ($l in $lines) {
             $pen = New-Object System.Drawing.Pen($l.LineColor, 2)
+            $linePen = New-Object System.Drawing.Pen([System.Drawing.Color]::White, 4)
 
             # Crosshair 1: Original Position (Pre-Merge)
-            $g.DrawLine($pen, ($l.Start.X - 6), $l.Start.Y, ($l.Start.X + 6), $l.Start.Y)
-            $g.DrawLine($pen, $l.Start.X, ($l.Start.Y - 6), $l.Start.X, ($l.Start.Y + 6))
+            $g.DrawLine($pen, ($l.Start.X - 1), $l.Start.Y, ($l.Start.X + 1), $l.Start.Y)
+            $g.DrawLine($pen, $l.Start.X, ($l.Start.Y - 1), $l.Start.X, ($l.Start.Y + 1))
 
             # Crosshair 2: New Color Anchor (Post-Merge)
-            $g.DrawLine($pen, ($l.End.X - 6), $l.End.Y, ($l.End.X + 6), $l.End.Y)
-            $g.DrawLine($pen, $l.End.X, ($l.End.Y - 6), $l.End.X, ($l.End.Y + 6))
+            $g.DrawLine($pen, ($l.End.X - 1), $l.End.Y, ($l.End.X + 1), $l.End.Y)
+            $g.DrawLine($pen, $l.End.X, ($l.End.Y - 1), $l.End.X, ($l.End.Y + 1))
 
             # Connecting Line
-            $g.DrawLine($pen, $l.Start, $l.End)
+            $g.DrawLine($linePen, $l.Start, $l.End)
 
             $pen.Dispose()
+            $linePen.Dispose()
         }
 
         $g.Dispose()
