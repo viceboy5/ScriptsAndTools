@@ -172,33 +172,31 @@ function Get-ImageBasedMergeMap {
         # 1. Get the mapping data from the C# class
         $groups = [FastMergeMap]::GetPoints($bmpPre, $bmpPost)
 
-        # 2. Setup the "Painter"
+        # 2. Setup the Graphics "Painter"
         $g = [System.Drawing.Graphics]::FromImage($bmpPost)
         $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::Magenta, 2)
-        $font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
-        $brush = [System.Drawing.Brushes]::Yellow
 
-        # 3. Draw verification lines/markers
+        # 3. Draw crosshairs ONLY
         foreach ($key in $groups.Keys) {
-            $points = $groups[$key]
-            foreach ($pt in $points) {
-                # Draw a small crosshair on every matched pixel
+            $pointsList = $groups[$key]
+
+            foreach ($pt in $pointsList) {
+                # Draw the horizontal line of the crosshair
                 $g.DrawLine($pen, ($pt.X - 5), $pt.Y, ($pt.X + 5), $pt.Y)
+                # Draw the vertical line of the crosshair
                 $g.DrawLine($pen, $pt.X, ($pt.Y - 5), $pt.X, ($pt.Y + 5))
             }
-            # Label the color group at the first point found
-            if ($points.Count -gt 0) {
-                $g.DrawString("Match: $key", $font, $brush, $points.X, ($points.Y - 20))
-            }
+            # TEXT DRAWING REMOVED FROM THIS SECTION
         }
 
-        # Clean up
+        # Clean up resources
         $g.Dispose()
         $pen.Dispose()
         $bmpPre.Dispose()
 
         return $bmpPost
     } catch {
+        [System.Windows.Forms.MessageBox]::Show("Draw Error: $($_.Exception.Message)")
         return $null
     }
 }
