@@ -246,6 +246,8 @@ $btnCombineData.Add_Click({
     if ($targetDirs.Count -eq 0) { return }
 
     $combinedCount = 0
+    $clipboardArray = New-Object System.Collections.ArrayList
+
     foreach ($targetDir in $targetDirs) {
         if (-not (Test-Path $targetDir)) { continue }
 
@@ -269,10 +271,24 @@ $btnCombineData.Add_Click({
         if ($combined.Count -gt 0) {
             $combined.Values | Set-Content -Path $outTsvPath -Encoding UTF8
             $combinedCount++
+            # Store values for the clipboard
+            foreach ($val in $combined.Values) { [void]$clipboardArray.Add($val) }
         }
     }
 
-    [System.Windows.Forms.MessageBox]::Show("Successfully combined TSV data for $combinedCount group(s).", "Combine Data Complete", 0, 64) | Out-Null
+    if ($clipboardArray.Count -gt 0) {
+        try {
+            # Join all rows with a standard Windows newline and push to clipboard
+            $clipboardText = $clipboardArray.ToArray() -join "`r`n"
+            [System.Windows.Forms.Clipboard]::SetText($clipboardText)
+
+            [System.Windows.Forms.MessageBox]::Show("Successfully combined TSV data for $combinedCount group(s).`n`nThe combined data ($($clipboardArray.Count) rows) has been copied to your clipboard!", "Combine Data Complete", 0, 64) | Out-Null
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show("Combined TSV data for $combinedCount group(s), but failed to copy to clipboard. Another program may be locking it.", "Combine Data Partial Success", 0, 48) | Out-Null
+        }
+    } else {
+        [System.Windows.Forms.MessageBox]::Show("No new data found to combine.", "Combine Data Empty", 0, 64) | Out-Null
+    }
 })
 
 $mainScroll = New-Object System.Windows.Forms.Panel
