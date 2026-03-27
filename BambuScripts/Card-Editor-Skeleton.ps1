@@ -121,7 +121,7 @@ function Invoke-RandomizePickColors($sourcePath, $destPath) {
                 if ($px.A -lt 10) { continue }
                 $key = "$($px.R),$($px.G),$($px.B)"
                 if (-not $colorMap.ContainsKey($key)) {
-                    $colorMap[$key] = [System.Drawing.Color]::FromArgb($px.A, $rng.Next(0,256), $rng.Next(0,256), $rng.Next(0,256))
+                    $colorMap[$key] = [System.Drawing.Color]::FromArgb($px.A, $rng.Next(20,256), $rng.Next(20,256), $rng.Next(20,256))
                 }
                 $bmp.SetPixel($x, $y, $colorMap[$key])
             }
@@ -573,6 +573,8 @@ function Refresh-PJob($pJob, $gpJob) {
     $pJob.BtnApply.Text = "Add to Queue"
     $pJob.BtnApply.BackColor = clr "#4CAF72"
     $pJob.BtnApply.Enabled = $true
+    $pJob.BtnApply.Width = 150
+    if ($pJob.BtnRevertDone) { $pJob.BtnRevertDone.Visible = $false }
 
     $pJob.RowPanel.Enabled = $true
     $pJob.RowPanel.BackColor = clr "#16171B"
@@ -1040,9 +1042,11 @@ $script:queueTimer.Add_Tick({
             $pJob.ChkExtract.Enabled = $true
             $pJob.ChkImage.Enabled = $true
 
-            $pJob.BtnApply.Text = "Finished"
-            $pJob.BtnApply.BackColor = clr "#333333"
-            $pJob.BtnApply.Enabled = $false
+            $pJob.BtnApply.Text = "KEEP"
+            $pJob.BtnApply.BackColor = clr "#4CAF72"
+            $pJob.BtnApply.Enabled = $true
+            $pJob.BtnApply.Width = 70
+            if ($pJob.BtnRevertDone) { $pJob.BtnRevertDone.Visible = $true }
 
             $script:resizeTimer.Start()
             $script:activeProcess = $null
@@ -1648,8 +1652,55 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pnlRight.Controls.Add($btnApplyP)
     $pJob.BtnApply = $btnApplyP
 
+    $btnRevertDone = New-Object System.Windows.Forms.Button
+    $btnRevertDone.Text = "REVERT"
+    $btnRevertDone.BackColor = clr "#D95F5F"
+    $btnRevertDone.ForeColor = clr "#FFFFFF"
+    $btnRevertDone.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    $btnRevertDone.FlatStyle = 'Flat'
+    $btnRevertDone.FlatAppearance.BorderSize = 0
+    $btnRevertDone.Size = New-Object System.Drawing.Size(75, 35)
+    $btnRevertDone.Visible = $false
+    $pnlRight.Controls.Add($btnRevertDone)
+    $pJob.BtnRevertDone = $btnRevertDone
+
     $btnApplyP.Tag = @{ P = $pJob; G = $gpJob }
-    $btnApplyP.Add_Click({ Enqueue-PJob $this.Tag.P $this.Tag.G })
+    $btnApplyP.Add_Click({
+        $t = $this.Tag
+        if ($this.Text -eq "KEEP") {
+            $this.Text = "Finished"
+            $this.BackColor = clr "#333333"
+            $this.Enabled = $false
+            $this.Width = 150
+            if ($t.P.BtnRevertDone) { $t.P.BtnRevertDone.Visible = $false }
+            $script:resizeTimer.Start()
+        } else {
+            Enqueue-PJob $t.P $t.G
+        }
+    })
+
+    $btnRevertDone.Tag = @{ P = $pJob; G = $gpJob }
+    $btnRevertDone.Add_Click({
+        $t = $this.Tag
+        $pj = $t.P; $gp = $t.G
+        $batPath = Join-Path $scriptDir "RevertMerge.bat"
+        if (Test-Path $batPath) {
+            $targetPath = if ($pj.ProcessedAnchorPath -ne "") { $pj.ProcessedAnchorPath } else { $pj.AnchorFile.FullName }
+            $pj.BtnApply.Text = "Reverting..."
+            $pj.BtnApply.Width = 150
+            $pj.BtnRevertDone.Visible = $false
+            $pj.RowPanel.Enabled = $false
+            [System.Windows.Forms.Application]::DoEvents()
+            try {
+                $argList = '/c ""' + $batPath + '" "' + $targetPath + '""'
+                $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $argList -WindowStyle Hidden -PassThru
+                $timeout = 100
+                while (-not $proc.HasExited -and $timeout -gt 0) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100; $timeout-- }
+                if (-not $proc.HasExited) { try { $proc.Kill() } catch {} }
+            } catch {}
+            Refresh-PJob $pj $gp
+        }
+    })
 
     $tbChar.Tag = @{ P = $pJob; G = $gpJob }; $tbChar.Add_TextChanged({ $t = $this.Tag; Update-ParentPreview $t.P $t.G })
     $tbAdj.Tag = @{ P = $pJob; G = $gpJob };  $tbAdj.Add_TextChanged({ $t = $this.Tag; Update-ParentPreview $t.P $t.G })
@@ -1822,7 +1873,17 @@ $script:resizeTimer.Add_Tick({
 
             if ($pJob.BtnRefresh) { $pJob.BtnRefresh.Left = 640 - 240 }
             if ($pJob.BtnRemove) { $pJob.BtnRemove.Left = 640 - 130 }
-            if ($pJob.BtnApply)  { $pJob.BtnApply.Location = New-Object System.Drawing.Point((640 - 160), ($rightH - 45)) }
+
+            if ($pJob.BtnApply) {
+                if ($pJob.BtnRevertDone -and $pJob.BtnRevertDone.Visible) {
+                    $pJob.BtnApply.Location = New-Object System.Drawing.Point((640 - 160), ($rightH - 45))
+                    $pJob.BtnApply.Width = 70
+                    $pJob.BtnRevertDone.Location = New-Object System.Drawing.Point((640 - 85), ($rightH - 45))
+                } else {
+                    $pJob.BtnApply.Location = New-Object System.Drawing.Point((640 - 160), ($rightH - 45))
+                    $pJob.BtnApply.Width = 150
+                }
+            }
 
             foreach ($item in $pJob.ScaleElements) {
                 $item.Ctrl.Location = New-Object System.Drawing.Point([int]($item.X * $scale), [int]($item.Y * $scale))
