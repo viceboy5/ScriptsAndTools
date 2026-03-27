@@ -93,47 +93,63 @@ public static class SearchAssemblies {
 
 # --- THE MISSING LOGIC BLOCK ---
 # --- THE POST-MERGE COLOR MAPPING BLOCK ---
+# --- THE RELATIONAL LINE MAPPING BLOCK ---
 try {
     Add-Type -TypeDefinition @'
     using System;
     using System.Drawing;
     using System.Collections.Generic;
 
-    public class ColorAnchor {
-        public Point Pt;
-        public Color PostColor;
+    public class MapLine {
+        public Point Start;
+        public Point End;
+        public Color LineColor;
     }
 
     public class FastMergeMap {
-        public static List<ColorAnchor> GetPostColoredAnchors(Bitmap pre, Bitmap post) {
-            var anchors = new Dictionary<int, Point>();
+        public static List<MapLine> GetMergeLines(Bitmap pre, Bitmap post) {
+            var preAnchors = new Dictionary<int, Point>();
+            var postAnchors = new Dictionary<int, Point>();
             int w = pre.Width; int h = pre.Height;
 
-            // 1. Find the first occurrence of every color in the PRE-merge image
+            // 1. Map the first occurrence of every color in BOTH images
             for (int y = 0; y < h; y++) {
                 for (int x = 0; x < w; x++) {
-                    Color c = pre.GetPixel(x, y);
-                    if (c.A < 255 || (c.R < 10 && c.G < 10 && c.B < 10)) continue;
-
-                    int argb = c.ToArgb();
-                    if (!anchors.ContainsKey(argb)) {
-                        anchors[argb] = new Point(x, y);
+                    // Check Pre-Merge
+                    Color cPre = pre.GetPixel(x, y);
+                    if (cPre.A == 255 && (cPre.R > 10 || cPre.G > 10 || cPre.B > 10)) {
+                        int argb = cPre.ToArgb();
+                        if (!preAnchors.ContainsKey(argb)) preAnchors[argb] = new Point(x, y);
+                    }
+                    // Check Post-Merge
+                    if (x < post.Width && y < post.Height) {
+                        Color cPost = post.GetPixel(x, y);
+                        if (cPost.A == 255 && (cPost.R > 10 || cPost.G > 10 || cPost.B > 10)) {
+                            int argb = cPost.ToArgb();
+                            if (!postAnchors.ContainsKey(argb)) postAnchors[argb] = new Point(x, y);
+                        }
                     }
                 }
             }
 
-            // 2. Sample the colors at those exact coordinates from the POST-merge image
-            var results = new List<ColorAnchor>();
-            foreach (var pt in anchors.Values) {
-                // Bounds check to prevent crashes if images are different sizes
-                if (pt.X < post.Width && pt.Y < post.Height) {
-                    results.Add(new ColorAnchor {
-                        Pt = pt,
-                        PostColor = post.GetPixel(pt.X, pt.Y)
-                    });
+            // 2. Build the lines: From Old Coordinate to the New Color's Anchor
+            var lines = new List<MapLine>();
+            foreach (var oldPt in preAnchors.Values) {
+                if (oldPt.X < post.Width && oldPt.Y < post.Height) {
+                    Color currentColor = post.GetPixel(oldPt.X, oldPt.Y);
+                    int currentArgb = currentColor.ToArgb();
+
+                    // Find where this "New" color is anchored in the Post-Merge image
+                    if (postAnchors.ContainsKey(currentArgb)) {
+                        lines.Add(new MapLine {
+                            Start = oldPt,
+                            End = postAnchors[currentArgb],
+                            LineColor = currentColor
+                        });
+                    }
                 }
             }
-            return results;
+            return lines;
         }
     }
 '@ -ReferencedAssemblies "System.Drawing"
@@ -181,27 +197,33 @@ function Get-ImageBasedMergeMap {
         $bmpPre = New-Object System.Drawing.Bitmap($preMergePath)
         $bmpPost = New-Object System.Drawing.Bitmap($postMergePath)
 
-        # 1. Get the list of anchors and their post-merge colors
-        $anchors = [FastMergeMap]::GetPostColoredAnchors($bmpPre, $bmpPost)
+        # 1. Get the line data
+        $lines = [FastMergeMap]::GetMergeLines($bmpPre, $bmpPost)
 
-        # 2. Setup the "Painter" to draw on top of the Post-Merge image
+        # 2. Setup Graphics
         $g = [System.Drawing.Graphics]::FromImage($bmpPost)
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
 
-        # 3. Draw each crosshair using the color found in the Post-Merge image
-        foreach ($a in $anchors) {
-            # Use the color sampled from the post-merge image
-            $pen = New-Object System.Drawing.Pen($a.PostColor, 2)
+        # 3. Draw the mapping
+        foreach ($l in $lines) {
+            $pen = New-Object System.Drawing.Pen($l.LineColor, 2)
 
-            $g.DrawLine($pen, ($a.Pt.X - 8), $a.Pt.Y, ($a.Pt.X + 8), $a.Pt.Y)
-            $g.DrawLine($pen, $a.Pt.X, ($a.Pt.Y - 8), $a.Pt.X, ($a.Pt.Y + 8))
+            # Crosshair 1: Original Position (Pre-Merge)
+            $g.DrawLine($pen, ($l.Start.X - 6), $l.Start.Y, ($l.Start.X + 6), $l.Start.Y)
+            $g.DrawLine($pen, $l.Start.X, ($l.Start.Y - 6), $l.Start.X, ($l.Start.Y + 6))
+
+            # Crosshair 2: New Color Anchor (Post-Merge)
+            $g.DrawLine($pen, ($l.End.X - 6), $l.End.Y, ($l.End.X + 6), $l.End.Y)
+            $g.DrawLine($pen, $l.End.X, ($l.End.Y - 6), $l.End.X, ($l.End.Y + 6))
+
+            # Connecting Line
+            $g.DrawLine($pen, $l.Start, $l.End)
 
             $pen.Dispose()
         }
 
-        # Clean up
         $g.Dispose()
         $bmpPre.Dispose()
-
         return $bmpPost
     } catch {
         return $null
