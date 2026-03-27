@@ -221,6 +221,60 @@ $btnProcessAll.Location = New-Object System.Drawing.Point(1300, 10)
 $btnProcessAll.Enabled = $false
 $pnlTop.Controls.Add($btnProcessAll)
 
+$btnCombineData = New-Object System.Windows.Forms.Button
+$btnCombineData.Text = "Combine TSV Data"
+$btnCombineData.BackColor = clr "#E8A135" # Amber color to distinguish it
+$btnCombineData.ForeColor = clr "#FFFFFF"
+$btnCombineData.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$btnCombineData.FlatStyle = 'Flat'; $btnCombineData.FlatAppearance.BorderSize = 0
+$btnCombineData.Size = New-Object System.Drawing.Size(180, 40)
+$btnCombineData.Anchor = [System.Windows.Forms.AnchorStyles]"Top, Right"
+$btnCombineData.Location = New-Object System.Drawing.Point(1100, 10)
+$pnlTop.Controls.Add($btnCombineData)
+
+$btnCombineData.Add_Click({
+    $targetDirs = @()
+    # Figure out what folders to roll up (Grandparents, or Parents if no Grandparent exists)
+    foreach ($gpJob in $script:jobs) {
+        if ($gpJob.GpPath -like "ROOT_*") {
+            foreach ($p in $gpJob.Parents) { if (-not $targetDirs.Contains($p.FolderPath)) { $targetDirs += $p.FolderPath } }
+        } else {
+            if (-not $targetDirs.Contains($gpJob.GpPath)) { $targetDirs += $gpJob.GpPath }
+        }
+    }
+
+    if ($targetDirs.Count -eq 0) { return }
+
+    $combinedCount = 0
+    foreach ($targetDir in $targetDirs) {
+        if (-not (Test-Path $targetDir)) { continue }
+
+        $tsvFiles = Get-ChildItem -Path $targetDir -Filter "*_Data.tsv" -Recurse -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -notmatch "(?i)^.*_Design_Data\.tsv$" }
+
+        if ($tsvFiles.Count -eq 0) { continue }
+
+        $folderName = Split-Path $targetDir -Leaf
+        $outTsvPath = Join-Path $targetDir "${folderName}_Data.tsv"
+
+        $combined = [ordered]@{}
+        foreach ($tsv in $tsvFiles) {
+            if ($tsv.FullName -eq $outTsvPath) { continue }
+            $line = Get-Content $tsv.FullName -ErrorAction SilentlyContinue | Select-Object -Last 1
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $key = ($line -split "`t")
+            $combined[$key] = $line
+        }
+
+        if ($combined.Count -gt 0) {
+            $combined.Values | Set-Content -Path $outTsvPath -Encoding UTF8
+            $combinedCount++
+        }
+    }
+
+    [System.Windows.Forms.MessageBox]::Show("Successfully combined TSV data for $combinedCount group(s).", "Combine Data Complete", 0, 64) | Out-Null
+})
+
 $mainScroll = New-Object System.Windows.Forms.Panel
 $mainScroll.Dock = 'Fill'; $mainScroll.AutoScroll = $true; $mainScroll.BackColor = clr "#0D0E10"
 $form.Controls.Add($mainScroll)
