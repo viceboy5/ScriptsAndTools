@@ -122,19 +122,15 @@ $cBtnOnT  = clr "#6FD98F"
 $cBtnOnBd = clr "#4CAF72"
 $cFileSep = clr "#1A1C22"
 
+$script:validPrefixes = @('X1C', 'P2S', 'H2S')
+
 # --- Data stores -------------------------------------------------------------
-# db[gpKey]       = { Name; Path; Parents: OrderedDict }
-# db[gpKey].Parents[ppKey] = { Name; Path; Files: List<{Path;Name;Suffix;Extension;Stem;Parts}> }
-# gpRows[gpKey]   = { NewBox; ThemeLabels: List; ParentKeys: List; OldName }
-# parentRows[ppKey] = { Char; Adj; ThemeLabel; NewLabel; GpKey; OldName; FilePreviews: List }
 $script:db         = [System.Collections.Specialized.OrderedDictionary]::new()
 $script:gpRows     = @{}
 $script:parentRows = @{}
 $script:resizeList = [System.Collections.Generic.List[hashtable]]::new()
 
 # --- ParseFile: detect suffix and extension ----------------------------------
-# Compound extensions are checked first (longest match wins).
-# Suffix = last token when stem is split on delimiter runs ( space . _ - ).
 function script:ParseFile([string]$filename) {
     $compoundExts = @('.gcode.3mf', '.gcode.stl', '.gcode.step', '.f3d.3mf')
     $ext = $null
@@ -150,55 +146,59 @@ function script:ParseFile([string]$filename) {
     $stem  = $filename.Substring(0, $filename.Length - $ext.Length)
     $parts = [string[]]( ($stem -split '[\s._-]+') | Where-Object { $_ -ne '' } )
 
-    # .png files carry no suffix token — the whole stem is just the name
     if ($ext -ieq '.png') {
         return @{ Suffix = ''; Extension = $ext; Stem = $stem; Parts = $parts }
     }
 
     $suffix = if ($parts.Count -gt 0) { $parts[-1] } else { $stem }
-
     return @{ Suffix = $suffix; Extension = $ext; Stem = $stem; Parts = $parts }
 }
 
-# --- SmartFill: detect Character and Adj from the Full.3mf anchor in a parent
-# After rename:  CuteDuck[_Rare]_Farm_Full.3mf  -> Char=CuteDuck, Adj=Rare
-# Before rename: Cute Duck_Full.3mf             -> Char=CuteDuck, Adj=
-function script:SmartFill([string]$ppKey, [string]$gpName) {
+# --- SmartFill: detect Character and Adj from the Full.3mf anchor ------------
+function script:SmartFill([string]$ppKey, [string]$gpTheme) {
     $pd = $null
     foreach ($gk in $script:db.Keys) {
         if ($script:db[$gk].Parents.Contains($ppKey)) { $pd = $script:db[$gk].Parents[$ppKey]; break }
     }
     if (-not $pd) { return @{ Char = ''; Adj = '' } }
 
-    # Find the Full.3mf anchor in this parent
     $anchor = $null
     foreach ($fi in $pd.Files) {
         if ($fi.Suffix -ieq 'Full' -and $fi.Extension -ieq '.3mf') { $anchor = $fi; break }
     }
     if (-not $anchor) { return @{ Char = ''; Adj = '' } }
 
-    $stem    = $anchor.Stem
-    $escaped = [regex]::Escape($gpName)
+    $stem = $anchor.Stem
 
-    # Already renamed: ends with _Theme_Full
-    if ($gpName -ne '' -and $stem -imatch "^(.+)_${escaped}_Full$") {
-        $prefix   = $Matches[1]
-        $segments = $prefix -split '_'
-        if ($segments.Count -ge 2) {
-            # First segment = Character, rest = Adj (joined, stripping separators)
-            $adj = ($segments[1..($segments.Count-1)]) -join ''
-            return @{ Char = $segments[0]; Adj = $adj }
+    # 1. Strip known prefix safely
+    foreach ($p in $script:validPrefixes) {
+        if ($stem -imatch "^$p[_-]") {
+            $stem = $stem.Substring($p.Length + 1)
+            break
         }
-        return @{ Char = $prefix; Adj = '' }
     }
 
-    # Original file: all parts before the last one (Full), joined without separator
-    $parts = $anchor.Parts
-    if ($parts.Count -ge 2) {
-        $charRaw = $parts[0..($parts.Count - 2)] -join ''
-        return @{ Char = $charRaw; Adj = '' }
+    # 2. Strip "_Full" anchor
+    $stem = $stem -ireplace "_Full$", ""
+
+    # 3. Strip Theme safely if it exists
+    if ($gpTheme -ne '') {
+        $escapedTheme = [regex]::Escape($gpTheme)
+        $stem = $stem -ireplace "_${escapedTheme}$", ""
     }
-    return @{ Char = ($parts -join ''); Adj = '' }
+
+    # 4. Split what's left into Character and Adjective
+    $segments = $stem -split '_'
+
+    if ($segments.Count -ge 2) {
+        # First segment is Character, everything else joins to form the Adjective
+        $char = $segments
+        $adj  = ($segments[1..($segments.Count - 1)]) -join ''
+        return @{ Char = $char; Adj = $adj }
+    }
+
+    # Fallback if there is no Adjective segment
+    return @{ Char = $stem; Adj = '' }
 }
 
 # --- Helpers -----------------------------------------------------------------
@@ -218,17 +218,15 @@ function script:InputLayout([int]$panelW) {
     return @{ xChar=$xChar; wChar=$wChar; xSep1=$xSep1; xAdj=$xAdj; wAdj=$wAdj; xSep2=$xSep2; xTheme=$xTheme; wTheme=$wTheme }
 }
 
-# Factory functions -- each call creates a truly independent scope so the
-# captured control references don't get stomped by subsequent loop iterations.
 function script:ApplyResize {
     $w = [Math]::Max(620, $scroll.ClientSize.Width - 8)
     $lay = script:InputLayout $w
-    $halfW = [int](($w - 8 - 60) / 2)
 
     foreach ($entry in $script:resizeList) {
         if ($entry.Type -eq 'gp') {
             $entry.Panel.Width  = $w
-            $entry.NewBox.Width = $w - 290
+            $entry.NewBox.Width = 140
+            $entry.NewLbl.Location = New-Object System.Drawing.Point(520, 36)
         } elseif ($entry.Type -eq 'parent') {
             $entry.Panel.Width    = $w
             $entry.Divider.Width  = $w - 16
@@ -243,6 +241,8 @@ function script:ApplyResize {
             $entry.LChar.Location = New-Object System.Drawing.Point($lay.xChar,  42)
             $entry.LAdj.Location  = New-Object System.Drawing.Point($lay.xAdj,   42)
             $entry.LTheme.Location= New-Object System.Drawing.Point($lay.xTheme, 42)
+
+            $halfW = [int](($w - 8 - 60) / 2)
             foreach ($fi in $entry.Files) {
                 $fi.RowPanel.Width    = $w - 8
                 $fi.OldLabel.Width    = $halfW
@@ -254,15 +254,12 @@ function script:ApplyResize {
     }
 }
 
-# Anchors are still Full.3mf -- the presence of one qualifies the parent folder
 function script:IsMatch([string]$name) { $name -imatch 'full\.3mf' }
 
-# --- RegisterParent: add a parent folder and ALL its files to db -------------
 function script:RegisterParent([string]$parentPath, $gpDir) {
     $gpKey  = if ($gpDir) { $gpDir.FullName } else { '__ROOT__' }
     $gpName = if ($gpDir) { $gpDir.Name     } else { '(root)' }
 
-    # Already registered
     if ($script:db.Contains($gpKey) -and $script:db[$gpKey].Parents.Contains($parentPath)) { return }
 
     if (-not $script:db.Contains($gpKey)) {
@@ -281,7 +278,6 @@ function script:RegisterParent([string]$parentPath, $gpDir) {
             Path  = $parentPath
             Files = [System.Collections.Generic.List[object]]::new()
         }
-        # Collect ALL files in this folder (non-recursive), sorted by name
         try {
             Get-ChildItem -LiteralPath $parentPath -File -ErrorAction SilentlyContinue |
                 Sort-Object Name |
@@ -300,7 +296,6 @@ function script:RegisterParent([string]$parentPath, $gpDir) {
     }
 }
 
-# --- ScanPath ----------------------------------------------------------------
 function script:ScanPath([string]$rawPath) {
     $path = $rawPath.Trim('"').Trim()
     if ([System.IO.Directory]::Exists($path)) {
@@ -318,19 +313,22 @@ function script:ScanPath([string]$rawPath) {
 }
 
 # --- Name computation --------------------------------------------------------
-# File:   Character[_Adj]_Theme_Suffix + Extension
-# Parent: Theme_Character[_Adj]
-
 function script:ComputeFileNew([string]$ppKey, $fp) {
     $pRow  = $script:parentRows[$ppKey]; if (-not $pRow) { return '' }
     $gpRow = $script:gpRows[$pRow.GpKey]
+
+    $prefix = if ($gpRow -and $gpRow.PrefixDrop.Text -ne '') { script:NoSpaces $gpRow.PrefixDrop.Text } else { '' }
     $theme  = if ($gpRow) { script:NoSpaces $gpRow.NewBox.Text.Trim() } else { '' }
     $char   = script:NoSpaces $pRow.Char.Text.Trim()
     $adj    = script:NoSpaces $pRow.Adj.Text.Trim()
     if ($char -eq '') { return '' }
+
     $suffix = if ($fp.SuffixBox) { script:NoSpaces $fp.SuffixBox.Text.Trim() } else { $fp.Suffix }
     $ext    = $fp.Extension
-    $parts  = @($char)
+
+    $parts  = @()
+    if ($prefix -ne '') { $parts += $prefix }
+    $parts += $char
     if ($adj    -ne '') { $parts += $adj    }
     if ($theme  -ne '') { $parts += $theme  }
     if ($suffix -ne '') { $parts += $suffix }
@@ -340,33 +338,41 @@ function script:ComputeFileNew([string]$ppKey, $fp) {
 function script:ComputeParentNew([string]$ppKey) {
     $pRow  = $script:parentRows[$ppKey]; if (-not $pRow) { return '' }
     $gpRow = $script:gpRows[$pRow.GpKey]
-    $theme = if ($gpRow) { script:NoSpaces $gpRow.NewBox.Text.Trim() } else { '' }
-    $char  = script:NoSpaces $pRow.Char.Text.Trim()
-    $adj   = script:NoSpaces $pRow.Adj.Text.Trim()
+
+    $prefix = if ($gpRow -and $gpRow.PrefixDrop.Text -ne '') { script:NoSpaces $gpRow.PrefixDrop.Text } else { '' }
+    $theme  = if ($gpRow) { script:NoSpaces $gpRow.NewBox.Text.Trim() } else { '' }
+    $char   = script:NoSpaces $pRow.Char.Text.Trim()
+    $adj    = script:NoSpaces $pRow.Adj.Text.Trim()
+
     $parts = [System.Collections.Generic.List[string]]::new()
-    if ($char  -ne '') { $parts.Add($char)  }
-    if ($adj   -ne '') { $parts.Add($adj)   }
-    if ($theme -ne '') { $parts.Add($theme) }
+    if ($prefix -ne '') { $parts.Add($prefix) }
+    if ($char  -ne '')  { $parts.Add($char)  }
+    if ($adj   -ne '')  { $parts.Add($adj)   }
+    if ($theme -ne '')  { $parts.Add($theme) }
     if ($parts.Count -eq 0) { return '' }
     return $parts -join '_'
 }
 
 # --- Live update chain -------------------------------------------------------
+function script:RefreshGpPreview([string]$gpKey) {
+    $gpRow = $script:gpRows[$gpKey]; if (-not $gpRow) { return }
+    $newTheme = script:NoSpaces $gpRow.NewBox.Text.Trim()
+    $prefix   = if ($gpRow.PrefixDrop.Text -ne '') { script:NoSpaces $gpRow.PrefixDrop.Text } else { '' }
+
+    $gpVal = if ($prefix -ne '' -and $newTheme -ne '') { "${prefix}_${newTheme}" } elseif ($newTheme) { $newTheme } else { '' }
+    if ($gpRow.NewLbl) {
+        $gpRow.NewLbl.Text = if ($gpVal) { "PREVIEW:  $gpVal" } else { "PREVIEW:  (enter theme)" }
+    }
+}
+
 function script:UpdateFromGp([string]$gpKey) {
     $gpRow = $script:gpRows[$gpKey]; if (-not $gpRow) { return }
     $newTheme = script:NoSpaces $gpRow.NewBox.Text.Trim()
     foreach ($lbl in $gpRow.ThemeLabels) { $lbl.Text = "  $newTheme" }
     foreach ($ppKey in $gpRow.ParentKeys) {
-        $pRow = $script:parentRows[$ppKey]
-        if ($pRow) {
-            $v = script:ComputeParentNew $ppKey
-            $pRow.NewLabel.Text = if ($v) { "NEW:  $v" } else { 'NEW:  (enter fields to preview)' }
-            foreach ($fp in $pRow.FilePreviews) {
-                $fv = script:ComputeFileNew $ppKey $fp
-                $fp.NewLabel.Text = if ($fv) { $fv } else { '(enter Character)' }
-            }
-        }
+        script:UpdateFromParent $ppKey
     }
+    script:RefreshGpPreview $gpKey
     script:UpdateRenameButton
 }
 
@@ -378,6 +384,7 @@ function script:UpdateFromParent([string]$ppKey) {
         $fv = script:ComputeFileNew $ppKey $fp
         $fp.NewLabel.Text = if ($fv) { $fv } else { '(enter Character)' }
     }
+    script:RefreshGpPreview $pRow.GpKey
     script:UpdateRenameButton
 }
 
@@ -416,7 +423,6 @@ function script:UpdateRenameButton {
 }
 
 # --- Conflict resolution dialog ----------------------------------------------
-# Shows two conflicting files side by side with dates/sizes, returns path to delete or $null to abort.
 function script:ShowConflictDialog([string]$newName, [string]$pathA, [string]$pathB) {
     $fiA = [System.IO.FileInfo]::new($pathA)
     $fiB = [System.IO.FileInfo]::new($pathB)
@@ -460,7 +466,6 @@ function script:ShowConflictDialog([string]$newName, [string]$pathA, [string]$pa
     $newLbl.Location      = New-Object System.Drawing.Point(20, 64)
     $dlg.Controls.Add($newLbl)
 
-    # Helper to build a file card
     function MakeCard($fi, $x, $label) {
         $card                  = New-Object System.Windows.Forms.Panel
         $card.Size             = New-Object System.Drawing.Size(300, 140)
@@ -524,7 +529,6 @@ function script:ShowConflictDialog([string]$newName, [string]$pathA, [string]$pa
     $cardA = MakeCard $fiA 20  'FILE A  (will be renamed ->'
     $cardB = MakeCard $fiB 350 'FILE B  (will be renamed ->'
 
-    # Newer badge
     if ($fiA.LastWriteTime -gt $fiB.LastWriteTime) {
         $nb = New-Object System.Windows.Forms.Label; $nb.Text = 'NEWER'
         $nb.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
@@ -540,7 +544,6 @@ function script:ShowConflictDialog([string]$newName, [string]$pathA, [string]$pa
     $dlg.Controls.Add($cardA)
     $dlg.Controls.Add($cardB)
 
-    # Instruction
     $inst              = New-Object System.Windows.Forms.Label
     $inst.Text         = 'Choose which file to DELETE before renaming, or skip this conflict:'
     $inst.Font         = New-Object System.Drawing.Font('Segoe UI', 8)
@@ -585,7 +588,6 @@ function script:DoRename {
     $ops     = [System.Collections.Generic.List[object]]::new()
     $renamed = 0
 
-    # Build file ops
     foreach ($ppKey in $script:parentRows.Keys) {
         $pRow = $script:parentRows[$ppKey]
         foreach ($fp in $pRow.FilePreviews) {
@@ -599,8 +601,6 @@ function script:DoRename {
         }
     }
 
-    # --- Conflict detection: two source files -> same target path ------------
-    # Group file ops by NewPath and find duplicates
     $byTarget = @{}
     foreach ($op in $ops) {
         if ($op.Type -ne 'file') { continue }
@@ -615,31 +615,25 @@ function script:DoRename {
         $group = $byTarget[$key]
         if ($group.Count -lt 2) { continue }
 
-        # Show conflict dialog for the first two in this group
-        $opA = $group[0]; $opB = $group[1]
+        $opA = $group; $opB = $group
         $choice = script:ShowConflictDialog ([System.IO.Path]::GetFileName($opA.NewPath)) $opA.OldPath $opB.OldPath
 
         if ($choice -eq 'Abort') { return }
 
         if ($choice -eq 'A') {
-            # Delete file A, remove its op so only B gets renamed
             try { [System.IO.File]::Delete($opA.OldPath) } catch { $errors.Add("Could not delete $([System.IO.Path]::GetFileName($opA.OldPath)): $($_.Exception.Message)") }
             $toRemoveFromOps.Add($opA)
         } elseif ($choice -eq 'B') {
-            # Delete file B, remove its op
             try { [System.IO.File]::Delete($opB.OldPath) } catch { $errors.Add("Could not delete $([System.IO.Path]::GetFileName($opB.OldPath)): $($_.Exception.Message)") }
             $toRemoveFromOps.Add($opB)
         } else {
-            # Skip -- remove both from ops so neither gets renamed
             $toRemoveFromOps.Add($opA)
             $toRemoveFromOps.Add($opB)
         }
     }
 
-    # Remove resolved/skipped ops
     foreach ($dead in $toRemoveFromOps) { $ops.Remove($dead) | Out-Null }
 
-    # --- Also detect collision with an existing file that isn't being renamed -
     $stillConflicts = [System.Collections.Generic.List[string]]::new()
     foreach ($op in $ops) {
         if ($op.Type -ne 'file') { continue }
@@ -653,7 +647,6 @@ function script:DoRename {
         return
     }
 
-    # Parent folders
     foreach ($ppKey in $script:parentRows.Keys) {
         $newName = script:ComputeParentNew $ppKey
         if ($newName -eq '' -or -not [System.IO.Directory]::Exists($ppKey)) { continue }
@@ -664,12 +657,15 @@ function script:DoRename {
         }
     }
 
-    # Grandparent folders
     foreach ($gk in $script:gpRows.Keys) {
         $gpRow = $script:gpRows[$gk]
-        # Skip if user checked "Don't rename this folder"
         if ($gpRow.SkipChk -and $gpRow.SkipChk.Checked) { continue }
-        $newName = script:NoSpaces $gpRow.NewBox.Text.Trim()
+
+        $newTheme = script:NoSpaces $gpRow.NewBox.Text.Trim()
+        $prefix   = if ($gpRow.PrefixDrop.Text -ne '') { script:NoSpaces $gpRow.PrefixDrop.Text } else { '' }
+
+        $newName = if ($prefix -ne '' -and $newTheme -ne '') { "${prefix}_${newTheme}" } else { $newTheme }
+
         if ($newName -eq '' -or $gk -eq '__ROOT__' -or -not [System.IO.Directory]::Exists($gk)) { continue }
         $parent  = [System.IO.Path]::GetDirectoryName($gk)
         $newPath = [System.IO.Path]::Combine($parent, $newName)
@@ -719,8 +715,8 @@ function script:DoRename {
 
 # --- Build scrollable panel --------------------------------------------------
 function script:RebuildPanel {
-    # Save user-typed values (keyed per parent folder, suffix keyed per file path)
-    $savedChar   = @{}; $savedAdj = @{}; $savedGpNew = @{}; $savedSuffix = @{}; $savedSkipGp = @{}
+    $savedChar = @{}; $savedAdj = @{}; $savedGpNew = @{}; $savedSuffix = @{}; $savedPrefixGp = @{}; $savedSkipGp = @{}
+
     foreach ($ppKey in $script:parentRows.Keys) {
         $r = $script:parentRows[$ppKey]
         $savedChar[$ppKey] = $r.Char.Text
@@ -731,6 +727,7 @@ function script:RebuildPanel {
     }
     foreach ($gk in $script:gpRows.Keys) {
         $savedGpNew[$gk]  = $script:gpRows[$gk].NewBox.Text
+        if ($script:gpRows[$gk].PrefixDrop) { $savedPrefixGp[$gk] = $script:gpRows[$gk].PrefixDrop.Text }
         if ($script:gpRows[$gk].SkipChk) { $savedSkipGp[$gk] = $script:gpRows[$gk].SkipChk.Checked }
     }
 
@@ -762,8 +759,27 @@ function script:RebuildPanel {
         foreach ($pk in $gd.Parents.Keys) { $totalFiles += $gd.Parents[$pk].Files.Count }
         $badge = if ($totalFiles -eq 1) { '1 file' } else { "$totalFiles files" }
 
+        # Safely extract existing GP Prefix & Theme using raw strings
+        $gpTheme = $gd.Name
+        $gpPrefix = ''
+
+        foreach ($p in $script:validPrefixes) {
+            if ($gpTheme.StartsWith($p + "_", [System.StringComparison]::OrdinalIgnoreCase) -or
+                $gpTheme.StartsWith($p + "-", [System.StringComparison]::OrdinalIgnoreCase)) {
+                $gpPrefix = $p
+                $gpTheme = $gpTheme.Substring($p.Length + 1)
+                break
+            } elseif ($gpTheme -ieq $p) {
+                $gpPrefix = $p
+                $gpTheme = ''
+                break
+            }
+        }
+
         $gpRow = @{
+            PrefixDrop  = $null
             NewBox      = $null
+            NewLbl      = $null
             SkipChk     = $null
             ThemeLabels = [System.Collections.Generic.List[System.Windows.Forms.Label]]::new()
             ParentKeys  = [System.Collections.Generic.List[string]]::new()
@@ -771,7 +787,7 @@ function script:RebuildPanel {
         }
         $script:gpRows[$gpKey] = $gpRow
 
-        # -- Grandparent header (74px) ----------------------------------------
+        # -- Grandparent header -----------------------------------------------
         $gpPanel           = New-Object System.Windows.Forms.Panel
         $gpPanel.BackColor = $cBG3
         $gpPanel.Size      = New-Object System.Drawing.Size($innerW, 74)
@@ -803,24 +819,49 @@ function script:RebuildPanel {
         $gpOldVal.Location  = New-Object System.Drawing.Point(38, 36)
         $gpPanel.Controls.Add($gpOldVal)
 
+        $gpPrefixTag = New-Object System.Windows.Forms.Label
+        $gpPrefixTag.Text = 'PREFIX:'; $gpPrefixTag.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
+        $gpPrefixTag.ForeColor = $cBlue; $gpPrefixTag.AutoSize = $true
+        $gpPrefixTag.Location  = New-Object System.Drawing.Point(180, 36)
+        $gpPanel.Controls.Add($gpPrefixTag)
+
+        $gpPrefixDrop = New-Object System.Windows.Forms.ComboBox
+        $gpPrefixDrop.DropDownStyle = 'DropDownList'
+        $gpPrefixDrop.Items.AddRange(@('', 'X1C', 'P2S', 'H2S'))
+        $gpPrefixDrop.Font = New-Object System.Drawing.Font('Segoe UI', 8)
+        $gpPrefixDrop.BackColor = $cInput; $gpPrefixDrop.ForeColor = $cBlue
+        $gpPrefixDrop.Size = New-Object System.Drawing.Size(60, 20)
+        $gpPrefixDrop.Location = New-Object System.Drawing.Point(230, 33)
+        $gpPrefixDrop.Tag = $gpKey
+        $gpPrefixDrop.Text = if ($savedPrefixGp.ContainsKey($gpKey)) { $savedPrefixGp[$gpKey] } else { $gpPrefix }
+        $gpPanel.Controls.Add($gpPrefixDrop)
+        $gpRow.PrefixDrop = $gpPrefixDrop
+
         $gpNewTag = New-Object System.Windows.Forms.Label
-        $gpNewTag.Text = 'NEW:'; $gpNewTag.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
+        $gpNewTag.Text = 'THEME:'; $gpNewTag.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
         $gpNewTag.ForeColor = $cNewTag; $gpNewTag.AutoSize = $true
-        $gpNewTag.Location  = New-Object System.Drawing.Point(250, 36)
+        $gpNewTag.Location  = New-Object System.Drawing.Point(300, 36)
         $gpPanel.Controls.Add($gpNewTag)
 
         $gpNewBox                  = New-Object System.Windows.Forms.TextBox
-        $gpNewBox.Text             = if ($savedGpNew.ContainsKey($gpKey)) { $savedGpNew[$gpKey] } else { $gd.Name }
+        $gpNewBox.Text             = if ($savedGpNew.ContainsKey($gpKey)) { $savedGpNew[$gpKey] } else { $gpTheme }
         $gpNewBox.Font             = New-Object System.Drawing.Font('Segoe UI', 8)
         $gpNewBox.BackColor        = $cInput; $gpNewBox.ForeColor = $cNewText
         $gpNewBox.BorderStyle      = 'FixedSingle'
-        $gpNewBox.Size             = New-Object System.Drawing.Size(($innerW - 290), 20)
-        $gpNewBox.Location         = New-Object System.Drawing.Point(282, 33)
+        $gpNewBox.Size             = New-Object System.Drawing.Size(140, 20)
+        $gpNewBox.Location         = New-Object System.Drawing.Point(345, 33)
         $gpNewBox.Tag              = $gpKey
         $gpPanel.Controls.Add($gpNewBox)
         $gpRow.NewBox = $gpNewBox
 
-        # "Don't rename this folder" checkbox (row 3)
+        $gpNewLbl = New-Object System.Windows.Forms.Label
+        $gpNewLbl.Text = "PREVIEW:  (enter theme)"
+        $gpNewLbl.Font = New-Object System.Drawing.Font('Segoe UI', 8)
+        $gpNewLbl.ForeColor = $cNewText; $gpNewLbl.AutoSize = $true
+        $gpNewLbl.Location = New-Object System.Drawing.Point(520, 36)
+        $gpPanel.Controls.Add($gpNewLbl)
+        $gpRow.NewLbl = $gpNewLbl
+
         $gpSkipChk                  = New-Object System.Windows.Forms.CheckBox
         $gpSkipChk.Text             = "Don't rename this folder  (use Theme name for files/subfolders only)"
         $gpSkipChk.Font             = New-Object System.Drawing.Font('Segoe UI', 8)
@@ -829,17 +870,21 @@ function script:RebuildPanel {
         $gpSkipChk.Location         = New-Object System.Drawing.Point(10, 54)
         $gpSkipChk.FlatStyle        = 'Flat'
         $gpSkipChk.BackColor        = $cBG3
-        # Restore saved state
         if ($savedSkipGp.ContainsKey($gpKey)) { $gpSkipChk.Checked = $savedSkipGp[$gpKey] }
         $gpPanel.Controls.Add($gpSkipChk)
         $gpRow.SkipChk = $gpSkipChk
 
-        $script:resizeList.Add(@{ Type="gp"; Panel=$gpPanel; NewBox=$gpNewBox })
+        $script:resizeList.Add(@{ Type="gp"; Panel=$gpPanel; NewBox=$gpNewBox; NewLbl=$gpNewLbl; PrefixDrop=$gpPrefixDrop })
 
         $gpNewBox.Add_TextChanged({
             param($s, $e)
             $cur = $s.SelectionStart; $old = $s.Text; $n = $old -replace '[^a-zA-Z0-9]', ''
             if ($old -ne $n) { $s.Text = $n; $s.SelectionStart = [Math]::Max(0, $cur - ($old.Length - $n.Length)); $s.SelectionLength = 0 }
+            script:UpdateFromGp $s.Tag
+        })
+
+        $gpPrefixDrop.Add_SelectedIndexChanged({
+            param($s, $e)
             script:UpdateFromGp $s.Tag
         })
 
@@ -850,13 +895,11 @@ function script:RebuildPanel {
             $pd = $gd.Parents[$ppKey]
             $gpRow.ParentKeys.Add($ppKey)
 
-            # SmartFill defaults
-            $fill        = script:SmartFill $ppKey $gd.Name
-            $defaultChar = if ($savedChar.ContainsKey($ppKey)) { $savedChar[$ppKey] } else { $fill.Char }
-            $defaultAdj  = if ($savedAdj.ContainsKey($ppKey))  { $savedAdj[$ppKey]  } else { $fill.Adj  }
+            $fill         = script:SmartFill $ppKey $gpTheme
+            $defaultChar  = if ($savedChar.ContainsKey($ppKey)) { $savedChar[$ppKey] } else { $fill.Char }
+            $defaultAdj   = if ($savedAdj.ContainsKey($ppKey))  { $savedAdj[$ppKey]  } else { $fill.Adj  }
 
             $fileCount = $pd.Files.Count
-            # Heights: name=22, old/new folder=20, col labels=16, inputs=28, divider=5, files=(38 each), padding=6
             $pBlockH = 97 + ($fileCount * 54)
 
             # -- Parent block -------------------------------------------------
@@ -865,7 +908,6 @@ function script:RebuildPanel {
             $pPanel.Size      = New-Object System.Drawing.Size($innerW, $pBlockH)
             $pPanel.Location  = New-Object System.Drawing.Point(4, $y)
 
-            # Parent folder name (y=4)
             $pNameLbl = New-Object System.Windows.Forms.Label
             $pNameLbl.Text = "    $($pd.Name)"
             $pNameLbl.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
@@ -873,7 +915,6 @@ function script:RebuildPanel {
             $pNameLbl.Location  = New-Object System.Drawing.Point(4, 4)
             $pPanel.Controls.Add($pNameLbl)
 
-            # OLD/NEW folder row (y=22)
             $pOldTag = New-Object System.Windows.Forms.Label
             $pOldTag.Text = 'OLD:'; $pOldTag.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
             $pOldTag.ForeColor = $cOldTag; $pOldTag.AutoSize = $true
@@ -893,7 +934,6 @@ function script:RebuildPanel {
             $pNewLbl.Location  = New-Object System.Drawing.Point(300, 22)
             $pPanel.Controls.Add($pNewLbl)
 
-            # Column header labels (y=42)
             $lay = script:InputLayout $innerW
 
             $lChar = New-Object System.Windows.Forms.Label
@@ -914,7 +954,6 @@ function script:RebuildPanel {
             $lTheme.Location  = New-Object System.Drawing.Point($lay.xTheme, 42)
             $pPanel.Controls.Add($lTheme)
 
-            # Input controls (y=56)
             $tbChar = New-Object System.Windows.Forms.TextBox
             $tbChar.BackColor = $cInput; $tbChar.ForeColor = $cText
             $tbChar.BorderStyle = 'FixedSingle'; $tbChar.Font = New-Object System.Drawing.Font('Segoe UI', 9)
@@ -954,19 +993,27 @@ function script:RebuildPanel {
             $pPanel.Controls.Add($tbTheme)
             $gpRow.ThemeLabels.Add($tbTheme)
 
-            # Divider before file list (y=85)
             $divider = New-Object System.Windows.Forms.Panel
             $divider.BackColor = $cBorder
             $divider.Size = New-Object System.Drawing.Size(($innerW - 16), 1)
             $divider.Location = New-Object System.Drawing.Point(8, 85)
             $pPanel.Controls.Add($divider)
 
-            # File rows (y=88, each 38px)
             $filePreviews = [System.Collections.Generic.List[object]]::new()
             $fy = 88
 
             foreach ($fi in $pd.Files) {
-                # Alternating row background
+                # Suffix detection
+                $fSuffix = $fi.Suffix # Default mapped from ParseFile
+                $fParts  = $fi.Stem -split '_'
+                $themeIdx = -1
+                for ($i = $fParts.Count - 1; $i -ge 0; $i--) {
+                    if ($fParts[$i] -ieq $gpTheme) { $themeIdx = $i; break }
+                }
+                if ($themeIdx -gt 0 -and $themeIdx -lt $fParts.Count - 1) {
+                    $fSuffix = $fParts[($themeIdx + 1)..($fParts.Count - 1)] -join '_'
+                }
+
                 $rowBg = if (($filePreviews.Count % 2) -eq 0) { $cBG2 } else { $cFileSep }
 
                 $fRow = New-Object System.Windows.Forms.Panel
@@ -977,7 +1024,7 @@ function script:RebuildPanel {
 
                 $halfW = [int](($innerW - 8 - 60) / 2)
 
-                # Suffix badge (read-only display, top)
+                # Suffix Badge & Box
                 $suffixBadge = New-Object System.Windows.Forms.Label
                 $suffixBadge.Text = if ($fi.Suffix -ne '') { $fi.Suffix } else { '(none)' }
                 $suffixBadge.Font = New-Object System.Drawing.Font('Consolas', 7, [System.Drawing.FontStyle]::Bold)
@@ -989,7 +1036,6 @@ function script:RebuildPanel {
                 $suffixBadge.BorderStyle = 'FixedSingle'
                 $fRow.Controls.Add($suffixBadge)
 
-                # Editable suffix box (below badge)
                 $suffixBox = New-Object System.Windows.Forms.TextBox
                 $suffixBox.Font = New-Object System.Drawing.Font('Consolas', 7)
                 $suffixBox.BackColor = $cInput; $suffixBox.ForeColor = $cAmber
@@ -997,7 +1043,7 @@ function script:RebuildPanel {
                 $suffixBox.Size = New-Object System.Drawing.Size(52, 18)
                 $suffixBox.Location = New-Object System.Drawing.Point(4, 24)
                 $suffixBox.TextAlign = 'Center'
-                $suffixBox.Text = if ($savedSuffix.ContainsKey($fi.Path)) { $savedSuffix[$fi.Path] } else { $fi.Suffix }
+                $suffixBox.Text = if ($savedSuffix.ContainsKey($fi.Path)) { $savedSuffix[$fi.Path] } else { $fSuffix }
                 $suffixBox.Tag = $ppKey
                 $fRow.Controls.Add($suffixBox)
 
@@ -1040,7 +1086,6 @@ function script:RebuildPanel {
                     RowPanel  = $fRow
                 })
 
-                # Strip non-alphanumeric from suffix edit and propagate
                 $suffixBox.Add_TextChanged({
                     param($s, $e)
                     $cur = $s.SelectionStart; $old = $s.Text; $n = $old -replace '[^a-zA-Z0-9]', ''
@@ -1051,7 +1096,6 @@ function script:RebuildPanel {
                 $fy += 54
             }
 
-            # Register parent row
             $pRow = @{
                 Char         = $tbChar
                 Adj          = $tbAdj
@@ -1072,7 +1116,6 @@ function script:RebuildPanel {
                 Files   = $filePreviews
             })
 
-            # TextChanged: strip non-alphanumeric, propagate
             $tbChar.Add_TextChanged({
                 param($s, $e)
                 $cur = $s.SelectionStart; $old = $s.Text; $n = $old -replace '[^a-zA-Z0-9]', ''
@@ -1095,7 +1138,7 @@ function script:RebuildPanel {
     $scroll.AutoScrollMinSize = New-Object System.Drawing.Size(0, ($y + 10))
     $scroll.ResumeLayout()
 
-    # Fire initial previews
+    foreach ($gpKey in $script:gpRows.Keys) { script:RefreshGpPreview $gpKey }
     foreach ($ppKey in $script:parentRows.Keys) { script:UpdateFromParent $ppKey }
     script:UpdateRenameButton
 }
