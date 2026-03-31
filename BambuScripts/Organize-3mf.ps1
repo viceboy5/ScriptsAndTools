@@ -130,82 +130,21 @@ $script:gpRows     = @{}
 $script:parentRows = @{}
 $script:resizeList = [System.Collections.Generic.List[hashtable]]::new()
 
-# --- ParseFile: detect suffix and extension ----------------------------------
-function script:ParseFile([string]$filename) {
-    $compoundExts = @('.gcode.3mf', '.gcode.stl', '.gcode.step', '.f3d.3mf')
-    $ext = $null
-    foreach ($ce in $compoundExts) {
-        if ($filename.ToLower().EndsWith($ce.ToLower())) {
-            $ext = $filename.Substring($filename.Length - $ce.Length)
-            break
-        }
-    }
-    if (-not $ext) { $ext = [System.IO.Path]::GetExtension($filename) }
-    if (-not $ext) { $ext = '' }
-
-    $stem  = $filename.Substring(0, $filename.Length - $ext.Length)
-    $parts = [string[]]( ($stem -split '[\s._-]+') | Where-Object { $_ -ne '' } )
-
-    if ($ext -ieq '.png') {
-        return @{ Suffix = ''; Extension = $ext; Stem = $stem; Parts = $parts }
-    }
-
-    $suffix = if ($parts.Count -gt 0) { $parts[-1] } else { $stem }
-    return @{ Suffix = $suffix; Extension = $ext; Stem = $stem; Parts = $parts }
-}
-
-# --- SmartFill: strict array filtering for Character and Adjective -----------
-function script:SmartFill([string]$ppKey, [string]$gpTheme) {
-    $pd = $null
-    foreach ($gk in $script:db.Keys) {
-        if ($script:db[$gk].Parents.Contains($ppKey)) { $pd = $script:db[$gk].Parents[$ppKey]; break }
-    }
-    if (-not $pd) { return @{ Char = ''; Adj = '' } }
-
-    $anchor = $null
-    foreach ($fi in $pd.Files) {
-        if ($fi.Suffix -ieq 'Full' -and $fi.Extension -ieq '.3mf') { $anchor = $fi; break }
-    }
-    if (-not $anchor) { return @{ Char = ''; Adj = '' } }
-
-    $stem = $anchor.Stem
-
-    # 1. Break the string into chunks at every underscore
-    $chunks = $stem -split '_'
-
-    # 2. Filter out the known Theme, Suffix ("Full"), and ANY known Prefixes
-    $filteredChunks = @()
-    foreach ($c in $chunks) {
-        $cleanChunk = $c
-
-        # Strip prefixes even if they are mashed inside spaces (e.g. "Bigfoot P2S")
-        foreach ($p in $script:validPrefixes) {
-            $cleanChunk = $cleanChunk -ireplace "(?i)\b$p\b", ""
-        }
-
-        $cleanChunk = $cleanChunk.Trim()
-
-        if ($cleanChunk -ine 'Full' -and $cleanChunk -ine $gpTheme -and $cleanChunk -ne '') {
-            $filteredChunks += $cleanChunk
-        }
-    }
-
-    # 3. Assign the first remaining chunk to Character, and any others to Adjective
-    $char = ''
-    $adj  = ''
-
-    if ($filteredChunks.Count -ge 1) {
-        $char = $filteredChunks
-    }
-    if ($filteredChunks.Count -ge 2) {
-        $adj = ($filteredChunks[1..($filteredChunks.Count - 1)]) -join ''
-    }
-
-    return @{ Char = $char; Adj = $adj }
-}
-
 # --- Helpers -----------------------------------------------------------------
 function script:NoSpaces([string]$s) { $s -replace '[^a-zA-Z0-9]', '' }
+
+# Enforces CamelCase/PascalCase and strips all non-alphanumeric chars
+function script:ToPascalCase([string]$s) {
+    if ([string]::IsNullOrWhiteSpace($s)) { return '' }
+    $parts = $s -split '[_\-\s.]+' | Where-Object { $_ -ne '' }
+    $result = ''
+    foreach ($p in $parts) {
+        if ($p.Length -gt 0) {
+            $result += $p.Substring(0,1).ToUpper() + $p.Substring(1)
+        }
+    }
+    return $result -replace '[^a-zA-Z0-9]', ''
+}
 
 function script:InputLayout([int]$panelW) {
     $lm = 12; $rm = 12; $sepW = 16; $gap = 4
@@ -258,6 +197,77 @@ function script:ApplyResize {
 }
 
 function script:IsMatch([string]$name) { $name -imatch 'full\.3mf' }
+
+# --- ParseFile: detect suffix and extension ----------------------------------
+function script:ParseFile([string]$filename) {
+    $compoundExts = @('.gcode.3mf', '.gcode.stl', '.gcode.step', '.f3d.3mf')
+    $ext = $null
+    foreach ($ce in $compoundExts) {
+        if ($filename.ToLower().EndsWith($ce.ToLower())) {
+            $ext = $filename.Substring($filename.Length - $ce.Length)
+            break
+        }
+    }
+    if (-not $ext) { $ext = [System.IO.Path]::GetExtension($filename) }
+    if (-not $ext) { $ext = '' }
+
+    $stem  = $filename.Substring(0, $filename.Length - $ext.Length)
+    $parts = [string[]]( ($stem -split '[\s._-]+') | Where-Object { $_ -ne '' } )
+
+    if ($ext -ieq '.png') {
+        return @{ Suffix = ''; Extension = $ext; Stem = $stem; Parts = $parts }
+    }
+
+    $suffix = if ($parts.Count -gt 0) { $parts[-1] } else { $stem }
+    return @{ Suffix = $suffix; Extension = $ext; Stem = $stem; Parts = $parts }
+}
+
+# --- SmartFill: ruthless array filtering for Character and Adjective -----------
+function script:SmartFill([string]$ppKey, [string]$gpTheme) {
+    $pd = $null
+    foreach ($gk in $script:db.Keys) {
+        if ($script:db[$gk].Parents.Contains($ppKey)) { $pd = $script:db[$gk].Parents[$ppKey]; break }
+    }
+    if (-not $pd) { return @{ Char = ''; Adj = '' } }
+
+    $anchor = $null
+    foreach ($fi in $pd.Files) {
+        if ($fi.Suffix -ieq 'Full' -and $fi.Extension -ieq '.3mf') { $anchor = $fi; break }
+    }
+    if (-not $anchor) { return @{ Char = ''; Adj = '' } }
+
+    $stem = $anchor.Stem
+
+    # 1. Brutally strip any valid prefix from ANYWHERE in the filename
+    foreach ($p in $script:validPrefixes) {
+        $stem = $stem -ireplace "(?i)(^|[_\-\s.])$p([_\-\s.]|$)", "`$1"
+    }
+
+    # 2. Strip the "_Full" anchor from the end
+    $stem = $stem -ireplace "(?i)[_\-\s.]*Full$", ""
+
+    # 3. Strip the Theme from the string if it exists
+    if ($gpTheme -ne '') {
+        $escapedTheme = [regex]::Escape($gpTheme)
+        $stem = $stem -ireplace "(?i)[_\-\s.]*$escapedTheme\b", ""
+    }
+
+    # 4. Break the remaining string into chunks at every underscore, space, hyphen, or period
+    $chunks = $stem -split '[_\-\s.]+' | Where-Object { $_ -ne '' }
+
+    $char = ''
+    $adj  = ''
+
+    # 5. Assign the first chunk to Character, and string all remaining chunks into Adjective
+    if ($chunks.Count -ge 1) {
+        $char = script:ToPascalCase $chunks
+    }
+    if ($chunks.Count -ge 2) {
+        $adj = script:ToPascalCase ($chunks[1..($chunks.Count - 1)] -join ' ')
+    }
+
+    return @{ Char = $char; Adj = $adj }
+}
 
 function script:RegisterParent([string]$parentPath, $gpDir) {
     $gpKey  = if ($gpDir) { $gpDir.FullName } else { '__ROOT__' }
@@ -320,13 +330,13 @@ function script:ComputeFileNew([string]$ppKey, $fp) {
     $pRow  = $script:parentRows[$ppKey]; if (-not $pRow) { return '' }
     $gpRow = $script:gpRows[$pRow.GpKey]
 
-    $prefix = if ($gpRow -and $gpRow.PrefixDrop.Text -ne '') { script:NoSpaces $gpRow.PrefixDrop.Text } else { '' }
-    $theme  = if ($gpRow) { script:NoSpaces $gpRow.NewBox.Text.Trim() } else { '' }
-    $char   = script:NoSpaces $pRow.Char.Text.Trim()
-    $adj    = script:NoSpaces $pRow.Adj.Text.Trim()
+    $prefix = if ($gpRow -and $gpRow.PrefixDrop.Text -ne '') { script:ToPascalCase $gpRow.PrefixDrop.Text } else { '' }
+    $theme  = if ($gpRow) { script:ToPascalCase $gpRow.NewBox.Text } else { '' }
+    $char   = script:ToPascalCase $pRow.Char.Text
+    $adj    = script:ToPascalCase $pRow.Adj.Text
     if ($char -eq '') { return '' }
 
-    $suffix = if ($fp.SuffixBox) { script:NoSpaces $fp.SuffixBox.Text.Trim() } else { $fp.Suffix }
+    $suffix = if ($fp.SuffixBox) { script:ToPascalCase $fp.SuffixBox.Text } else { $fp.Suffix }
     $ext    = $fp.Extension
 
     $parts  = @()
@@ -342,10 +352,10 @@ function script:ComputeParentNew([string]$ppKey) {
     $pRow  = $script:parentRows[$ppKey]; if (-not $pRow) { return '' }
     $gpRow = $script:gpRows[$pRow.GpKey]
 
-    $prefix = if ($gpRow -and $gpRow.PrefixDrop.Text -ne '') { script:NoSpaces $gpRow.PrefixDrop.Text } else { '' }
-    $theme  = if ($gpRow) { script:NoSpaces $gpRow.NewBox.Text.Trim() } else { '' }
-    $char   = script:NoSpaces $pRow.Char.Text.Trim()
-    $adj    = script:NoSpaces $pRow.Adj.Text.Trim()
+    $prefix = if ($gpRow -and $gpRow.PrefixDrop.Text -ne '') { script:ToPascalCase $gpRow.PrefixDrop.Text } else { '' }
+    $theme  = if ($gpRow) { script:ToPascalCase $gpRow.NewBox.Text } else { '' }
+    $char   = script:ToPascalCase $pRow.Char.Text
+    $adj    = script:ToPascalCase $pRow.Adj.Text
 
     $parts = [System.Collections.Generic.List[string]]::new()
     if ($prefix -ne '') { $parts.Add($prefix) }
@@ -359,8 +369,8 @@ function script:ComputeParentNew([string]$ppKey) {
 # --- Live update chain -------------------------------------------------------
 function script:RefreshGpPreview([string]$gpKey) {
     $gpRow = $script:gpRows[$gpKey]; if (-not $gpRow) { return }
-    $newTheme = script:NoSpaces $gpRow.NewBox.Text.Trim()
-    $prefix   = if ($gpRow.PrefixDrop.Text -ne '') { script:NoSpaces $gpRow.PrefixDrop.Text } else { '' }
+    $newTheme = script:ToPascalCase $gpRow.NewBox.Text
+    $prefix   = if ($gpRow.PrefixDrop.Text -ne '') { script:ToPascalCase $gpRow.PrefixDrop.Text } else { '' }
 
     $gpVal = if ($prefix -ne '' -and $newTheme -ne '') { "${prefix}_${newTheme}" } elseif ($newTheme) { $newTheme } else { '' }
     if ($gpRow.NewLbl) {
@@ -370,7 +380,7 @@ function script:RefreshGpPreview([string]$gpKey) {
 
 function script:UpdateFromGp([string]$gpKey) {
     $gpRow = $script:gpRows[$gpKey]; if (-not $gpRow) { return }
-    $newTheme = script:NoSpaces $gpRow.NewBox.Text.Trim()
+    $newTheme = script:ToPascalCase $gpRow.NewBox.Text
     foreach ($lbl in $gpRow.ThemeLabels) { $lbl.Text = "  $newTheme" }
     foreach ($ppKey in $gpRow.ParentKeys) {
         script:UpdateFromParent $ppKey
@@ -414,11 +424,11 @@ function script:UpdateRenameButton {
     if ($script:db.Count -eq 0) { $btnRename.Enabled = $false; script:StyleRenameBtn $false; return }
     $ok = $true
     foreach ($gk in $script:gpRows.Keys) {
-        if ((script:NoSpaces $script:gpRows[$gk].NewBox.Text.Trim()) -eq '') { $ok = $false; break }
+        if ((script:ToPascalCase $script:gpRows[$gk].NewBox.Text) -eq '') { $ok = $false; break }
     }
     if ($ok) {
         foreach ($ppKey in $script:parentRows.Keys) {
-            if ((script:NoSpaces $script:parentRows[$ppKey].Char.Text.Trim()) -eq '') { $ok = $false; break }
+            if ((script:ToPascalCase $script:parentRows[$ppKey].Char.Text) -eq '') { $ok = $false; break }
         }
     }
     $btnRename.Enabled = $ok
@@ -664,8 +674,8 @@ function script:DoRename {
         $gpRow = $script:gpRows[$gk]
         if ($gpRow.SkipChk -and $gpRow.SkipChk.Checked) { continue }
 
-        $newTheme = script:NoSpaces $gpRow.NewBox.Text.Trim()
-        $prefix   = if ($gpRow.PrefixDrop.Text -ne '') { script:NoSpaces $gpRow.PrefixDrop.Text } else { '' }
+        $newTheme = script:ToPascalCase $gpRow.NewBox.Text
+        $prefix   = if ($gpRow.PrefixDrop.Text -ne '') { script:ToPascalCase $gpRow.PrefixDrop.Text } else { '' }
 
         $newName = if ($prefix -ne '' -and $newTheme -ne '') { "${prefix}_${newTheme}" } else { $newTheme }
 
@@ -774,15 +784,13 @@ function script:RebuildPanel {
         $gpPrefix = ''
 
         foreach ($p in $script:validPrefixes) {
-            if ($gpTheme.StartsWith($p + "_", [System.StringComparison]::OrdinalIgnoreCase) -or
-                $gpTheme.StartsWith($p + "-", [System.StringComparison]::OrdinalIgnoreCase) -or
-                $gpTheme.StartsWith($p + " ", [System.StringComparison]::OrdinalIgnoreCase)) {
+            if ($gpTheme -imatch "(?i)^$p([_\-\s.]+|$)") {
                 $gpPrefix = $p
-                $gpTheme = $gpTheme.Substring($p.Length + 1).Trim()
+                $gpTheme = $gpTheme -ireplace "(?i)^$p[_\-\s.]*", ""
                 break
-            } elseif ($gpTheme -ieq $p) {
+            } elseif ($gpTheme -imatch "(?i)([_\-\s.]+)$p$") {
                 $gpPrefix = $p
-                $gpTheme = ''
+                $gpTheme = $gpTheme -ireplace "(?i)[_\-\s.]*$p$", ""
                 break
             }
         }
@@ -855,7 +863,7 @@ function script:RebuildPanel {
         $gpPanel.Controls.Add($gpNewTag)
 
         $gpNewBox                  = New-Object System.Windows.Forms.TextBox
-        $gpNewBox.Text             = if ($savedGpNew.ContainsKey($gpKey)) { $savedGpNew[$gpKey] } else { $gpTheme }
+        $gpNewBox.Text             = if ($savedGpNew.ContainsKey($gpKey)) { script:ToPascalCase $savedGpNew[$gpKey] } else { script:ToPascalCase $gpTheme }
         $gpNewBox.Font             = New-Object System.Drawing.Font('Segoe UI', 8)
         $gpNewBox.BackColor        = $cInput; $gpNewBox.ForeColor = $cNewText
         $gpNewBox.BorderStyle      = 'FixedSingle'
@@ -889,8 +897,13 @@ function script:RebuildPanel {
 
         $gpNewBox.Add_TextChanged({
             param($s, $e)
-            $cur = $s.SelectionStart; $old = $s.Text; $n = $old -replace '[^a-zA-Z0-9]', ''
-            if ($old -ne $n) { $s.Text = $n; $s.SelectionStart = [Math]::Max(0, $cur - ($old.Length - $n.Length)); $s.SelectionLength = 0 }
+            $old = $s.Text
+            $n = script:ToPascalCase $old
+            if ($old -ne $n) {
+                $s.Text = $n
+                $s.SelectionStart = $s.Text.Length
+                $s.SelectionLength = 0
+            }
             script:UpdateFromGp $s.Tag
         })
 
@@ -907,8 +920,8 @@ function script:RebuildPanel {
             $gpRow.ParentKeys.Add($ppKey)
 
             $fill         = script:SmartFill $ppKey $gpTheme
-            $defaultChar  = if ($savedChar.ContainsKey($ppKey)) { $savedChar[$ppKey] } else { $fill.Char }
-            $defaultAdj   = if ($savedAdj.ContainsKey($ppKey))  { $savedAdj[$ppKey]  } else { $fill.Adj  }
+            $defaultChar  = if ($savedChar.ContainsKey($ppKey)) { script:ToPascalCase $savedChar[$ppKey] } else { $fill.Char }
+            $defaultAdj   = if ($savedAdj.ContainsKey($ppKey))  { script:ToPascalCase $savedAdj[$ppKey]  } else { $fill.Adj  }
 
             $fileCount = $pd.Files.Count
             $pBlockH = 97 + ($fileCount * 54)
@@ -994,7 +1007,7 @@ function script:RebuildPanel {
             $pPanel.Controls.Add($sep2)
 
             $tbTheme = New-Object System.Windows.Forms.Label
-            $tbTheme.Text = '  ' + (script:NoSpaces $gpRow.NewBox.Text.Trim())
+            $tbTheme.Text = '  ' + (script:ToPascalCase $gpRow.NewBox.Text)
             $tbTheme.Font = New-Object System.Drawing.Font('Segoe UI', 9)
             $tbTheme.BackColor = $cThemeBG; $tbTheme.ForeColor = $cThemeFG
             $tbTheme.BorderStyle = 'FixedSingle'
@@ -1054,7 +1067,7 @@ function script:RebuildPanel {
                 $suffixBox.Size = New-Object System.Drawing.Size(52, 18)
                 $suffixBox.Location = New-Object System.Drawing.Point(4, 24)
                 $suffixBox.TextAlign = 'Center'
-                $suffixBox.Text = if ($savedSuffix.ContainsKey($fi.Path)) { $savedSuffix[$fi.Path] } else { $fSuffix }
+                $suffixBox.Text = if ($savedSuffix.ContainsKey($fi.Path)) { script:ToPascalCase $savedSuffix[$fi.Path] } else { script:ToPascalCase $fSuffix }
                 $suffixBox.Tag = $ppKey
                 $fRow.Controls.Add($suffixBox)
 
@@ -1099,8 +1112,13 @@ function script:RebuildPanel {
 
                 $suffixBox.Add_TextChanged({
                     param($s, $e)
-                    $cur = $s.SelectionStart; $old = $s.Text; $n = $old -replace '[^a-zA-Z0-9]', ''
-                    if ($old -ne $n) { $s.Text=$n; $s.SelectionStart=[Math]::Max(0,$cur-($old.Length-$n.Length)); $s.SelectionLength=0 }
+                    $old = $s.Text
+                    $n = script:ToPascalCase $old
+                    if ($old -ne $n) {
+                        $s.Text=$n
+                        $s.SelectionStart = $s.Text.Length
+                        $s.SelectionLength=0
+                    }
                     script:UpdateFromParent $s.Tag
                 })
 
@@ -1129,14 +1147,24 @@ function script:RebuildPanel {
 
             $tbChar.Add_TextChanged({
                 param($s, $e)
-                $cur = $s.SelectionStart; $old = $s.Text; $n = $old -replace '[^a-zA-Z0-9]', ''
-                if ($old -ne $n) { $s.Text=$n; $s.SelectionStart=[Math]::Max(0,$cur-($old.Length-$n.Length)); $s.SelectionLength=0 }
+                $old = $s.Text
+                $n = script:ToPascalCase $old
+                if ($old -ne $n) {
+                    $s.Text=$n
+                    $s.SelectionStart = $s.Text.Length
+                    $s.SelectionLength=0
+                }
                 script:UpdateFromParent $s.Tag
             })
             $tbAdj.Add_TextChanged({
                 param($s, $e)
-                $cur = $s.SelectionStart; $old = $s.Text; $n = $old -replace '[^a-zA-Z0-9]', ''
-                if ($old -ne $n) { $s.Text=$n; $s.SelectionStart=[Math]::Max(0,$cur-($old.Length-$n.Length)); $s.SelectionLength=0 }
+                $old = $s.Text
+                $n = script:ToPascalCase $old
+                if ($old -ne $n) {
+                    $s.Text=$n
+                    $s.SelectionStart = $s.Text.Length
+                    $s.SelectionLength=0
+                }
                 script:UpdateFromParent $s.Tag
             })
 
