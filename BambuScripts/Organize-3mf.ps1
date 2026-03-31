@@ -266,6 +266,13 @@ function script:SmartFill([string]$ppKey, [string]$gpTheme) {
         $adj = script:ToPascalCase ($chunks[1..($chunks.Count - 1)] -join ' ')
     }
 
+    # 6. SELF-HEALING: Strip the duplicated Adjective from the Character name (caused by older script runs)
+    if ($adj -ne '' -and $char.Length -gt $adj.Length) {
+        if ($char.EndsWith($adj, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $char = $char.Substring(0, $char.Length - $adj.Length)
+        }
+    }
+
     return @{ Char = $char; Adj = $adj }
 }
 
@@ -628,7 +635,7 @@ function script:DoRename {
         $group = $byTarget[$key]
         if ($group.Count -lt 2) { continue }
 
-        $opA = $group; $opB = $group
+        $opA = $group; [cite_start]$opB = $group[1]
         $choice = script:ShowConflictDialog ([System.IO.Path]::GetFileName($opA.NewPath)) $opA.OldPath $opB.OldPath
 
         if ($choice -eq 'Abort') { return }
@@ -795,6 +802,9 @@ function script:RebuildPanel {
             }
         }
 
+        # Enforce alphanumeric immediately on load for the theme
+        $gpTheme = script:ToPascalCase $gpTheme
+
         $gpRow = @{
             PrefixDrop  = $null
             NewBox      = $null
@@ -863,7 +873,7 @@ function script:RebuildPanel {
         $gpPanel.Controls.Add($gpNewTag)
 
         $gpNewBox                  = New-Object System.Windows.Forms.TextBox
-        $gpNewBox.Text             = if ($savedGpNew.ContainsKey($gpKey)) { script:ToPascalCase $savedGpNew[$gpKey] } else { script:ToPascalCase $gpTheme }
+        $gpNewBox.Text             = if ($savedGpNew.ContainsKey($gpKey)) { script:ToPascalCase $savedGpNew[$gpKey] } else { $gpTheme }
         $gpNewBox.Font             = New-Object System.Drawing.Font('Segoe UI', 8)
         $gpNewBox.BackColor        = $cInput; $gpNewBox.ForeColor = $cNewText
         $gpNewBox.BorderStyle      = 'FixedSingle'
