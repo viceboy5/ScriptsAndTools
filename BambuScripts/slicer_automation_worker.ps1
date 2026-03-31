@@ -32,7 +32,8 @@ function Invoke-SliceFile([string]$filePath, [string]$label) {
 
     Write-Host "  -> Slicing $label`: $baseName " -ForegroundColor Cyan -NoNewline
 
-    $procArgs = "--debug 3 --no-check --slice 1 --min-save --export-3mf `"$slicedOut`" `"$filePath`""
+    # Added --uptodate and --allow-newer-file to bypass all version mismatch prompts
+    $procArgs = "--debug 3 --no-check --uptodate --allow-newer-file --slice 1 --min-save --export-3mf `"$slicedOut`" `"$filePath`""
     $proc = Start-Process -FilePath $BambuPath -ArgumentList $procArgs -RedirectStandardOutput $logOut -RedirectStandardError $logErr -WindowStyle Hidden -PassThru
 
     while (-not $proc.HasExited) {
