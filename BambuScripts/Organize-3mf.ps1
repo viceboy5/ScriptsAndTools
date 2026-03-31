@@ -170,27 +170,27 @@ function script:SmartFill([string]$ppKey, [string]$gpTheme) {
 
     $stem = $anchor.Stem
 
-    # 1. Strip Prefix safely from the start of the string
-    foreach ($p in $script:validPrefixes) {
-        if ($stem.StartsWith($p + "_", [System.StringComparison]::OrdinalIgnoreCase) -or
-            $stem.StartsWith($p + "-", [System.StringComparison]::OrdinalIgnoreCase)) {
-            $stem = $stem.Substring($p.Length + 1)
-            break
-        }
-    }
-
-    # 2. Break the remaining string into chunks at every underscore
+    # 1. Break the string into chunks at every underscore
     $chunks = $stem -split '_'
 
-    # 3. Filter out the known Theme and Suffix ("Full")
+    # 2. Filter out the known Theme, Suffix ("Full"), and ANY known Prefixes
     $filteredChunks = @()
     foreach ($c in $chunks) {
-        if ($c -ine 'Full' -and $c -ine $gpTheme -and $c -ne '') {
-            $filteredChunks += $c
+        $cleanChunk = $c
+
+        # Strip prefixes even if they are mashed inside spaces (e.g. "Bigfoot P2S")
+        foreach ($p in $script:validPrefixes) {
+            $cleanChunk = $cleanChunk -ireplace "(?i)\b$p\b", ""
+        }
+
+        $cleanChunk = $cleanChunk.Trim()
+
+        if ($cleanChunk -ine 'Full' -and $cleanChunk -ine $gpTheme -and $cleanChunk -ne '') {
+            $filteredChunks += $cleanChunk
         }
     }
 
-    # 4. Assign the first remaining chunk to Character, and any others to Adjective
+    # 3. Assign the first remaining chunk to Character, and any others to Adjective
     $char = ''
     $adj  = ''
 
@@ -775,9 +775,10 @@ function script:RebuildPanel {
 
         foreach ($p in $script:validPrefixes) {
             if ($gpTheme.StartsWith($p + "_", [System.StringComparison]::OrdinalIgnoreCase) -or
-                $gpTheme.StartsWith($p + "-", [System.StringComparison]::OrdinalIgnoreCase)) {
+                $gpTheme.StartsWith($p + "-", [System.StringComparison]::OrdinalIgnoreCase) -or
+                $gpTheme.StartsWith($p + " ", [System.StringComparison]::OrdinalIgnoreCase)) {
                 $gpPrefix = $p
-                $gpTheme = $gpTheme.Substring($p.Length + 1)
+                $gpTheme = $gpTheme.Substring($p.Length + 1).Trim()
                 break
             } elseif ($gpTheme -ieq $p) {
                 $gpPrefix = $p
