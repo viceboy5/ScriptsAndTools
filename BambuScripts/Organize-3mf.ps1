@@ -154,7 +154,7 @@ function script:ParseFile([string]$filename) {
     return @{ Suffix = $suffix; Extension = $ext; Stem = $stem; Parts = $parts }
 }
 
-# --- SmartFill: detect Character and Adj from the Full.3mf anchor ------------
+# --- SmartFill: strict array filtering for Character and Adjective -----------
 function script:SmartFill([string]$ppKey, [string]$gpTheme) {
     $pd = $null
     foreach ($gk in $script:db.Keys) {
@@ -170,35 +170,38 @@ function script:SmartFill([string]$ppKey, [string]$gpTheme) {
 
     $stem = $anchor.Stem
 
-    # 1. Strip known prefix safely
+    # 1. Strip Prefix safely from the start of the string
     foreach ($p in $script:validPrefixes) {
-        if ($stem -imatch "^$p[_-]") {
+        if ($stem.StartsWith($p + "_", [System.StringComparison]::OrdinalIgnoreCase) -or
+            $stem.StartsWith($p + "-", [System.StringComparison]::OrdinalIgnoreCase)) {
             $stem = $stem.Substring($p.Length + 1)
             break
         }
     }
 
-    # 2. Strip "_Full" anchor
-    $stem = $stem -ireplace "_Full$", ""
+    # 2. Break the remaining string into chunks at every underscore
+    $chunks = $stem -split '_'
 
-    # 3. Strip Theme safely if it exists
-    if ($gpTheme -ne '') {
-        $escapedTheme = [regex]::Escape($gpTheme)
-        $stem = $stem -ireplace "_${escapedTheme}$", ""
+    # 3. Filter out the known Theme and Suffix ("Full")
+    $filteredChunks = @()
+    foreach ($c in $chunks) {
+        if ($c -ine 'Full' -and $c -ine $gpTheme -and $c -ne '') {
+            $filteredChunks += $c
+        }
     }
 
-    # 4. Split what's left into Character and Adjective
-    $segments = $stem -split '_'
+    # 4. Assign the first remaining chunk to Character, and any others to Adjective
+    $char = ''
+    $adj  = ''
 
-    if ($segments.Count -ge 2) {
-        # First segment is Character, everything else joins to form the Adjective
-        $char = $segments
-        $adj  = ($segments[1..($segments.Count - 1)]) -join ''
-        return @{ Char = $char; Adj = $adj }
+    if ($filteredChunks.Count -ge 1) {
+        $char = $filteredChunks
+    }
+    if ($filteredChunks.Count -ge 2) {
+        $adj = ($filteredChunks[1..($filteredChunks.Count - 1)]) -join ''
     }
 
-    # Fallback if there is no Adjective segment
-    return @{ Char = $stem; Adj = '' }
+    return @{ Char = $char; Adj = $adj }
 }
 
 # --- Helpers -----------------------------------------------------------------
@@ -298,13 +301,13 @@ function script:RegisterParent([string]$parentPath, $gpDir) {
 
 function script:ScanPath([string]$rawPath) {
     $path = $rawPath.Trim('"').Trim()
-    if ([System.IO.Directory]::Exists($path)) {
+    if (Test-Path -LiteralPath $path -PathType Container) {
         try {
             Get-ChildItem -LiteralPath $path -Recurse -File -ErrorAction SilentlyContinue |
                 Where-Object { script:IsMatch $_.Name } |
                 ForEach-Object { script:RegisterParent $_.Directory.FullName $_.Directory.Parent }
         } catch { }
-    } elseif ([System.IO.File]::Exists($path)) {
+    } elseif (Test-Path -LiteralPath $path -PathType Leaf) {
         if (script:IsMatch ([System.IO.Path]::GetFileName($path))) {
             $fi = [System.IO.FileInfo]::new($path)
             script:RegisterParent $fi.Directory.FullName $fi.Directory.Parent
@@ -592,7 +595,7 @@ function script:DoRename {
         $pRow = $script:parentRows[$ppKey]
         foreach ($fp in $pRow.FilePreviews) {
             $newName = script:ComputeFileNew $ppKey $fp
-            if ($newName -eq '' -or -not [System.IO.File]::Exists($fp.Path)) { continue }
+            if ($newName -eq '' -or -not (Test-Path -LiteralPath $fp.Path -PathType Leaf)) { continue }
             $dir     = [System.IO.Path]::GetDirectoryName($fp.Path)
             $newPath = [System.IO.Path]::Combine($dir, $newName)
             if ($fp.Path -ne $newPath) {
@@ -621,10 +624,10 @@ function script:DoRename {
         if ($choice -eq 'Abort') { return }
 
         if ($choice -eq 'A') {
-            try { [System.IO.File]::Delete($opA.OldPath) } catch { $errors.Add("Could not delete $([System.IO.Path]::GetFileName($opA.OldPath)): $($_.Exception.Message)") }
+            try { Remove-Item -LiteralPath $opA.OldPath -Force } catch { $errors.Add("Could not delete $([System.IO.Path]::GetFileName($opA.OldPath)): $($_.Exception.Message)") }
             $toRemoveFromOps.Add($opA)
         } elseif ($choice -eq 'B') {
-            try { [System.IO.File]::Delete($opB.OldPath) } catch { $errors.Add("Could not delete $([System.IO.Path]::GetFileName($opB.OldPath)): $($_.Exception.Message)") }
+            try { Remove-Item -LiteralPath $opB.OldPath -Force } catch { $errors.Add("Could not delete $([System.IO.Path]::GetFileName($opB.OldPath)): $($_.Exception.Message)") }
             $toRemoveFromOps.Add($opB)
         } else {
             $toRemoveFromOps.Add($opA)
@@ -637,7 +640,7 @@ function script:DoRename {
     $stillConflicts = [System.Collections.Generic.List[string]]::new()
     foreach ($op in $ops) {
         if ($op.Type -ne 'file') { continue }
-        if ([System.IO.File]::Exists($op.NewPath) -and $op.NewPath -ne $op.OldPath) {
+        if ((Test-Path -LiteralPath $op.NewPath -PathType Leaf) -and $op.NewPath -ne $op.OldPath) {
             $stillConflicts.Add("$([System.IO.Path]::GetFileName($op.OldPath))  ->  $([System.IO.Path]::GetFileName($op.NewPath))  (target already exists on disk)")
         }
     }
@@ -649,7 +652,7 @@ function script:DoRename {
 
     foreach ($ppKey in $script:parentRows.Keys) {
         $newName = script:ComputeParentNew $ppKey
-        if ($newName -eq '' -or -not [System.IO.Directory]::Exists($ppKey)) { continue }
+        if ($newName -eq '' -or -not (Test-Path -LiteralPath $ppKey -PathType Container)) { continue }
         $parent  = [System.IO.Path]::GetDirectoryName($ppKey)
         $newPath = [System.IO.Path]::Combine($parent, $newName)
         if ($ppKey -ne $newPath) {
@@ -666,7 +669,7 @@ function script:DoRename {
 
         $newName = if ($prefix -ne '' -and $newTheme -ne '') { "${prefix}_${newTheme}" } else { $newTheme }
 
-        if ($newName -eq '' -or $gk -eq '__ROOT__' -or -not [System.IO.Directory]::Exists($gk)) { continue }
+        if ($newName -eq '' -or $gk -eq '__ROOT__' -or -not (Test-Path -LiteralPath $gk -PathType Container)) { continue }
         $parent  = [System.IO.Path]::GetDirectoryName($gk)
         $newPath = [System.IO.Path]::Combine($parent, $newName)
         if ($gk -ne $newPath) {
@@ -690,14 +693,21 @@ function script:DoRename {
 
     if ([System.Windows.Forms.MessageBox]::Show($summary, 'Confirm Rename', 'YesNo', 'Question') -ne 'Yes') { return }
 
+    # CRITICAL: Replaced [System.IO] calls with native PowerShell Rename-Item for Synology offline file safety
     foreach ($typeOrder in @('file', 'parent', 'gp')) {
         foreach ($op in $ops) {
             if ($op.Type -ne $typeOrder) { continue }
             try {
                 if ($op.Type -eq 'file') {
-                    if ([System.IO.File]::Exists($op.OldPath)) { [System.IO.File]::Move($op.OldPath, $op.NewPath); $renamed++ }
+                    if (Test-Path -LiteralPath $op.OldPath -PathType Leaf) {
+                        Rename-Item -LiteralPath $op.OldPath -NewName ([System.IO.Path]::GetFileName($op.NewPath)) -Force
+                        $renamed++
+                    }
                 } else {
-                    if ([System.IO.Directory]::Exists($op.OldPath)) { [System.IO.Directory]::Move($op.OldPath, $op.NewPath); $renamed++ }
+                    if (Test-Path -LiteralPath $op.OldPath -PathType Container) {
+                        Rename-Item -LiteralPath $op.OldPath -NewName ([System.IO.Path]::GetFileName($op.NewPath)) -Force
+                        $renamed++
+                    }
                 }
             } catch {
                 $errors.Add("$([System.IO.Path]::GetFileName($op.OldPath)): $($_.Exception.Message)")
