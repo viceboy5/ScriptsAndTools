@@ -161,6 +161,9 @@ function script:InputLayout([int]$panelW) {
 }
 
 function script:ApplyResize {
+    # PERFORMANCE FIX: Freeze UI layout updates while recalculating widths
+    $scroll.SuspendLayout()
+
     $w = [Math]::Max(620, $scroll.ClientSize.Width - 8)
     $lay = script:InputLayout $w
 
@@ -194,6 +197,9 @@ function script:ApplyResize {
             }
         }
     }
+
+    # PERFORMANCE FIX: Release the layout freeze and draw exactly once
+    $scroll.ResumeLayout()
 }
 
 function script:IsMatch([string]$name) { $name -imatch 'full\.3mf' }
@@ -509,8 +515,18 @@ function script:ShowConflictDialog([string]$newName, [string]$pathA, [string]$pa
         $hdr.Location          = New-Object System.Drawing.Point(12, 10)
         $card.Controls.Add($hdr)
 
+        # FIX: Safe properties for Synology 0-byte cloud stubs that throw exceptions
+        $safeName = if ($fi.Exists) { $fi.Name } else { [System.IO.Path]::GetFileName($fi.FullName) }
+        $safeMod = "Unknown (Cloud Stub)"
+        $safeSize = "Unknown"
+        $safeCreated = "Unknown"
+
+        try { $safeMod = $fi.LastWriteTime.ToString('yyyy-MM-dd  h:mm tt') } catch {}
+        try { $safeSize = FmtSize $fi.Length } catch {}
+        try { $safeCreated = $fi.CreationTime.ToString('yyyy-MM-dd  h:mm tt') } catch {}
+
         $fname                 = New-Object System.Windows.Forms.Label
-        $fname.Text            = $fi.Name
+        $fname.Text            = $safeName
         $fname.Font            = New-Object System.Drawing.Font('Consolas', 8)
         $fname.ForeColor       = clr '#DDE0E8'
         $fname.AutoSize        = $false
@@ -520,7 +536,7 @@ function script:ShowConflictDialog([string]$newName, [string]$pathA, [string]$pa
         $card.Controls.Add($fname)
 
         $mod                   = New-Object System.Windows.Forms.Label
-        $mod.Text              = 'Modified:  ' + $fi.LastWriteTime.ToString('yyyy-MM-dd  h:mm tt')
+        $mod.Text              = 'Modified:  ' + $safeMod
         $mod.Font              = New-Object System.Drawing.Font('Segoe UI', 8)
         $mod.ForeColor         = clr '#6DAEE0'
         $mod.AutoSize          = $true
@@ -528,7 +544,7 @@ function script:ShowConflictDialog([string]$newName, [string]$pathA, [string]$pa
         $card.Controls.Add($mod)
 
         $sz                    = New-Object System.Windows.Forms.Label
-        $sz.Text               = 'Size:  ' + (FmtSize $fi.Length)
+        $sz.Text               = 'Size:  ' + $safeSize
         $sz.Font               = New-Object System.Drawing.Font('Segoe UI', 8)
         $sz.ForeColor          = clr '#6B6E7A'
         $sz.AutoSize           = $true
@@ -536,7 +552,7 @@ function script:ShowConflictDialog([string]$newName, [string]$pathA, [string]$pa
         $card.Controls.Add($sz)
 
         $created               = New-Object System.Windows.Forms.Label
-        $created.Text          = 'Created:  ' + $fi.CreationTime.ToString('yyyy-MM-dd  h:mm tt')
+        $created.Text          = 'Created:  ' + $safeCreated
         $created.Font          = New-Object System.Drawing.Font('Segoe UI', 8)
         $created.ForeColor     = clr '#6B6E7A'
         $created.AutoSize      = $true
@@ -549,17 +565,22 @@ function script:ShowConflictDialog([string]$newName, [string]$pathA, [string]$pa
     $cardA = MakeCard $fiA 20  'FILE A  (will be renamed ->'
     $cardB = MakeCard $fiB 350 'FILE B  (will be renamed ->'
 
-    if ($fiA.LastWriteTime -gt $fiB.LastWriteTime) {
-        $nb = New-Object System.Windows.Forms.Label; $nb.Text = 'NEWER'
-        $nb.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
-        $nb.ForeColor = clr '#4CAF72'; $nb.BackColor = clr '#1E3328'
-        $nb.AutoSize = $true; $nb.Location = New-Object System.Drawing.Point(12, 118); $cardA.Controls.Add($nb)
-    } elseif ($fiB.LastWriteTime -gt $fiA.LastWriteTime) {
-        $nb = New-Object System.Windows.Forms.Label; $nb.Text = 'NEWER'
-        $nb.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
-        $nb.ForeColor = clr '#4CAF72'; $nb.BackColor = clr '#1E3328'
-        $nb.AutoSize = $true; $nb.Location = New-Object System.Drawing.Point(12, 118); $cardB.Controls.Add($nb)
-    }
+    # Safe date comparison
+    try {
+        if ($fiA.Exists -and $fiB.Exists) {
+            if ($fiA.LastWriteTime -gt $fiB.LastWriteTime) {
+                $nb = New-Object System.Windows.Forms.Label; $nb.Text = 'NEWER'
+                $nb.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
+                $nb.ForeColor = clr '#4CAF72'; $nb.BackColor = clr '#1E3328'
+                $nb.AutoSize = $true; $nb.Location = New-Object System.Drawing.Point(12, 118); $cardA.Controls.Add($nb)
+            } elseif ($fiB.LastWriteTime -gt $fiA.LastWriteTime) {
+                $nb = New-Object System.Windows.Forms.Label; $nb.Text = 'NEWER'
+                $nb.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
+                $nb.ForeColor = clr '#4CAF72'; $nb.BackColor = clr '#1E3328'
+                $nb.AutoSize = $true; $nb.Location = New-Object System.Drawing.Point(12, 118); $cardB.Controls.Add($nb)
+            }
+        }
+    } catch {}
 
     $dlg.Controls.Add($cardA)
     $dlg.Controls.Add($cardB)
@@ -641,10 +662,10 @@ function script:DoRename {
         if ($choice -eq 'Abort') { return }
 
         if ($choice -eq 'A') {
-            try { Remove-Item -LiteralPath $opA.OldPath -Force } catch { $errors.Add("Could not delete $([System.IO.Path]::GetFileName($opA.OldPath)): $($_.Exception.Message)") }
+            try { [System.IO.File]::Delete($opA.OldPath) } catch { $errors.Add("Could not delete $([System.IO.Path]::GetFileName($opA.OldPath)): $($_.Exception.Message)") }
             $toRemoveFromOps.Add($opA)
         } elseif ($choice -eq 'B') {
-            try { Remove-Item -LiteralPath $opB.OldPath -Force } catch { $errors.Add("Could not delete $([System.IO.Path]::GetFileName($opB.OldPath)): $($_.Exception.Message)") }
+            try { [System.IO.File]::Delete($opB.OldPath) } catch { $errors.Add("Could not delete $([System.IO.Path]::GetFileName($opB.OldPath)): $($_.Exception.Message)") }
             $toRemoveFromOps.Add($opB)
         } else {
             $toRemoveFromOps.Add($opA)
@@ -653,19 +674,6 @@ function script:DoRename {
     }
 
     foreach ($dead in $toRemoveFromOps) { $ops.Remove($dead) | Out-Null }
-
-    $stillConflicts = [System.Collections.Generic.List[string]]::new()
-    foreach ($op in $ops) {
-        if ($op.Type -ne 'file') { continue }
-        if ((Test-Path -LiteralPath $op.NewPath -PathType Leaf) -and $op.NewPath -ne $op.OldPath) {
-            $stillConflicts.Add("$([System.IO.Path]::GetFileName($op.OldPath))  ->  $([System.IO.Path]::GetFileName($op.NewPath))  (target already exists on disk)")
-        }
-    }
-    if ($stillConflicts.Count -gt 0) {
-        $msg = "The following targets already exist on disk and would be overwritten.`nResolve these manually before proceeding:`n`n" + ($stillConflicts -join "`n")
-        [System.Windows.Forms.MessageBox]::Show($msg, 'Cannot Proceed', 'OK', 'Warning') | Out-Null
-        return
-    }
 
     foreach ($ppKey in $script:parentRows.Keys) {
         $newName = script:ComputeParentNew $ppKey
@@ -699,7 +707,7 @@ function script:DoRename {
         return
     }
 
-    $summary = "About to rename $($ops.Count) item(s).`n`n"
+    $summary = "About to rename $($ops.Count) item(s). Overwrites are ENABLED.`n`n"
     $maxShow = [Math]::Min($ops.Count, 14)
     for ($i = 0; $i -lt $maxShow; $i++) {
         $o = $ops[$i]
@@ -710,19 +718,39 @@ function script:DoRename {
 
     if ([System.Windows.Forms.MessageBox]::Show($summary, 'Confirm Rename', 'YesNo', 'Question') -ne 'Yes') { return }
 
-    # CRITICAL: Replaced [System.IO] calls with native PowerShell Rename-Item for Synology offline file safety
+    # CRITICAL: Gentle Swap execution phase to protect Synology Cloud links
     foreach ($typeOrder in @('file', 'parent', 'gp')) {
         foreach ($op in $ops) {
             if ($op.Type -ne $typeOrder) { continue }
             try {
+                $isCaseChangeOnly = ($op.OldPath -ieq $op.NewPath) -and ($op.OldPath -cne $op.NewPath)
+
                 if ($op.Type -eq 'file') {
                     if (Test-Path -LiteralPath $op.OldPath -PathType Leaf) {
-                        Rename-Item -LiteralPath $op.OldPath -NewName ([System.IO.Path]::GetFileName($op.NewPath)) -Force
+                        if ($isCaseChangeOnly) {
+                            $tempPath = $op.OldPath + "_TMP"
+                            [System.IO.File]::Move($op.OldPath, $tempPath)
+                            [System.IO.File]::Move($tempPath, $op.NewPath)
+                        } else {
+                            if (Test-Path -LiteralPath $op.NewPath -PathType Leaf) {
+                                [System.IO.File]::Delete($op.NewPath)
+                            }
+                            [System.IO.File]::Move($op.OldPath, $op.NewPath)
+                        }
                         $renamed++
                     }
                 } else {
                     if (Test-Path -LiteralPath $op.OldPath -PathType Container) {
-                        Rename-Item -LiteralPath $op.OldPath -NewName ([System.IO.Path]::GetFileName($op.NewPath)) -Force
+                        if ($isCaseChangeOnly) {
+                            $tempPath = $op.OldPath + "_TMP"
+                            [System.IO.Directory]::Move($op.OldPath, $tempPath)
+                            [System.IO.Directory]::Move($tempPath, $op.NewPath)
+                        } else {
+                            if (Test-Path -LiteralPath $op.NewPath -PathType Container) {
+                                Remove-Item -LiteralPath $op.NewPath -Recurse -Force -ErrorAction Stop
+                            }
+                            [System.IO.Directory]::Move($op.OldPath, $op.NewPath)
+                        }
                         $renamed++
                     }
                 }
@@ -1312,13 +1340,22 @@ $form.Controls.Add($scroll)
 
 # --- Resize ------------------------------------------------------------------
 $form.Add_Resize({
+    # PERFORMANCE FIX: Suspend the entire form layout during resize dragging
+    $form.SuspendLayout()
+
     $w = $form.ClientSize.Width - 48
     $sep.Width = $w; $dropPanel.Width = $w; $lblDrop.Width = $w
     script:PositionButtons
-    $dropPanel.Refresh()
+
+    # PERFORMANCE FIX: Invalidate is much cheaper than Refresh
+    $dropPanel.Invalidate()
+
     $scroll.Width  = $w
     $scroll.Height = $form.ClientSize.Height - 268
     script:ApplyResize
+
+    # PERFORMANCE FIX: Resume layout and draw exactly once
+    $form.ResumeLayout()
 })
 
 # --- Drag and Drop -----------------------------------------------------------
