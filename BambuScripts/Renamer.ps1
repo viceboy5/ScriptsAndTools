@@ -450,13 +450,67 @@ function script:UpdateRenameButton {
 
 # --- Conflict resolution dialog ----------------------------------------------
 function script:ShowConflictDialog([string]$newName, [string]$pathA, [string]$pathB) {
-    $fiA = [System.IO.FileInfo]::new($pathA)
-    $fiB = [System.IO.FileInfo]::new($pathB)
 
     function FmtSize($bytes) {
         if ($bytes -ge 1MB) { return "{0:N1} MB" -f ($bytes / 1MB) }
         return "{0:N0} KB" -f ($bytes / 1KB)
     }
+
+    # BULLETPROOF CLOUD STUB EXTRACTOR
+    # Safely extracts file info from unhydrated Synology/OneDrive files via COM Shell fallback
+    function Get-SafeProps($fp) {
+        $res = @{
+            Name = [System.IO.Path]::GetFileName($fp)
+            ModStr = "Unknown Date"
+            CreateStr = "Unknown Date"
+            SizeStr = "Unknown Size"
+            ModDate = [DateTime]::MinValue
+        }
+
+        # Attempt 1: Standard .NET FileInfo
+        try {
+            $fi = [System.IO.FileInfo]::new($fp)
+            if ($fi.Exists) {
+                $res.ModDate = $fi.LastWriteTime
+                $res.ModStr = $fi.LastWriteTime.ToString('yyyy-MM-dd  h:mm tt')
+                $res.CreateStr = $fi.CreationTime.ToString('yyyy-MM-dd  h:mm tt')
+                try { $res.SizeStr = FmtSize $fi.Length } catch { $res.SizeStr = "(Cloud Stub)" }
+                return $res
+            }
+        } catch {}
+
+        # Attempt 2: PowerShell Get-Item (handles some reparse points better)
+        try {
+            $gi = Get-Item -LiteralPath $fp -Force -ErrorAction Stop
+            $res.ModDate = $gi.LastWriteTime
+            $res.ModStr = $gi.LastWriteTime.ToString('yyyy-MM-dd  h:mm tt')
+            $res.CreateStr = $gi.CreationTime.ToString('yyyy-MM-dd  h:mm tt')
+            try { $res.SizeStr = FmtSize $gi.Length } catch { $res.SizeStr = "(Cloud Stub)" }
+            return $res
+        } catch {}
+
+        # Attempt 3: Native Windows Shell COM Object (Guaranteed to read Cloud Stubs like Explorer does)
+        try {
+            $sh = New-Object -ComObject Shell.Application
+            $ns = $sh.NameSpace([System.IO.Path]::GetDirectoryName($fp))
+            $it = $ns.ParseName([System.IO.Path]::GetFileName($fp))
+            if ($it) {
+                $mStr = $ns.GetDetailsOf($it, 3) # Date Modified
+                if ($mStr) { $res.ModStr = $mStr; try { $res.ModDate = [DateTime]::Parse($mStr) } catch{} }
+
+                $cStr = $ns.GetDetailsOf($it, 4) # Date Created
+                if ($cStr) { $res.CreateStr = $cStr }
+
+                $sStr = $ns.GetDetailsOf($it, 1) # Size
+                if ($sStr) { $res.SizeStr = $sStr } else { $res.SizeStr = "(Cloud Stub)" }
+            }
+        } catch {}
+
+        return $res
+    }
+
+    $infoA = Get-SafeProps $pathA
+    $infoB = Get-SafeProps $pathB
 
     $dlg                  = New-Object System.Windows.Forms.Form
     $dlg.Text             = 'Name Conflict'
@@ -492,7 +546,7 @@ function script:ShowConflictDialog([string]$newName, [string]$pathA, [string]$pa
     $newLbl.Location      = New-Object System.Drawing.Point(20, 64)
     $dlg.Controls.Add($newLbl)
 
-    function MakeCard($fi, $x, $label) {
+    function MakeCard($info, $x, $label) {
         $card                  = New-Object System.Windows.Forms.Panel
         $card.Size             = New-Object System.Drawing.Size(300, 140)
         $card.Location         = New-Object System.Drawing.Point($x, 100)
@@ -515,18 +569,8 @@ function script:ShowConflictDialog([string]$newName, [string]$pathA, [string]$pa
         $hdr.Location          = New-Object System.Drawing.Point(12, 10)
         $card.Controls.Add($hdr)
 
-        # FIX: Safe properties for Synology 0-byte cloud stubs that throw exceptions
-        $safeName = if ($fi.Exists) { $fi.Name } else { [System.IO.Path]::GetFileName($fi.FullName) }
-        $safeMod = "Unknown (Cloud Stub)"
-        $safeSize = "Unknown"
-        $safeCreated = "Unknown"
-
-        try { $safeMod = $fi.LastWriteTime.ToString('yyyy-MM-dd  h:mm tt') } catch {}
-        try { $safeSize = FmtSize $fi.Length } catch {}
-        try { $safeCreated = $fi.CreationTime.ToString('yyyy-MM-dd  h:mm tt') } catch {}
-
         $fname                 = New-Object System.Windows.Forms.Label
-        $fname.Text            = $safeName
+        $fname.Text            = $info.Name
         $fname.Font            = New-Object System.Drawing.Font('Consolas', 8)
         $fname.ForeColor       = clr '#DDE0E8'
         $fname.AutoSize        = $false
@@ -536,7 +580,7 @@ function script:ShowConflictDialog([string]$newName, [string]$pathA, [string]$pa
         $card.Controls.Add($fname)
 
         $mod                   = New-Object System.Windows.Forms.Label
-        $mod.Text              = 'Modified:  ' + $safeMod
+        $mod.Text              = 'Modified:  ' + $info.ModStr
         $mod.Font              = New-Object System.Drawing.Font('Segoe UI', 8)
         $mod.ForeColor         = clr '#6DAEE0'
         $mod.AutoSize          = $true
@@ -544,7 +588,7 @@ function script:ShowConflictDialog([string]$newName, [string]$pathA, [string]$pa
         $card.Controls.Add($mod)
 
         $sz                    = New-Object System.Windows.Forms.Label
-        $sz.Text               = 'Size:  ' + $safeSize
+        $sz.Text               = 'Size:  ' + $info.SizeStr
         $sz.Font               = New-Object System.Drawing.Font('Segoe UI', 8)
         $sz.ForeColor          = clr '#6B6E7A'
         $sz.AutoSize           = $true
@@ -552,7 +596,7 @@ function script:ShowConflictDialog([string]$newName, [string]$pathA, [string]$pa
         $card.Controls.Add($sz)
 
         $created               = New-Object System.Windows.Forms.Label
-        $created.Text          = 'Created:  ' + $safeCreated
+        $created.Text          = 'Created:  ' + $info.CreateStr
         $created.Font          = New-Object System.Drawing.Font('Segoe UI', 8)
         $created.ForeColor     = clr '#6B6E7A'
         $created.AutoSize      = $true
@@ -562,25 +606,23 @@ function script:ShowConflictDialog([string]$newName, [string]$pathA, [string]$pa
         return $card
     }
 
-    $cardA = MakeCard $fiA 20  'FILE A  (will be renamed ->'
-    $cardB = MakeCard $fiB 350 'FILE B  (will be renamed ->'
+    $cardA = MakeCard $infoA 20  'FILE A  (will be renamed ->'
+    $cardB = MakeCard $infoB 350 'FILE B  (will be renamed ->'
 
-    # Safe date comparison
-    try {
-        if ($fiA.Exists -and $fiB.Exists) {
-            if ($fiA.LastWriteTime -gt $fiB.LastWriteTime) {
-                $nb = New-Object System.Windows.Forms.Label; $nb.Text = 'NEWER'
-                $nb.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
-                $nb.ForeColor = clr '#4CAF72'; $nb.BackColor = clr '#1E3328'
-                $nb.AutoSize = $true; $nb.Location = New-Object System.Drawing.Point(12, 118); $cardA.Controls.Add($nb)
-            } elseif ($fiB.LastWriteTime -gt $fiA.LastWriteTime) {
-                $nb = New-Object System.Windows.Forms.Label; $nb.Text = 'NEWER'
-                $nb.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
-                $nb.ForeColor = clr '#4CAF72'; $nb.BackColor = clr '#1E3328'
-                $nb.AutoSize = $true; $nb.Location = New-Object System.Drawing.Point(12, 118); $cardB.Controls.Add($nb)
-            }
+    # Safe Date Comparison using our fallback DateTime objects
+    if ($infoA.ModDate -gt [DateTime]::MinValue -and $infoB.ModDate -gt [DateTime]::MinValue) {
+        if ($infoA.ModDate -gt $infoB.ModDate) {
+            $nb = New-Object System.Windows.Forms.Label; $nb.Text = 'NEWER'
+            $nb.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
+            $nb.ForeColor = clr '#4CAF72'; $nb.BackColor = clr '#1E3328'
+            $nb.AutoSize = $true; $nb.Location = New-Object System.Drawing.Point(12, 118); $cardA.Controls.Add($nb)
+        } elseif ($infoB.ModDate -gt $infoA.ModDate) {
+            $nb = New-Object System.Windows.Forms.Label; $nb.Text = 'NEWER'
+            $nb.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
+            $nb.ForeColor = clr '#4CAF72'; $nb.BackColor = clr '#1E3328'
+            $nb.AutoSize = $true; $nb.Location = New-Object System.Drawing.Point(12, 118); $cardB.Controls.Add($nb)
         }
-    } catch {}
+    }
 
     $dlg.Controls.Add($cardA)
     $dlg.Controls.Add($cardB)
@@ -662,10 +704,10 @@ function script:DoRename {
         if ($choice -eq 'Abort') { return }
 
         if ($choice -eq 'A') {
-            try { [System.IO.File]::Delete($opA.OldPath) } catch { $errors.Add("Could not delete $([System.IO.Path]::GetFileName($opA.OldPath)): $($_.Exception.Message)") }
+            try { Remove-Item -LiteralPath $opA.OldPath -Force } catch { $errors.Add("Could not delete $([System.IO.Path]::GetFileName($opA.OldPath)): $($_.Exception.Message)") }
             $toRemoveFromOps.Add($opA)
         } elseif ($choice -eq 'B') {
-            try { [System.IO.File]::Delete($opB.OldPath) } catch { $errors.Add("Could not delete $([System.IO.Path]::GetFileName($opB.OldPath)): $($_.Exception.Message)") }
+            try { Remove-Item -LiteralPath $opB.OldPath -Force } catch { $errors.Add("Could not delete $([System.IO.Path]::GetFileName($opB.OldPath)): $($_.Exception.Message)") }
             $toRemoveFromOps.Add($opB)
         } else {
             $toRemoveFromOps.Add($opA)
@@ -674,6 +716,19 @@ function script:DoRename {
     }
 
     foreach ($dead in $toRemoveFromOps) { $ops.Remove($dead) | Out-Null }
+
+    $stillConflicts = [System.Collections.Generic.List[string]]::new()
+    foreach ($op in $ops) {
+        if ($op.Type -ne 'file') { continue }
+        if ((Test-Path -LiteralPath $op.NewPath -PathType Leaf) -and $op.NewPath -ne $op.OldPath) {
+            $stillConflicts.Add("$([System.IO.Path]::GetFileName($op.OldPath))  ->  $([System.IO.Path]::GetFileName($op.NewPath))  (target already exists on disk)")
+        }
+    }
+    if ($stillConflicts.Count -gt 0) {
+        $msg = "The following targets already exist on disk and would be overwritten.`nResolve these manually before proceeding:`n`n" + ($stillConflicts -join "`n")
+        [System.Windows.Forms.MessageBox]::Show($msg, 'Cannot Proceed', 'OK', 'Warning') | Out-Null
+        return
+    }
 
     foreach ($ppKey in $script:parentRows.Keys) {
         $newName = script:ComputeParentNew $ppKey
