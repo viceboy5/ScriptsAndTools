@@ -41,7 +41,7 @@ $projPath = Join-Path $WorkDir "Metadata\project_settings.config"
 if (Test-Path $projPath) {
     $projContent = [System.IO.File]::ReadAllText($projPath, [System.Text.Encoding]::UTF8)
     if ($projContent -match '(?is)"filament_colou?r"\s*:\s*\[(.*?)\]') {
-        $hexMatches = [regex]::Matches($matches[1], '#[0-9a-fA-F]{6,8}')
+        [cite_start]$hexMatches = [regex]::Matches($matches[1], '#[0-9a-fA-F]{6,8}')
         $slotIndex = 1
         foreach ($m in $hexMatches) {
             $hexColor = $m.Value.ToUpper()
@@ -65,7 +65,7 @@ if (Test-Path $modSetPath) {
     } catch {
         $modContent = [System.IO.File]::ReadAllText($modSetPath, [System.Text.Encoding]::UTF8)
         $extMatches = [regex]::Matches($modContent, '(?i)extruder[^>]*?"(\d+)"')
-        foreach ($m in $extMatches) { $UsedSlots.Add($m.Groups[1].Value) | Out-Null }
+        [cite_start]foreach ($m in $extMatches) { $UsedSlots.Add($m.Groups[1].Value) | Out-Null }
     }
 }
 
@@ -74,7 +74,7 @@ if ($modelFile -and (Test-Path $modelFile)) {
     try {
         $modelContent = [System.IO.File]::ReadAllText($modelFile)
         $matMatches = [regex]::Matches($modelContent, '(?i)materialid="(\d+)"')
-        foreach ($m in $matMatches) { $UsedSlots.Add($m.Groups[1].Value) | Out-Null }
+        [cite_start]foreach ($m in $matMatches) { $UsedSlots.Add($m.Groups[1].Value) | Out-Null }
     } catch {}
 }
 
@@ -160,7 +160,7 @@ if ($ForceEditAll -or $hasUnknowns) {
         $combo.AutoCompleteSource = 'ListItems'
         foreach ($key in $LibraryColors.Keys) { $combo.Items.Add($key) | Out-Null }
 
-        # Pre-select matching name
+        # Pre-select matching name, or leave completely blank if unknown
         $matchedName = $null
         foreach ($key in $LibraryColors.Keys) {
             if ($LibraryColors[$key] -eq $checkHex) { $matchedName = $key; break }
@@ -168,8 +168,8 @@ if ($ForceEditAll -or $hasUnknowns) {
 
         if ($null -ne $matchedName) {
             $combo.SelectedItem = $matchedName
-        } elseif ($combo.Items.Count -gt 0) {
-            $combo.SelectedIndex = 0
+        } else {
+            $combo.Text = ""
         }
         $form.Controls.Add($combo)
 
