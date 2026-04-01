@@ -172,6 +172,7 @@ function script:ApplyResize {
             $entry.Panel.Width  = $w
             $entry.NewBox.Width = 140
             $entry.NewLbl.Location = New-Object System.Drawing.Point(520, 36)
+            if ($entry.BtnDel) { $entry.BtnDel.Location = New-Object System.Drawing.Point(($w - 110), 12) }
         } elseif ($entry.Type -eq 'parent') {
             $entry.Panel.Width    = $w
             $entry.Divider.Width  = $w - 16
@@ -187,13 +188,16 @@ function script:ApplyResize {
             $entry.LAdj.Location  = New-Object System.Drawing.Point($lay.xAdj,   42)
             $entry.LTheme.Location= New-Object System.Drawing.Point($lay.xTheme, 42)
 
-            $halfW = [int](($w - 8 - 60) / 2)
+            if ($entry.BtnDel) { $entry.BtnDel.Location = New-Object System.Drawing.Point(($w - 110), 10) }
+
+            $halfW = [int](($w - 8 - 140) / 2)
             foreach ($fi in $entry.Files) {
                 $fi.RowPanel.Width    = $w - 8
                 $fi.OldLabel.Width    = $halfW
-                $fi.Arrow.Location    = New-Object System.Drawing.Point(($halfW + 62), $fi.Arrow.Location.Y)
-                $fi.NewLabel.Width    = $halfW
-                $fi.NewLabel.Location = New-Object System.Drawing.Point(($halfW + 82), 0)
+                $fi.Arrow.Location    = New-Object System.Drawing.Point((60 + $halfW + 5), $fi.Arrow.Location.Y)
+                $fi.NewLabel.Location = New-Object System.Drawing.Point((60 + $halfW + 35), 0)
+                $fi.NewLabel.Width    = ($w - 8) - (60 + $halfW + 35) - 40
+                if ($fi.BtnDel) { $fi.BtnDel.Location = New-Object System.Drawing.Point(($w - 8 - 35), 15) }
             }
         }
     }
@@ -272,7 +276,7 @@ function script:SmartFill([string]$ppKey, [string]$gpTheme) {
         $adj = script:ToPascalCase ($chunks[1..($chunks.Count - 1)] -join ' ')
     }
 
-    # 6. SELF-HEALING: Strip the duplicated Adjective from the Character name (caused by older script runs)
+    # 6. SELF-HEALING: Strip the duplicated Adjective from the Character name
     if ($adj -ne '' -and $char.Length -gt $adj.Length) {
         if ($char.EndsWith($adj, [System.StringComparison]::OrdinalIgnoreCase)) {
             $char = $char.Substring(0, $char.Length - $adj.Length)
@@ -434,8 +438,11 @@ function script:StyleRenameBtn([bool]$on) {
 }
 
 function script:UpdateRenameButton {
-    if ($script:db.Count -eq 0) { $btnRename.Enabled = $false; script:StyleRenameBtn $false; return }
+    if ($script:db.Count -eq 0) { $btnRename.Enabled = $false; script:StyleRenameBtn $false; $btnRename.Text = "  RENAME"; return }
+
     $ok = $true
+
+    # Check for empty mandatory boxes
     foreach ($gk in $script:gpRows.Keys) {
         if ((script:ToPascalCase $script:gpRows[$gk].NewBox.Text) -eq '') { $ok = $false; break }
     }
@@ -444,226 +451,50 @@ function script:UpdateRenameButton {
             if ((script:ToPascalCase $script:parentRows[$ppKey].Char.Text) -eq '') { $ok = $false; break }
         }
     }
+
+    # Map all target names to check for internal UI collisions
+    $targetCounts = @{}
+    foreach ($ppKey in $script:parentRows.Keys) {
+        $pRow = $script:parentRows[$ppKey]
+        foreach ($fp in $pRow.FilePreviews) {
+            $newName = script:ComputeFileNew $ppKey $fp
+            if ($newName -ne '') {
+                $targetPath = "$ppKey\$newName"
+                if (-not $targetCounts.ContainsKey($targetPath)) { $targetCounts[$targetPath] = 0 }
+                $targetCounts[$targetPath]++
+            }
+        }
+    }
+
+    # Update colors based on collisions
+    $hasCollision = $false
+    foreach ($ppKey in $script:parentRows.Keys) {
+        $pRow = $script:parentRows[$ppKey]
+        foreach ($fp in $pRow.FilePreviews) {
+            $newName = script:ComputeFileNew $ppKey $fp
+            if ($newName -ne '') {
+                $targetPath = "$ppKey\$newName"
+                if ($targetCounts[$targetPath] -gt 1) {
+                    $fp.NewLabel.ForeColor = clr "#D95F5F" # Red
+                    $hasCollision = $true
+                } else {
+                    $fp.NewLabel.ForeColor = clr "#4CAF72" # Green
+                }
+            }
+        }
+    }
+
+    if ($hasCollision) {
+        $ok = $false
+        $btnRename.Text = "  NAME CONFLICT"
+    } else {
+        $btnRename.Text = "  RENAME"
+    }
+
     $btnRename.Enabled = $ok
     script:StyleRenameBtn $ok
 }
 
-# --- Conflict resolution dialog ----------------------------------------------
-function script:ShowConflictDialog([string]$newName, [string]$pathA, [string]$pathB) {
-
-    function FmtSize($bytes) {
-        if ($bytes -ge 1MB) { return "{0:N1} MB" -f ($bytes / 1MB) }
-        return "{0:N0} KB" -f ($bytes / 1KB)
-    }
-
-    # BULLETPROOF CLOUD STUB EXTRACTOR
-    # Safely extracts file info from unhydrated Synology/OneDrive files via COM Shell fallback
-    function Get-SafeProps($fp) {
-        $res = @{
-            Name = [System.IO.Path]::GetFileName($fp)
-            ModStr = "Unknown Date"
-            CreateStr = "Unknown Date"
-            SizeStr = "Unknown Size"
-            ModDate = [DateTime]::MinValue
-        }
-
-        # Attempt 1: Standard .NET FileInfo
-        try {
-            $fi = [System.IO.FileInfo]::new($fp)
-            if ($fi.Exists) {
-                $res.ModDate = $fi.LastWriteTime
-                $res.ModStr = $fi.LastWriteTime.ToString('yyyy-MM-dd  h:mm tt')
-                $res.CreateStr = $fi.CreationTime.ToString('yyyy-MM-dd  h:mm tt')
-                try { $res.SizeStr = FmtSize $fi.Length } catch { $res.SizeStr = "(Cloud Stub)" }
-                return $res
-            }
-        } catch {}
-
-        # Attempt 2: PowerShell Get-Item (handles some reparse points better)
-        try {
-            $gi = Get-Item -LiteralPath $fp -Force -ErrorAction Stop
-            $res.ModDate = $gi.LastWriteTime
-            $res.ModStr = $gi.LastWriteTime.ToString('yyyy-MM-dd  h:mm tt')
-            $res.CreateStr = $gi.CreationTime.ToString('yyyy-MM-dd  h:mm tt')
-            try { $res.SizeStr = FmtSize $gi.Length } catch { $res.SizeStr = "(Cloud Stub)" }
-            return $res
-        } catch {}
-
-        # Attempt 3: Native Windows Shell COM Object (Guaranteed to read Cloud Stubs like Explorer does)
-        try {
-            $sh = New-Object -ComObject Shell.Application
-            $ns = $sh.NameSpace([System.IO.Path]::GetDirectoryName($fp))
-            $it = $ns.ParseName([System.IO.Path]::GetFileName($fp))
-            if ($it) {
-                $mStr = $ns.GetDetailsOf($it, 3) # Date Modified
-                if ($mStr) { $res.ModStr = $mStr; try { $res.ModDate = [DateTime]::Parse($mStr) } catch{} }
-
-                $cStr = $ns.GetDetailsOf($it, 4) # Date Created
-                if ($cStr) { $res.CreateStr = $cStr }
-
-                $sStr = $ns.GetDetailsOf($it, 1) # Size
-                if ($sStr) { $res.SizeStr = $sStr } else { $res.SizeStr = "(Cloud Stub)" }
-            }
-        } catch {}
-
-        return $res
-    }
-
-    $infoA = Get-SafeProps $pathA
-    $infoB = Get-SafeProps $pathB
-
-    $dlg                  = New-Object System.Windows.Forms.Form
-    $dlg.Text             = 'Name Conflict'
-    $dlg.ClientSize       = New-Object System.Drawing.Size(680, 310)
-    $dlg.FormBorderStyle  = 'FixedDialog'
-    $dlg.StartPosition    = 'CenterParent'
-    $dlg.BackColor        = clr '#111214'
-    $dlg.ForeColor        = clr '#DDE0E8'
-    $dlg.MaximizeBox      = $false
-    $dlg.MinimizeBox      = $false
-
-    $title                = New-Object System.Windows.Forms.Label
-    $title.Text           = 'Rename Conflict'
-    $title.Font           = New-Object System.Drawing.Font('Segoe UI Semibold', 13)
-    $title.ForeColor      = clr '#D95F5F'
-    $title.AutoSize       = $true
-    $title.Location       = New-Object System.Drawing.Point(20, 16)
-    $dlg.Controls.Add($title)
-
-    $sub                  = New-Object System.Windows.Forms.Label
-    $sub.Text             = "Both files below would be renamed to:  $newName"
-    $sub.Font             = New-Object System.Drawing.Font('Segoe UI', 9)
-    $sub.ForeColor        = clr '#6B6E7A'
-    $sub.AutoSize         = $true
-    $sub.Location         = New-Object System.Drawing.Point(20, 46)
-    $dlg.Controls.Add($sub)
-
-    $newLbl               = New-Object System.Windows.Forms.Label
-    $newLbl.Text          = $newName
-    $newLbl.Font          = New-Object System.Drawing.Font('Consolas', 10, [System.Drawing.FontStyle]::Bold)
-    $newLbl.ForeColor     = clr '#E8A135'
-    $newLbl.AutoSize      = $true
-    $newLbl.Location      = New-Object System.Drawing.Point(20, 64)
-    $dlg.Controls.Add($newLbl)
-
-    function MakeCard($info, $x, $label) {
-        $card                  = New-Object System.Windows.Forms.Panel
-        $card.Size             = New-Object System.Drawing.Size(300, 140)
-        $card.Location         = New-Object System.Drawing.Point($x, 100)
-        $card.BackColor        = clr '#16171B'
-
-        $cardBorder = New-Object System.Windows.Forms.Panel
-        $cardBorder.Size     = New-Object System.Drawing.Size(300, 140)
-        $cardBorder.Location = New-Object System.Drawing.Point(0, 0)
-        $cardBorder.BackColor = clr '#2A2C35'
-        $cardBorder.Add_Paint({
-            param($s,$e)
-            $e.Graphics.Clear($s.BackColor)
-        })
-
-        $hdr                   = New-Object System.Windows.Forms.Label
-        $hdr.Text              = $label
-        $hdr.Font              = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
-        $hdr.ForeColor         = clr '#44475A'
-        $hdr.AutoSize          = $true
-        $hdr.Location          = New-Object System.Drawing.Point(12, 10)
-        $card.Controls.Add($hdr)
-
-        $fname                 = New-Object System.Windows.Forms.Label
-        $fname.Text            = $info.Name
-        $fname.Font            = New-Object System.Drawing.Font('Consolas', 8)
-        $fname.ForeColor       = clr '#DDE0E8'
-        $fname.AutoSize        = $false
-        $fname.Size            = New-Object System.Drawing.Size(276, 32)
-        $fname.Location        = New-Object System.Drawing.Point(12, 26)
-        $fname.TextAlign       = 'MiddleLeft'
-        $card.Controls.Add($fname)
-
-        $mod                   = New-Object System.Windows.Forms.Label
-        $mod.Text              = 'Modified:  ' + $info.ModStr
-        $mod.Font              = New-Object System.Drawing.Font('Segoe UI', 8)
-        $mod.ForeColor         = clr '#6DAEE0'
-        $mod.AutoSize          = $true
-        $mod.Location          = New-Object System.Drawing.Point(12, 62)
-        $card.Controls.Add($mod)
-
-        $sz                    = New-Object System.Windows.Forms.Label
-        $sz.Text               = 'Size:  ' + $info.SizeStr
-        $sz.Font               = New-Object System.Drawing.Font('Segoe UI', 8)
-        $sz.ForeColor          = clr '#6B6E7A'
-        $sz.AutoSize           = $true
-        $sz.Location           = New-Object System.Drawing.Point(12, 80)
-        $card.Controls.Add($sz)
-
-        $created               = New-Object System.Windows.Forms.Label
-        $created.Text          = 'Created:  ' + $info.CreateStr
-        $created.Font          = New-Object System.Drawing.Font('Segoe UI', 8)
-        $created.ForeColor     = clr '#6B6E7A'
-        $created.AutoSize      = $true
-        $created.Location      = New-Object System.Drawing.Point(12, 97)
-        $card.Controls.Add($created)
-
-        return $card
-    }
-
-    $cardA = MakeCard $infoA 20  'FILE A  (will be renamed ->'
-    $cardB = MakeCard $infoB 350 'FILE B  (will be renamed ->'
-
-    # Safe Date Comparison using our fallback DateTime objects
-    if ($infoA.ModDate -gt [DateTime]::MinValue -and $infoB.ModDate -gt [DateTime]::MinValue) {
-        if ($infoA.ModDate -gt $infoB.ModDate) {
-            $nb = New-Object System.Windows.Forms.Label; $nb.Text = 'NEWER'
-            $nb.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
-            $nb.ForeColor = clr '#4CAF72'; $nb.BackColor = clr '#1E3328'
-            $nb.AutoSize = $true; $nb.Location = New-Object System.Drawing.Point(12, 118); $cardA.Controls.Add($nb)
-        } elseif ($infoB.ModDate -gt $infoA.ModDate) {
-            $nb = New-Object System.Windows.Forms.Label; $nb.Text = 'NEWER'
-            $nb.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
-            $nb.ForeColor = clr '#4CAF72'; $nb.BackColor = clr '#1E3328'
-            $nb.AutoSize = $true; $nb.Location = New-Object System.Drawing.Point(12, 118); $cardB.Controls.Add($nb)
-        }
-    }
-
-    $dlg.Controls.Add($cardA)
-    $dlg.Controls.Add($cardB)
-
-    $inst              = New-Object System.Windows.Forms.Label
-    $inst.Text         = 'Choose which file to DELETE before renaming, or skip this conflict:'
-    $inst.Font         = New-Object System.Drawing.Font('Segoe UI', 8)
-    $inst.ForeColor    = clr '#5A5D6B'
-    $inst.AutoSize     = $true
-    $inst.Location     = New-Object System.Drawing.Point(20, 250)
-    $dlg.Controls.Add($inst)
-
-    $result = $null
-
-    function MakeBtn($text, $bg, $fg, $x, $w) {
-        $b = New-Object System.Windows.Forms.Button
-        $b.Text = $text; $b.Size = New-Object System.Drawing.Size($w, 28)
-        $b.Location = New-Object System.Drawing.Point($x, 272)
-        $b.FlatStyle = 'Flat'; $b.BackColor = $bg; $b.ForeColor = $fg
-        $b.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8)
-        $b.FlatAppearance.BorderSize = 0
-        $b.Cursor = [System.Windows.Forms.Cursors]::Hand
-        $dlg.Controls.Add($b)
-        return $b
-    }
-
-    $btnDelA   = MakeBtn "Delete File A" (clr '#3A1A1A') (clr '#D95F5F') 20  130
-    $btnDelB   = MakeBtn "Delete File B" (clr '#3A1A1A') (clr '#D95F5F') 162 130
-    $btnSkip   = MakeBtn "Skip This Conflict" (clr '#1E2028') (clr '#5A5D6B') 304 160
-    $btnAbort  = MakeBtn "Abort Rename" (clr '#1E2028') (clr '#5A5D6B') 474 160
-
-    $btnDelA.Add_Click({  $script:conflictResult = 'A'; $dlg.Close() })
-    $btnDelB.Add_Click({  $script:conflictResult = 'B'; $dlg.Close() })
-    $btnSkip.Add_Click({  $script:conflictResult = 'Skip'; $dlg.Close() })
-    $btnAbort.Add_Click({ $script:conflictResult = 'Abort'; $dlg.Close() })
-
-    $script:conflictResult = 'Abort'
-    $dlg.ShowDialog($form) | Out-Null
-    $dlg.Dispose()
-    return $script:conflictResult
-}
 
 # --- Perform renames ---------------------------------------------------------
 function script:DoRename {
@@ -671,6 +502,7 @@ function script:DoRename {
     $ops     = [System.Collections.Generic.List[object]]::new()
     $renamed = 0
 
+    # Build List of File Ops
     foreach ($ppKey in $script:parentRows.Keys) {
         $pRow = $script:parentRows[$ppKey]
         foreach ($fp in $pRow.FilePreviews) {
@@ -684,52 +516,7 @@ function script:DoRename {
         }
     }
 
-    $byTarget = @{}
-    foreach ($op in $ops) {
-        if ($op.Type -ne 'file') { continue }
-        $key = $op.NewPath.ToLower()
-        if (-not $byTarget.ContainsKey($key)) { $byTarget[$key] = [System.Collections.Generic.List[object]]::new() }
-        $byTarget[$key].Add($op)
-    }
-
-    $toRemoveFromOps = [System.Collections.Generic.List[object]]::new()
-
-    foreach ($key in $byTarget.Keys) {
-        $group = $byTarget[$key]
-        if ($group.Count -lt 2) { continue }
-
-        $opA = $group; [cite_start]$opB = $group[1]
-        $choice = script:ShowConflictDialog ([System.IO.Path]::GetFileName($opA.NewPath)) $opA.OldPath $opB.OldPath
-
-        if ($choice -eq 'Abort') { return }
-
-        if ($choice -eq 'A') {
-            try { Remove-Item -LiteralPath $opA.OldPath -Force } catch { $errors.Add("Could not delete $([System.IO.Path]::GetFileName($opA.OldPath)): $($_.Exception.Message)") }
-            $toRemoveFromOps.Add($opA)
-        } elseif ($choice -eq 'B') {
-            try { Remove-Item -LiteralPath $opB.OldPath -Force } catch { $errors.Add("Could not delete $([System.IO.Path]::GetFileName($opB.OldPath)): $($_.Exception.Message)") }
-            $toRemoveFromOps.Add($opB)
-        } else {
-            $toRemoveFromOps.Add($opA)
-            $toRemoveFromOps.Add($opB)
-        }
-    }
-
-    foreach ($dead in $toRemoveFromOps) { $ops.Remove($dead) | Out-Null }
-
-    $stillConflicts = [System.Collections.Generic.List[string]]::new()
-    foreach ($op in $ops) {
-        if ($op.Type -ne 'file') { continue }
-        if ((Test-Path -LiteralPath $op.NewPath -PathType Leaf) -and $op.NewPath -ne $op.OldPath) {
-            $stillConflicts.Add("$([System.IO.Path]::GetFileName($op.OldPath))  ->  $([System.IO.Path]::GetFileName($op.NewPath))  (target already exists on disk)")
-        }
-    }
-    if ($stillConflicts.Count -gt 0) {
-        $msg = "The following targets already exist on disk and would be overwritten.`nResolve these manually before proceeding:`n`n" + ($stillConflicts -join "`n")
-        [System.Windows.Forms.MessageBox]::Show($msg, 'Cannot Proceed', 'OK', 'Warning') | Out-Null
-        return
-    }
-
+    # Build List of Parent Folder Ops
     foreach ($ppKey in $script:parentRows.Keys) {
         $newName = script:ComputeParentNew $ppKey
         if ($newName -eq '' -or -not (Test-Path -LiteralPath $ppKey -PathType Container)) { continue }
@@ -740,6 +527,7 @@ function script:DoRename {
         }
     }
 
+    # Build List of Theme Folder Ops
     foreach ($gk in $script:gpRows.Keys) {
         $gpRow = $script:gpRows[$gk]
         if ($gpRow.SkipChk -and $gpRow.SkipChk.Checked) { continue }
@@ -840,6 +628,10 @@ function script:RebuildPanel {
         if ($script:gpRows[$gk].PrefixDrop) { $savedPrefixGp[$gk] = $script:gpRows[$gk].PrefixDrop.Text }
         if ($script:gpRows[$gk].SkipChk) { $savedSkipGp[$gk] = $script:gpRows[$gk].SkipChk.Checked }
     }
+
+    # PERFORMANCE FIX: Grab exact scroll position and reset to 0,0
+    $savedScroll = $scroll.AutoScrollPosition
+    $scroll.AutoScrollPosition = New-Object System.Drawing.Point(0, 0)
 
     $script:gpRows     = @{}
     $script:parentRows = @{}
@@ -986,7 +778,28 @@ function script:RebuildPanel {
         $gpPanel.Controls.Add($gpSkipChk)
         $gpRow.SkipChk = $gpSkipChk
 
-        $script:resizeList.Add(@{ Type="gp"; Panel=$gpPanel; NewBox=$gpNewBox; NewLbl=$gpNewLbl; PrefixDrop=$gpPrefixDrop })
+        # --- GRANDPARENT REMOVE BUTTON ---
+        $btnDelGp = New-Object System.Windows.Forms.Button
+        $btnDelGp.Text = "Remove Theme"
+        $btnDelGp.BackColor = clr "#D95F5F"
+        $btnDelGp.ForeColor = clr "#FFFFFF"
+        $btnDelGp.FlatStyle = 'Flat'
+        $btnDelGp.FlatAppearance.BorderSize = 0
+        $btnDelGp.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
+        $btnDelGp.Size = New-Object System.Drawing.Size(100, 26)
+        $btnDelGp.Location = New-Object System.Drawing.Point(($innerW - 110), 12)
+        $btnDelGp.Anchor = 'Top, Right'
+        $gpPanel.Controls.Add($btnDelGp)
+
+        $btnDelGp.Tag = @{ GpKey = $gpKey }
+        $btnDelGp.Add_Click({
+            $t = $this.Tag
+            $script:db.Remove($t.GpKey)
+            script:RebuildPanel
+            script:RefreshStatus
+        })
+
+        $script:resizeList.Add(@{ Type="gp"; Panel=$gpPanel; NewBox=$gpNewBox; NewLbl=$gpNewLbl; PrefixDrop=$gpPrefixDrop; BtnDel=$btnDelGp })
 
         $gpNewBox.Add_TextChanged({
             param($s, $e)
@@ -1110,6 +923,30 @@ function script:RebuildPanel {
             $pPanel.Controls.Add($tbTheme)
             $gpRow.ThemeLabels.Add($tbTheme)
 
+            # --- PARENT REMOVE BUTTON ---
+            $btnDelParent = New-Object System.Windows.Forms.Button
+            $btnDelParent.Text = "Remove Folder"
+            $btnDelParent.BackColor = clr "#D95F5F"
+            $btnDelParent.ForeColor = clr "#FFFFFF"
+            $btnDelParent.FlatStyle = 'Flat'
+            $btnDelParent.FlatAppearance.BorderSize = 0
+            $btnDelParent.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
+            $btnDelParent.Size = New-Object System.Drawing.Size(100, 24)
+            $btnDelParent.Location = New-Object System.Drawing.Point(($innerW - 110), 10)
+            $btnDelParent.Anchor = 'Top, Right'
+            $pPanel.Controls.Add($btnDelParent)
+
+            $btnDelParent.Tag = @{ GpKey = $gpKey; ParentKey = $ppKey }
+            $btnDelParent.Add_Click({
+                $t = $this.Tag
+                $script:db[$t.GpKey].Parents.Remove($t.ParentKey)
+                if ($script:db[$t.GpKey].Parents.Count -eq 0) {
+                    $script:db.Remove($t.GpKey)
+                }
+                script:RebuildPanel
+                script:RefreshStatus
+            })
+
             $divider = New-Object System.Windows.Forms.Panel
             $divider.BackColor = $cBorder
             $divider.Size = New-Object System.Drawing.Size(($innerW - 16), 1)
@@ -1139,7 +976,7 @@ function script:RebuildPanel {
                 $fRow.Location = New-Object System.Drawing.Point(4, $fy)
                 $pPanel.Controls.Add($fRow)
 
-                $halfW = [int](($innerW - 8 - 60) / 2)
+                $halfW = [int](($innerW - 8 - 140) / 2)
 
                 # Suffix Badge & Box
                 $suffixBadge = New-Object System.Windows.Forms.Label
@@ -1179,7 +1016,7 @@ function script:RebuildPanel {
                 $fArrow.Text = '->'
                 $fArrow.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9)
                 $fArrow.ForeColor = $cMuted; $fArrow.AutoSize = $true
-                $fArrow.Location = New-Object System.Drawing.Point(($halfW + 62), 19)
+                $fArrow.Location = New-Object System.Drawing.Point((60 + $halfW + 5), 19)
                 $fRow.Controls.Add($fArrow)
 
                 # NEW name
@@ -1187,10 +1024,42 @@ function script:RebuildPanel {
                 $fNewLbl.Text = '(enter Character)'
                 $fNewLbl.Font = New-Object System.Drawing.Font('Consolas', 8)
                 $fNewLbl.ForeColor = $cNewText; $fNewLbl.AutoSize = $false
-                $fNewLbl.Size = New-Object System.Drawing.Size($halfW, 52)
-                $fNewLbl.Location = New-Object System.Drawing.Point(($halfW + 82), 0)
+                $fNewLbl.Size = New-Object System.Drawing.Size((($innerW - 8) - (60 + $halfW + 35) - 40), 52)
+                $fNewLbl.Location = New-Object System.Drawing.Point((60 + $halfW + 35), 0)
                 $fNewLbl.TextAlign = 'MiddleLeft'
                 $fRow.Controls.Add($fNewLbl)
+
+                # --- FILE DELETE BUTTON ---
+                $btnDel = New-Object System.Windows.Forms.Button
+                $btnDel.Text = "X"
+                $btnDel.BackColor = clr "#D95F5F"
+                $btnDel.ForeColor = clr "#FFFFFF"
+                $btnDel.FlatStyle = 'Flat'
+                $btnDel.FlatAppearance.BorderSize = 0
+                $btnDel.Font = New-Object System.Drawing.Font("Segoe UI", 7, [System.Drawing.FontStyle]::Bold)
+                $btnDel.Size = New-Object System.Drawing.Size(20, 20)
+                $btnDel.Location = New-Object System.Drawing.Point(($innerW - 8 - 35), 15)
+                $btnDel.Anchor = 'Top, Right'
+                $fRow.Controls.Add($btnDel)
+                $btnDel.BringToFront()
+
+                $btnDel.Tag = @{ Path = $fi.Path; ParentKey = $ppKey; GpKey = $gpKey }
+                $btnDel.Add_Click({
+                    $t = $this.Tag
+                    $res = [System.Windows.Forms.MessageBox]::Show("Are you sure you want to permanently delete:`n$($t.Path | Split-Path -Leaf)?", "Confirm File Deletion", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+                    if ($res -eq 'Yes') {
+                        try {
+                            Remove-Item -LiteralPath $t.Path -Force -ErrorAction Stop
+                            $parentData = $script:db[$t.GpKey].Parents[$t.ParentKey]
+                            $fileObj = $parentData.Files | Where-Object { $_.Path -eq $t.Path }
+                            if ($fileObj) { $parentData.Files.Remove($fileObj) | Out-Null }
+                            script:RebuildPanel
+                            script:RefreshStatus
+                        } catch {
+                            [System.Windows.Forms.MessageBox]::Show("Failed to delete file: $($_.Exception.Message)", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+                        }
+                    }
+                })
 
                 $filePreviews.Add([PSCustomObject]@{
                     Path      = $fi.Path
@@ -1201,6 +1070,7 @@ function script:RebuildPanel {
                     OldLabel  = $fOldLbl
                     Arrow     = $fArrow
                     RowPanel  = $fRow
+                    BtnDel    = $btnDel
                 })
 
                 $suffixBox.Add_TextChanged({
@@ -1236,6 +1106,7 @@ function script:RebuildPanel {
                 Sep1    = $sep1;     Sep2    = $sep2
                 LChar   = $lChar;    LAdj    = $lAdj;    LTheme = $lTheme
                 Files   = $filePreviews
+                BtnDel  = $btnDelParent
             })
 
             $tbChar.Add_TextChanged({
@@ -1269,6 +1140,9 @@ function script:RebuildPanel {
 
     $scroll.AutoScrollMinSize = New-Object System.Drawing.Size(0, ($y + 10))
     $scroll.ResumeLayout()
+
+    # PERFORMANCE FIX: Restore exact scroll position
+    $scroll.AutoScrollPosition = New-Object System.Drawing.Point([Math]::Abs($savedScroll.X), [Math]::Abs($savedScroll.Y))
 
     foreach ($gpKey in $script:gpRows.Keys) { script:RefreshGpPreview $gpKey }
     foreach ($ppKey in $script:parentRows.Keys) { script:UpdateFromParent $ppKey }
