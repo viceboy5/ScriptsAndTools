@@ -854,8 +854,8 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             } else { $currentGrid.Visibility = "Collapsed" }
             # --- OVERLAY LABELS ON IMAGE CARD ---
     $lblCharCard = Create-TextBlock "" "#E8A135" 16 "Bold"
-    $lblCharCard.HorizontalAlignment = "Left"; $lblCharCard.VerticalAlignment = "Top"
-    $lblCharCard.Margin = New-Object System.Windows.Thickness(10, 10, 0, 0)
+    $lblCharCard.HorizontalAlignment = "Right"; $lblCharCard.VerticalAlignment = "Top"
+    $lblCharCard.Margin = New-Object System.Windows.Thickness(0, 10, 10, 0)
     $cardGrid.Children.Add($lblCharCard) | Out-Null
     $pJob.LblCharCard = $lblCharCard
 
@@ -864,21 +864,22 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $lblSkipTime.Margin = New-Object System.Windows.Thickness(10, 0, 0, 10)
     $cardGrid.Children.Add($lblSkipTime) | Out-Null
 
-    # --- COLOR SLOTS (OVERLAID ON BOTTOM RIGHT OF IMAGE) ---
+# --- COLOR SLOTS (OVERLAID ON RIGHT EDGE OF IMAGE) ---
     $colorsOverlayStack = New-Object System.Windows.Controls.StackPanel
     $colorsOverlayStack.Orientation = "Vertical"
     $colorsOverlayStack.HorizontalAlignment = "Right"
-    $colorsOverlayStack.VerticalAlignment = "Bottom"
-    $colorsOverlayStack.Margin = New-Object System.Windows.Thickness(0, 0, 10, 10)
+    $colorsOverlayStack.VerticalAlignment = "Center"
+    $colorsOverlayStack.Margin = New-Object System.Windows.Thickness(0, 0, 10, 0)
 
+    $slotIdx = 1
     foreach ($slotData in $activeSlots) {
         $rowStack = New-Object System.Windows.Controls.StackPanel
         $rowStack.Orientation = "Horizontal"; $rowStack.HorizontalAlignment = "Right"
-        $rowStack.Margin = New-Object System.Windows.Thickness(0,0,0,5)
+        $rowStack.Margin = New-Object System.Windows.Thickness(0, 0, 0, 15)
 
         $textStack = New-Object System.Windows.Controls.StackPanel
         $textStack.Orientation = "Vertical"; $textStack.VerticalAlignment = "Center"
-        $textStack.Margin = New-Object System.Windows.Thickness(0,0,10,0)
+        $textStack.Margin = New-Object System.Windows.Thickness(0, 0, 10, 0)
 
         $lblStatus = Create-TextBlock "" "#A0A0A0" 10 "Bold"
         $lblStatus.HorizontalAlignment = "Right"
@@ -893,35 +894,57 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
         $swatchColor = if ([string]::IsNullOrWhiteSpace($slotData.OldHex)) { "#333333" } else { $slotData.OldHex }
         $swatchBorder = New-Object System.Windows.Controls.Border
-        $swatchBorder.Width = 35; $swatchBorder.Height = 35
+        $swatchBorder.Width = 40; $swatchBorder.Height = 40
         $swatchBorder.Background = Get-WpfColor $swatchColor
         $swatchBorder.BorderBrush = Get-WpfColor "#2A2C35"; $swatchBorder.BorderThickness = New-Object System.Windows.Thickness(1)
+
+        # Calculate contrast for the number (Black text on light colors, White text on dark)
+        $r = [Convert]::ToInt32($swatchColor.Substring(1,2), 16)
+        $g = [Convert]::ToInt32($swatchColor.Substring(3,2), 16)
+        $b = [Convert]::ToInt32($swatchColor.Substring(5,2), 16)
+        $numColor = if ((0.299*$r + 0.587*$g + 0.114*$b) -gt 128) { "#000000" } else { "#FFFFFF" }
+
+        $lblNum = Create-TextBlock $slotIdx.ToString() $numColor 14 "Bold"
+        $lblNum.HorizontalAlignment = "Center"; $lblNum.VerticalAlignment = "Center"
+        $swatchBorder.Child = $lblNum
 
         $rowStack.Children.Add($textStack) | Out-Null; $rowStack.Children.Add($swatchBorder) | Out-Null
         $colorsOverlayStack.Children.Add($rowStack) | Out-Null
 
-        $pJob.UISlots.Add([PSCustomObject]@{ OldHex = $slotData.OldHex; Combo = $combo; StatusLbl = $lblStatus; SwatchBorder = $swatchBorder }) | Out-Null
+        $pJob.UISlots.Add([PSCustomObject]@{ OldHex = $slotData.OldHex; Combo = $combo; StatusLbl = $lblStatus; SwatchBorder = $swatchBorder; LblNum = $lblNum }) | Out-Null
 
-        $combo.Tag = @{ StatusLbl = $lblStatus; OrigName = $slotData.Name; P = $pJob; Swatch = $swatchBorder }
+        $combo.Tag = @{ StatusLbl = $lblStatus; OrigName = $slotData.Name; P = $pJob; Swatch = $swatchBorder; LblNum = $lblNum }
         $combo.AddHandler([System.Windows.Controls.Primitives.TextBoxBase]::TextChangedEvent, [System.Windows.Controls.TextChangedEventHandler]{
             param($s, $e)
             $data = $s.Tag
-            if ($LibraryColors.Contains($s.Text)) { $data.Swatch.Background = Get-WpfColor $LibraryColors[$s.Text] }
+            if ($LibraryColors.Contains($s.Text)) {
+                $newHex = $LibraryColors[$s.Text]
+                $data.Swatch.Background = Get-WpfColor $newHex
+
+                # Update text contrast when color changes
+                $r = [Convert]::ToInt32($newHex.Substring(1,2), 16)
+                $g = [Convert]::ToInt32($newHex.Substring(3,2), 16)
+                $b = [Convert]::ToInt32($newHex.Substring(5,2), 16)
+                $numColor = if ((0.299*$r + 0.587*$g + 0.114*$b) -gt 128) { "#000000" } else { "#FFFFFF" }
+                $data.LblNum.Foreground = Get-WpfColor $numColor
+            }
             if ($s.Text -eq $data.OrigName) {
                 if ($data.OrigName) { $data.StatusLbl.Text = "[MATCHED]"; $data.StatusLbl.Foreground = Get-WpfColor "#4CAF72" }
                 else { $data.StatusLbl.Text = "[UNMATCHED]"; $data.StatusLbl.Foreground = Get-WpfColor "#D95F5F" }
             } else { $data.StatusLbl.Text = "[CHANGED]"; $data.StatusLbl.Foreground = Get-WpfColor "#E8A135" }
             Validate-PJob $data.P
         })
+        $slotIdx++
     }
     $cardGrid.Children.Add($colorsOverlayStack) | Out-Null
         } catch { $currentGrid.Visibility = "Collapsed" }
         finally { if ($null -ne $zip) { $zip.Dispose() } }
     } else { $currentGrid.Visibility = "Collapsed" }
 
-    # Load custom PNG if present
+    # Load custom PNG if present (Explicitly ignore the generated card image!)
+    $diParent = [System.IO.DirectoryInfo]::new($parentPath)
     $customPng = Get-ChildItem -Path $parentPath -Filter "*.png" -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -notmatch "(?i)_slicePreview\.png" } | Select-Object -First 1
+        Where-Object { $_.Name -notmatch "(?i)_slicePreview\.png" -and $_.Name -notmatch "(?i)^$($diParent.Name)\.png$" } | Select-Object -First 1
     if ($customPng) {
         $pJob.CustomImagePath = $customPng.FullName
         $pbModel.Source = Load-WpfImage $customPng.FullName
