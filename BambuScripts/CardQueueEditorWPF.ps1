@@ -423,12 +423,17 @@ function Refresh-PJob($pJob, $gpJob) {
         } catch {} finally { if ($null -ne $zip) { $zip.Dispose() } }
     } else {
         $baseImgPath = Join-Path $pJob.TempWork "Metadata\plate_1.png"
+        if (-not (Test-Path $baseImgPath)) { $baseImgPath = Join-Path $pJob.TempWork "Metadata\thumbnail.png" }
         $pJob.PbPlate.Source = Load-WpfImage $baseImgPath
     }
 
-    # Reload custom PNG
+    # Reload custom PNG (ignoring generated output card)
+    $diParent = [System.IO.DirectoryInfo]::new($pJob.FolderPath)
     $customPng = Get-ChildItem -Path $pJob.FolderPath -Filter "*.png" -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -notmatch "(?i)_slicePreview\.png" } | Select-Object -First 1
+        Where-Object {
+            $_.Name -notmatch "(?i)_slicePreview\.png" -and
+            $_.Name -notmatch "(?i)^$([regex]::Escape($diParent.Name))\.png$"
+        } | Select-Object -First 1
     if ($customPng) {
         $pJob.CustomImagePath = $customPng.FullName
         $pJob.PbPlate.Source = Load-WpfImage $customPng.FullName
@@ -820,9 +825,13 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
     $pbModel = New-Object System.Windows.Controls.Image
     $pbModel.Stretch = "Uniform"
-    $baseImgPath = Join-Path $tempWork "Metadata\plate_1.png"
-    $pbModel.Source = Load-WpfImage $baseImgPath
+    $pbModel.HorizontalAlignment = "Left"
+    $pbModel.Margin = New-Object System.Windows.Thickness(10, 20, 160, 10) # 160px safe space for dropdowns!
     $pbModel.AllowDrop = $true
+
+    $baseImgPath = Join-Path $tempWork "Metadata\plate_1.png"
+    if (-not (Test-Path $baseImgPath)) { $baseImgPath = Join-Path $tempWork "Metadata\thumbnail.png" }
+    $pbModel.Source = Load-WpfImage $baseImgPath
     $cardGrid.Children.Add($pbModel) | Out-Null
     $pJob.PbPlate = $pbModel
 
@@ -889,7 +898,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         if ($slotData.Name) { $lblStatus.Text = "[MATCHED]"; $lblStatus.Foreground = Get-WpfColor "#4CAF72" }
         else { $lblStatus.Text = "[UNMATCHED]"; $lblStatus.Foreground = Get-WpfColor "#D95F5F" }
 
-        $combo = New-Object System.Windows.Controls.ComboBox; $combo.Width = 140; $combo.IsEditable = $true
+        $combo = New-Object System.Windows.Controls.ComboBox; $combo.Width = 110; $combo.IsEditable = $true
         foreach ($k in $LibraryColors.Keys) { [void]$combo.Items.Add($k) }
         if ($slotData.Name) { $combo.Text = $slotData.Name } else { $combo.Text = "Select Color..." }
 
@@ -944,14 +953,13 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         finally { if ($null -ne $zip) { $zip.Dispose() } }
     } else { $currentGrid.Visibility = "Collapsed" }
 
-    # Load custom PNG if present (Explicitly ignore the generated card image!)
+    # Load custom PNG if present (Explicitly ignore the final generated output card!)
     $diParent = [System.IO.DirectoryInfo]::new($parentPath)
     $customPng = Get-ChildItem -Path $parentPath -Filter "*.png" -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -notmatch "(?i)_slicePreview\.png" -and $_.Name -notmatch "(?i)^$($diParent.Name)\.png$" } | Select-Object -First 1
-    if ($customPng) {
-        $pJob.CustomImagePath = $customPng.FullName
-        $pbModel.Source = Load-WpfImage $customPng.FullName
-    }
+        Where-Object {
+            $_.Name -notmatch "(?i)_slicePreview\.png" -and
+            $_.Name -notmatch "(?i)^$([regex]::Escape($diParent.Name))\.png$"
+        } | Select-Object -First 1
 
     # Processing overlay for card
     $cardOverlay = New-Object System.Windows.Controls.TextBlock
