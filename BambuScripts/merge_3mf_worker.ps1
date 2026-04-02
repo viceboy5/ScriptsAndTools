@@ -712,25 +712,30 @@ Get-ChildItem -Path (Join-Path $WorkDir "Metadata") -Filter "pick_*.png" -ErrorA
 Get-ChildItem -Path (Join-Path $WorkDir "Metadata") -Filter "plate_*.png" -ErrorAction SilentlyContinue | Remove-Item -Force
 Get-ChildItem -Path (Join-Path $WorkDir "Metadata") -Filter "plate_*.json" -ErrorAction SilentlyContinue | Remove-Item -Force
 
-# ── Repack Using Safe .NET ZipFile (NO BACKSLASHES, DESTROYS FILE LOCKS) ──────
-if (Test-Path $OutputPath) { Remove-Item $OutputPath -Force }
+# ── Safe Repack Using .NET (Bypasses Bracket Bug & Synology Locks) ────────────
+if (Test-Path -LiteralPath $OutputPath) { Remove-Item -LiteralPath $OutputPath -Force }
 
 Add-Type -AssemblyName 'System.IO.Compression.FileSystem'
 
+# Build in local TEMP to prevent Synology from locking the file mid-zip
+$tempZipPath = Join-Path $env:TEMP "$([guid]::NewGuid().ToString().Substring(0,8)).zip"
+
 try {
-    $zip = [System.IO.Compression.ZipFile]::Open($OutputPath, 'Create')
-    Get-ChildItem $WorkDir -Recurse -File | ForEach-Object {
+    $zip = [System.IO.Compression.ZipFile]::Open($tempZipPath, 'Create')
+    Get-ChildItem -LiteralPath $WorkDir -Recurse -File | ForEach-Object {
+        # Manually assign relative paths so no extra root folders are ever created
         $rel = $_.FullName.Substring($WorkDir.Length).TrimStart('\','/').Replace('\','/')
         [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $rel) | Out-Null
     }
 } finally {
-    # ── THE LOCK DESTROYER ──
     if ($null -ne $zip) { $zip.Dispose() }
     $zip = $null
-    Remove-Variable zip -ErrorAction SilentlyContinue
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()
 }
+
+# Safely hand the perfectly formed file back to Synology as a .3mf
+Move-Item -LiteralPath $tempZipPath -Destination $OutputPath -Force
 
 $finalCount = $mergePlan.Count + $lone
 $report.Add("Final object count: $finalCount")
