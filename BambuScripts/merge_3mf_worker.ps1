@@ -35,7 +35,15 @@ function Save-Xml([xml]$doc, [string]$path) {
     $w = [System.Xml.XmlWriter]::Create($path, $settings); $doc.Save($w); $w.Close()
 }
 function Find-File([string]$base, [string]$rel) {
-    $p = Join-Path $base $rel; if (Test-Path $p) { return $p }; $p2 = Join-Path $base ($rel -replace '\\','/'); if (Test-Path $p2) { return $p2 }; return $null
+    # Normalize separators so the function works regardless of how the caller
+    # passed the relative path (forward slash, backslash, or mixed).
+    $normalized = $rel -replace '\\', '/'
+    $p = Join-Path $base ($normalized -replace '/', [System.IO.Path]::DirectorySeparatorChar)
+    if (Test-Path $p) { return $p }
+    # Fallback: try the literal string as passed
+    $p2 = Join-Path $base $rel
+    if (Test-Path $p2) { return $p2 }
+    return $null
 }
 
 # ── Locate Files ──────────────────────────────────────────────────────────────
@@ -83,7 +91,6 @@ if (Test-Path $vlhPath) {
 }
 
 # ── PURGE OFF-PLATE & ORPHANED OBJECTS ────────────────────────────────────────
-# ── PURGE OFF-PLATE & ORPHANED OBJECTS ──────────────────────────────────────
 $validBuildItems = @()
 $killedIds = New-Object System.Collections.Generic.HashSet[string]
 
@@ -712,39 +719,39 @@ Get-ChildItem -Path (Join-Path $WorkDir "Metadata") -Filter "pick_*.png" -ErrorA
 Get-ChildItem -Path (Join-Path $WorkDir "Metadata") -Filter "plate_*.png" -ErrorAction SilentlyContinue | Remove-Item -Force
 Get-ChildItem -Path (Join-Path $WorkDir "Metadata") -Filter "plate_*.json" -ErrorAction SilentlyContinue | Remove-Item -Force
 
-# ── Safe Repack Using .NET (Bypasses Bracket Bug & Synology Locks) ────────────
+# ── Safe Repack Using .NET (Bypasses Bracket Bug, Synology Locks, & Pathing Bugs) ─
 if (Test-Path -LiteralPath $OutputPath) { Remove-Item -LiteralPath $OutputPath -Force }
 
 Add-Type -AssemblyName 'System.IO.Compression.FileSystem'
 
-# Build in local TEMP to prevent Synology from locking the file mid-zip
 $tempZipPath = Join-Path $env:TEMP "$([guid]::NewGuid().ToString().Substring(0,8)).zip"
+
+# Resolve the true absolute long path (bypasses 8.3 short-name bugs).
+# Normalize to always end with exactly one backslash so the substring offset used
+# below is consistent regardless of PowerShell version, OS locale, or how the caller
+# passed the path (trailing slash present or absent, drive-rooted vs UNC, etc.).
+# Without this, Get-Item may or may not include the trailing separator, which would
+# make the first zip entry either "" (extra folder) or the correct relative path.
+$resolvedWorkDir = (Get-Item -LiteralPath $WorkDir).FullName.TrimEnd('\', '/') + '\'
 
 try {
     $zip = [System.IO.Compression.ZipFile]::Open($tempZipPath, 'Create')
-    Get-ChildItem -LiteralPath $WorkDir -Recurse -File | ForEach-Object {
-        # Manually assign relative paths so no extra root folders are ever created
-        $rel = $_.FullName.Substring($WorkDir.Length).TrimStart('\','/').Replace('\','/')
+
+    Get-ChildItem -LiteralPath $resolvedWorkDir -Recurse -File | ForEach-Object {
+        # Substring math is now stable on any machine: resolvedWorkDir always ends
+        # with '\', so Substring gives "3D\Objects\foo.model" with no leading slash.
+        $rel = $_.FullName.Substring($resolvedWorkDir.Length).Replace('\', '/')
         [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $rel) | Out-Null
     }
 } finally {
     if ($null -ne $zip) { $zip.Dispose() }
-    $zip = $null
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()
 }
 
-# Safely hand the perfectly formed file back to Synology as a .3mf
 Move-Item -LiteralPath $tempZipPath -Destination $OutputPath -Force
 
-$finalCount = $mergePlan.Count + $lone
-$report.Add("Final object count: $finalCount")
-if ($ReportPath -ne "nul" -and -not [string]::IsNullOrWhiteSpace($ReportPath)) {
-    $report | Set-Content -Path $ReportPath -Encoding UTF8
-}
-Write-Host "Success! Ignored: $($ignoredItems.Count). Merged: $groupCount groups. Final Target Count: $finalCount."
-
-Write-Host "Waiting for file lock to release..." -ForegroundColor Yellow
+# ── Wait for file lock to release before declaring success ────────────────────
 $lockReleased = $false
 $attempts = 0
 while (-not $lockReleased -and $attempts -lt 20) {
@@ -753,7 +760,6 @@ while (-not $lockReleased -and $attempts -lt 20) {
         $testStream.Close()
         $testStream.Dispose()
         $lockReleased = $true
-        Write-Host "File lock released after $($attempts * 500)ms!" -ForegroundColor Green
     } catch {
         $attempts++
         Start-Sleep -Milliseconds 500
@@ -762,3 +768,10 @@ while (-not $lockReleased -and $attempts -lt 20) {
 if (-not $lockReleased) {
     Write-Host "WARNING: File is still locked after 10 seconds!" -ForegroundColor Red
 }
+
+$finalCount = $mergePlan.Count + $lone
+$report.Add("Final object count: $finalCount")
+if ($ReportPath -ne "nul" -and -not [string]::IsNullOrWhiteSpace($ReportPath)) {
+    $report | Set-Content -Path $ReportPath -Encoding UTF8
+}
+Write-Host "Success! Ignored: $($ignoredItems.Count). Merged: $groupCount groups. Final Target Count: $finalCount."
