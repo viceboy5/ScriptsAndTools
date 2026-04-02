@@ -971,15 +971,35 @@ function Start-NextProcess {
         } catch {}
     }
 
+    # --- ANCHOR RECOVERY SAFETY NET ---
+    if (-not (Test-Path -LiteralPath $pJob.ProcessedAnchorPath)) {
+        $recoveredAnchor = Get-ChildItem -LiteralPath $pJob.FolderPath -Filter "*Full.3mf" | Select-Object -First 1
+        if ($null -ne $recoveredAnchor) {
+            $pJob.ProcessedAnchorPath = $recoveredAnchor.FullName
+        } else {
+            $pJob.ProcessingOverlay.Text = "[ NO ANCHOR FOUND ]"
+            $pJob.ProcessingOverlay.BackColor = clr "#D95F5F"
+            $pJob.PickProcessingOverlay.Text = "[ NO ANCHOR FOUND ]"
+            $pJob.PickProcessingOverlay.BackColor = clr "#D95F5F"
+
+            $pJob.IsQueued = $false
+            $pJob.IsDone = $true
+            $pJob.BtnApply.Text = "FAILED"
+            $pJob.BtnApply.BackColor = clr "#D95F5F"
+
+            $script:activeProcess = $null
+            $script:activeProcessJob = $null
+            if ($script:processQueue.Count -gt 0) { Start-NextProcess }
+            return
+        }
+    }
+    # ----------------------------------
+
     $workerScript = Join-Path $env:TEMP "AsyncWorker_$([guid]::NewGuid().ToString().Substring(0,8)).ps1"
     $sb           = New-Object System.Text.StringBuilder
 
     $baseName = [System.IO.Path]::GetFileNameWithoutExtension($pJob.ProcessedAnchorPath)
-    if ($baseName.ToLower().EndsWith("full")) {
-        $basePrefix = $baseName.Substring(0, $baseName.Length - 4)
-    } else {
-        $basePrefix = $baseName + "_"
-    }
+    if ([string]::IsNullOrWhiteSpace($baseName)) { $baseName = $pJob.AnchorFile.BaseName }
 
     $dir        = $pJob.FolderPath
     $statusFile = Join-Path $dir "AsyncWorker_Status.txt"
@@ -1235,6 +1255,9 @@ $script:queueTimer.Add_Tick({
             $script:resizeTimer.Start()
             $script:activeProcess = $null
             $script:activeProcessJob = $null
+
+            # Immediately trigger the next job
+            if ($script:processQueue.Count -gt 0) { Start-NextProcess }
         }
     } else {
         if ($script:processQueue.Count -gt 0) { Start-NextProcess }
@@ -2042,9 +2065,9 @@ $script:resizeTimer.Add_Tick({
 
     $script:resizeTimer.Stop()
     $form.SuspendLayout()
+    $mainScroll.SuspendLayout()
 
     $savedScroll = $mainScroll.AutoScrollPosition
-    $mainScroll.AutoScrollPosition = New-Object System.Drawing.Point(0, 0)
 
     $availW = $mainScroll.ClientSize.Width - 680
     $sq = [math]::Min(($availW / 2), 512)
@@ -2125,8 +2148,9 @@ $script:resizeTimer.Add_Tick({
         $yOffset += $gpContainerH + 20
     }
 
-    $form.ResumeLayout()
+    $form.ResumeLayout($false)
     $mainScroll.AutoScrollPosition = New-Object System.Drawing.Point([math]::Abs($savedScroll.X), [math]::Abs($savedScroll.Y))
+    $mainScroll.ResumeLayout($false)
     $mainScroll.Invalidate()
 })
 

@@ -6,7 +6,7 @@ strScriptFolder = objFSO.GetParentFolderName(WScript.ScriptFullName)
 strPs1 = objFSO.BuildPath(strScriptFolder, "CardQueueEditorWPF.ps1")
 
 ' Added -STA (CRITICAL FOR WPF) and temporarily changed to WindowStyle Normal
-strCmd = "powershell.exe -STA -ExecutionPolicy Bypass -WindowStyle Normal -NoProfile -File """ & strPs1 & """"
+strCmd = "powershell.exe -STA -NoExit -ExecutionPolicy Bypass -WindowStyle Normal -NoProfile -File """ & strPs1 & """"
 
 ' Pass every dragged-and-dropped folder/file directly into the script
 For Each strArg In WScript.Arguments
