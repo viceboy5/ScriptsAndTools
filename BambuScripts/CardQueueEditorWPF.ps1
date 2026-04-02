@@ -216,21 +216,13 @@ $script:activeProcess = $null
 $script:activeProcessJob = $null
 $gpQueue = [ordered]@{}
 
-# Launch Folder Picker
+# Check for files passed by the VBScript, otherwise launch empty
 $foundFiles = @()
-if ($args.Count -eq 0) {
-    $pickedFolder = [ModernFolderPicker]::Pick([IntPtr]::Zero, "Select a Master Folder to scan for Full.3mf files")
-    if (-not $pickedFolder) { exit }
-    $foundFiles = Get-ChildItem -Path $pickedFolder -Filter "*Full.3mf" -Recurse -File
-} else {
+if ($args.Count -gt 0) {
     foreach ($p in $args) {
         if (Test-Path $p -PathType Container) { $foundFiles += Get-ChildItem -Path $p -Filter "*Full.3mf" -Recurse -File }
         elseif ($p -match '(?i)Full\.3mf$') { $foundFiles += Get-Item $p }
     }
-}
-
-if ($foundFiles.Count -eq 0) {
-    [System.Windows.MessageBox]::Show("No Full.3mf files found.", "Empty Queue") | Out-Null; exit
 }
 
 foreach ($f in $foundFiles) {
@@ -247,7 +239,7 @@ foreach ($f in $foundFiles) {
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Batch Pre-Flight Editor - WPF Engine"
         Width="1550" Height="850" MinWidth="1200" MinHeight="600"
-        Background="#16171B" WindowStartupLocation="CenterScreen">
+        Background="#16171B" WindowStartupLocation="CenterScreen" AllowDrop="True">
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="60"/>
@@ -312,7 +304,18 @@ function Update-ParentPreview($pJob, $gpJob) {
     $ad = $pJob.TBAdj.Text -replace '[^a-zA-Z0-9]', ''
     $th = $gpJob.TBTheme.Text -replace '[^a-zA-Z0-9]', ''
 
-    if ($null -ne $pJob.LblCharCard) { $pJob.LblCharCard.Text = $ch.ToUpper() }
+    # 1. Split CamelCase into spaces (e.g., "BabyDragon" -> "Baby Dragon")
+    $chSpaced = $ch -creplace '([a-z])([A-Z])', '$1 $2'
+    $adSpaced = $ad -creplace '([a-z])([A-Z])', '$1 $2'
+
+    # 2. Format with Adjective in parentheses
+    $displayTitle = $chSpaced
+    if (-not [string]::IsNullOrWhiteSpace($adSpaced)) {
+        $displayTitle += " ($adSpaced)"
+    }
+
+    # 3. Apply to the UI card in ALL CAPS
+    if ($null -ne $pJob.LblCharCard) { $pJob.LblCharCard.Text = $displayTitle.ToUpper() }
 
     $nameCounts = @{}
     foreach ($r in $pJob.FileRows) {
@@ -1463,6 +1466,64 @@ $btnProcessAll.Add_Click({
     }
 })
 
+# --- MAIN WINDOW DRAG & DROP HANDLER ---
+$window.Add_DragEnter({
+    param($s, $e)
+    if ($e.Data.GetDataPresent([System.Windows.DataFormats]::FileDrop)) { $e.Effects = [System.Windows.DragDropEffects]::Copy }
+    else { $e.Effects = [System.Windows.DragDropEffects]::None }
+    $e.Handled = $true
+})
+
+$window.Add_Drop({
+    param($s, $e)
+    if (-not $e.Data.GetDataPresent([System.Windows.DataFormats]::FileDrop)) { return }
+    $dropped = $e.Data.GetData([System.Windows.DataFormats]::FileDrop)
+
+    $lblGlobalTitle.Text = "Scanning dropped folders..."
+    [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
+
+    $newFound = @()
+    foreach ($p in $dropped) {
+        if (Test-Path $p -PathType Container) { $newFound += Get-ChildItem -Path $p -Filter "*Full.3mf" -Recurse -File }
+        elseif ($p -match '(?i)Full\.3mf$') { $newFound += Get-Item $p }
+    }
+
+    if ($newFound.Count -gt 0) {
+        $newGpQueue = [ordered]@{}
+        foreach ($f in $newFound) {
+            $parentPath = $f.DirectoryName
+            $gp = $f.Directory.Parent
+            $gpPath = if ($gp) { $gp.FullName } else { "ROOT_" + $parentPath }
+
+            # Skip if this folder is already in the UI
+            $exists = $false
+            foreach ($j in $script:jobs) { foreach ($parentJob in $j.Parents) { if ($parentJob.FolderPath -eq $parentPath) { $exists = $true; break } } }
+            if ($exists) { continue }
+
+            if (-not $newGpQueue.Contains($gpPath)) { $newGpQueue[$gpPath] = [ordered]@{} }
+            if (-not $newGpQueue[$gpPath].Contains($parentPath)) { $newGpQueue[$gpPath][$parentPath] = $f }
+        }
+
+        foreach ($gpPath in $newGpQueue.Keys) {
+            $existingGp = $null
+            foreach ($j in $script:jobs) { if ($j.GpPath -eq $gpPath) { $existingGp = $j; break } }
+
+            if ($existingGp) {
+                # Append to existing Grandparent group
+                foreach ($pKey in $newGpQueue[$gpPath].Keys) {
+                    $pJob = Build-PJob $pKey $newGpQueue[$gpPath][$pKey] $existingGp
+                    $existingGp.Parents.Add($pJob) | Out-Null
+                }
+            } else {
+                # Create a brand new Grandparent group
+                Build-GpJob $gpPath $newGpQueue[$gpPath]
+            }
+        }
+    }
+
+    $lblGlobalTitle.Text = "Queue Dashboard ($($script:jobs.Count) Theme(s) found)"
+    if ($script:jobs.Count -gt 0) { Update-GlobalProcessAllStatus }
+})
 # --- 10. STARTUP ---
 $window.Add_Loaded({
     $idx = 1
