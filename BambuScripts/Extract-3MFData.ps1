@@ -448,7 +448,7 @@ if ($GenerateImage) {
 
                 $pyLog = Join-Path $env:TEMP "python_error.log"
                 # Call Python to build the image
-                $proc = Start-Process -FilePath "python" -ArgumentList $pyArgs -NoNewWindow -PassThru -RedirectStandardError $pyLog
+                $proc = Start-Process -FilePath "py.exe" -ArgumentList $pyArgs -NoNewWindow -PassThru -RedirectStandardError $pyLog
                 # Poll instead of -Wait so the GUI stays responsive during Python's collision detection
                 while (-not $proc.HasExited) {
                     [System.Windows.Forms.Application]::DoEvents()
