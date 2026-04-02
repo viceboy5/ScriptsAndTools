@@ -410,36 +410,42 @@ function Refresh-PJob($pJob, $gpJob) {
 
     $gcodeFile = Get-ChildItem -Path $pJob.FolderPath -Filter "*Full.gcode.3mf" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 
-    # Reload plate image
+    $gcodeFile = Get-ChildItem -Path $pJob.FolderPath -Filter "*Full.gcode.3mf" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+
+    # Reload CURRENT thumbnail (Strictly from gcode)
     if ($gcodeFile) {
-        $extractedGcodePlate = Join-Path $pJob.TempWork "plate_1_gcode.png"
         try {
             $zip = [System.IO.Compression.ZipFile]::OpenRead($gcodeFile.FullName)
-            $entry = $zip.Entries | Where-Object { ($_.FullName -replace "\\","/") -match "(?i)Metadata/plate_1\.png$" } | Select-Object -First 1
+            $entry = $zip.Entries | Where-Object { ($_.FullName -replace "\\","/") -match "(?i)Metadata/(plate_1|thumbnail)\.png$" } | Select-Object -First 1
             if ($entry) {
+                $extractedGcodePlate = Join-Path $pJob.TempWork "plate_1_gcode.png"
                 [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $extractedGcodePlate, $true)
-                $pJob.PbPlate.Source = Load-WpfImage $extractedGcodePlate
-            }
-        } catch {} finally { if ($null -ne $zip) { $zip.Dispose() } }
+                $pJob.PbCurrent.Source = Load-WpfImage $extractedGcodePlate
+                if ($pJob.CurrentThumb) { $pJob.CurrentThumb.Visibility = "Visible" }
+            } else { if ($pJob.CurrentThumb) { $pJob.CurrentThumb.Visibility = "Collapsed" } }
+        } catch { if ($pJob.CurrentThumb) { $pJob.CurrentThumb.Visibility = "Collapsed" } }
+        finally { if ($null -ne $zip) { $zip.Dispose() } }
+    } else { if ($pJob.CurrentThumb) { $pJob.CurrentThumb.Visibility = "Collapsed" } }
+
+    # Reload Main Image (Custom PNG or Anchor 3MF)
+    $diParent = [System.IO.DirectoryInfo]::new($pJob.FolderPath)
+    $gpName = if ($gpJob.DiGrand) { $gpJob.DiGrand.Name } else { "" }
+    $customPng = Get-ChildItem -Path $pJob.FolderPath -Filter "*.png" -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -notmatch "(?i)_slicePreview\.png" -and
+            $_.Name -notmatch "(?i)^$([regex]::Escape($diParent.Name))\.png$" -and
+            $_.Name -notmatch "(?i)$([regex]::Escape($gpName))\.png$"
+        } | Select-Object -First 1
+
+    if ($customPng) {
+        $pJob.CustomImagePath = $customPng.FullName
+        $pJob.PbPlate.Source = Load-WpfImage $customPng.FullName
     } else {
+        $pJob.CustomImagePath = $null
         $baseImgPath = Join-Path $pJob.TempWork "Metadata\plate_1.png"
         if (-not (Test-Path $baseImgPath)) { $baseImgPath = Join-Path $pJob.TempWork "Metadata\thumbnail.png" }
         $pJob.PbPlate.Source = Load-WpfImage $baseImgPath
     }
-
-    # Reload custom PNG (ignoring generated output card)
-    $diParent = [System.IO.DirectoryInfo]::new($pJob.FolderPath)
-    $customPng = Get-ChildItem -Path $pJob.FolderPath -Filter "*.png" -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.Name -notmatch "(?i)_slicePreview\.png" -and
-            $_.Name -notmatch "(?i)^$([regex]::Escape($diParent.Name))\.png$"
-        } | Select-Object -First 1
-    if ($customPng) {
-        $pJob.CustomImagePath = $customPng.FullName
-        $pJob.PbPlate.Source = Load-WpfImage $customPng.FullName
-    } else { $pJob.CustomImagePath = $null }
-
-    # Reload pick image
     $pickPath = $null
     if ($gcodeFile) {
         try {
@@ -813,12 +819,12 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=(New-Object System.Windows.GridLength(1, [System.Windows.GridUnitType]::Star))}))
     $pBorder.Child = $pGrid
 
-    # ── LEFT: Card panel + Pick panel (with overlays) ────────────────────────
+# ── LEFT COLUMN: Card panel + Pick panel ────────────────────────
     $leftStack = New-Object System.Windows.Controls.StackPanel
     $leftStack.Orientation = "Horizontal"; $leftStack.VerticalAlignment = "Top"
     [System.Windows.Controls.Grid]::SetColumn($leftStack, 0); $pGrid.Children.Add($leftStack) | Out-Null
 
-    # Card panel — use a Grid so we can stack overlapping layers
+    # Card panel
     $cardGrid = New-Object System.Windows.Controls.Grid
     $cardGrid.Width = 350; $cardGrid.Height = 350
     $cardGrid.Margin = New-Object System.Windows.Thickness(0,0,15,0)
@@ -826,22 +832,39 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pbModel = New-Object System.Windows.Controls.Image
     $pbModel.Stretch = "Uniform"
     $pbModel.HorizontalAlignment = "Left"
-    $pbModel.Margin = New-Object System.Windows.Thickness(10, 20, 160, 10) # 160px safe space for dropdowns!
+    $pbModel.Margin = New-Object System.Windows.Thickness(10, 20, 150, 10)
     $pbModel.AllowDrop = $true
-
-    $baseImgPath = Join-Path $tempWork "Metadata\plate_1.png"
-    if (-not (Test-Path $baseImgPath)) { $baseImgPath = Join-Path $tempWork "Metadata\thumbnail.png" }
-    $pbModel.Source = Load-WpfImage $baseImgPath
     $cardGrid.Children.Add($pbModel) | Out-Null
     $pJob.PbPlate = $pbModel
 
-    # PbPlateFinished — shown after job completes, covers whole card
+    # Determine Main Image (Custom PNG vs Extracted Anchor 3MF)
+    $diParent = [System.IO.DirectoryInfo]::new($parentPath)
+    $gpName = if ($gpJob.DiGrand) { $gpJob.DiGrand.Name } else { "" }
+    $customPng = Get-ChildItem -Path $parentPath -Filter "*.png" -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -notmatch "(?i)_slicePreview\.png" -and
+            $_.Name -notmatch "(?i)^$([regex]::Escape($diParent.Name))\.png$" -and
+            $_.Name -notmatch "(?i)$([regex]::Escape($gpName))\.png$"
+        } | Select-Object -First 1
+
+    if ($customPng) {
+        $pJob.CustomImagePath = $customPng.FullName
+        $pbModel.Source = Load-WpfImage $customPng.FullName
+    } else {
+        # Fallback to the Anchor 3MF extracted images (Checks both plate_1 and thumbnail!)
+        $pJob.CustomImagePath = $null
+        $baseImgPath = Join-Path $tempWork "Metadata\plate_1.png"
+        if (-not (Test-Path $baseImgPath)) { $baseImgPath = Join-Path $tempWork "Metadata\thumbnail.png" }
+        $pbModel.Source = Load-WpfImage $baseImgPath
+    }
+
+    # PbPlateFinished
     $pbPlateFinished = New-Object System.Windows.Controls.Image
     $pbPlateFinished.Stretch = "Uniform"; $pbPlateFinished.Visibility = "Collapsed"
     $cardGrid.Children.Add($pbPlateFinished) | Out-Null
     $pJob.PbPlateFinished = $pbPlateFinished
 
-    # [CURRENT] gcode thumbnail (small, top-left corner)
+    # [CURRENT] gcode thumbnail
     $currentGrid = New-Object System.Windows.Controls.Grid
     $currentGrid.HorizontalAlignment = "Left"; $currentGrid.VerticalAlignment = "Top"
     $currentGrid.Width = 110; $currentGrid.Height = 125; $currentGrid.Margin = New-Object System.Windows.Thickness(8,8,0,0)
@@ -853,18 +876,22 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $cardGrid.Children.Add($currentGrid) | Out-Null
     $pJob.PbCurrent = $pbCurrent; $pJob.CurrentThumb = $currentGrid
 
-    # Load [CURRENT] gcode thumbnail if available
     $gcodeFile = Get-ChildItem -Path $parentPath -Filter "*Full.gcode.3mf" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if ($gcodeFile) {
         try {
             $zip = [System.IO.Compression.ZipFile]::OpenRead($gcodeFile.FullName)
-            $entry = $zip.Entries | Where-Object { ($_.FullName -replace "\\","/") -match "(?i)Metadata/plate_1\.png$" } | Select-Object -First 1
+            # Find either plate_1.png or thumbnail.png inside the gcode file
+            $entry = $zip.Entries | Where-Object { ($_.FullName -replace "\\","/") -match "(?i)Metadata/(plate_1|thumbnail)\.png$" } | Select-Object -First 1
             if ($entry) {
                 $gcodeImgPath = Join-Path $tempWork "plate_1_gcode.png"
                 [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $gcodeImgPath, $true)
                 $pbCurrent.Source = Load-WpfImage $gcodeImgPath
             } else { $currentGrid.Visibility = "Collapsed" }
-            # --- OVERLAY LABELS ON IMAGE CARD ---
+        } catch { $currentGrid.Visibility = "Collapsed" }
+        finally { if ($null -ne $zip) { $zip.Dispose() } }
+    } else { $currentGrid.Visibility = "Collapsed" }
+
+    # Overlay Labels
     $lblCharCard = Create-TextBlock "" "#E8A135" 16 "Bold"
     $lblCharCard.HorizontalAlignment = "Right"; $lblCharCard.VerticalAlignment = "Top"
     $lblCharCard.Margin = New-Object System.Windows.Thickness(0, 10, 10, 0)
@@ -876,7 +903,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $lblSkipTime.Margin = New-Object System.Windows.Thickness(10, 0, 0, 10)
     $cardGrid.Children.Add($lblSkipTime) | Out-Null
 
-# --- COLOR SLOTS (OVERLAID ON RIGHT EDGE OF IMAGE) ---
+    # Color Slots (Protected against malformed hex codes)
     $colorsOverlayStack = New-Object System.Windows.Controls.StackPanel
     $colorsOverlayStack.Orientation = "Vertical"
     $colorsOverlayStack.HorizontalAlignment = "Right"
@@ -904,16 +931,20 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
         $textStack.Children.Add($lblStatus) | Out-Null; $textStack.Children.Add($combo) | Out-Null
 
-        $swatchColor = if ([string]::IsNullOrWhiteSpace($slotData.OldHex)) { "#333333" } else { $slotData.OldHex }
+        $swatchColor = if ([string]::IsNullOrWhiteSpace($slotData.OldHex) -or $slotData.OldHex.Length -lt 7) { "#333333" } else { $slotData.OldHex }
         $swatchBorder = New-Object System.Windows.Controls.Border
         $swatchBorder.Width = 40; $swatchBorder.Height = 40
         $swatchBorder.Background = Get-WpfColor $swatchColor
         $swatchBorder.BorderBrush = Get-WpfColor "#2A2C35"; $swatchBorder.BorderThickness = New-Object System.Windows.Thickness(1)
 
-        # Calculate contrast for the number (Black text on light colors, White text on dark)
-        $r = [Convert]::ToInt32($swatchColor.Substring(1,2), 16)
-        $g = [Convert]::ToInt32($swatchColor.Substring(3,2), 16)
-        $b = [Convert]::ToInt32($swatchColor.Substring(5,2), 16)
+        $r = 51; $g = 51; $b = 51
+        if ($swatchColor.Length -ge 7) {
+            try {
+                $r = [Convert]::ToInt32($swatchColor.Substring(1,2), 16)
+                $g = [Convert]::ToInt32($swatchColor.Substring(3,2), 16)
+                $b = [Convert]::ToInt32($swatchColor.Substring(5,2), 16)
+            } catch {}
+        }
         $numColor = if ((0.299*$r + 0.587*$g + 0.114*$b) -gt 128) { "#000000" } else { "#FFFFFF" }
 
         $lblNum = Create-TextBlock $slotIdx.ToString() $numColor 14 "Bold"
@@ -932,13 +963,13 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             if ($LibraryColors.Contains($s.Text)) {
                 $newHex = $LibraryColors[$s.Text]
                 $data.Swatch.Background = Get-WpfColor $newHex
-
-                # Update text contrast when color changes
-                $r = [Convert]::ToInt32($newHex.Substring(1,2), 16)
-                $g = [Convert]::ToInt32($newHex.Substring(3,2), 16)
-                $b = [Convert]::ToInt32($newHex.Substring(5,2), 16)
-                $numColor = if ((0.299*$r + 0.587*$g + 0.114*$b) -gt 128) { "#000000" } else { "#FFFFFF" }
-                $data.LblNum.Foreground = Get-WpfColor $numColor
+                try {
+                    $r = [Convert]::ToInt32($newHex.Substring(1,2), 16)
+                    $g = [Convert]::ToInt32($newHex.Substring(3,2), 16)
+                    $b = [Convert]::ToInt32($newHex.Substring(5,2), 16)
+                    $numColor = if ((0.299*$r + 0.587*$g + 0.114*$b) -gt 128) { "#000000" } else { "#FFFFFF" }
+                    $data.LblNum.Foreground = Get-WpfColor $numColor
+                } catch {}
             }
             if ($s.Text -eq $data.OrigName) {
                 if ($data.OrigName) { $data.StatusLbl.Text = "[MATCHED]"; $data.StatusLbl.Foreground = Get-WpfColor "#4CAF72" }
@@ -949,19 +980,8 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $slotIdx++
     }
     $cardGrid.Children.Add($colorsOverlayStack) | Out-Null
-        } catch { $currentGrid.Visibility = "Collapsed" }
-        finally { if ($null -ne $zip) { $zip.Dispose() } }
-    } else { $currentGrid.Visibility = "Collapsed" }
 
-    # Load custom PNG if present (Explicitly ignore the final generated output card!)
-    $diParent = [System.IO.DirectoryInfo]::new($parentPath)
-    $customPng = Get-ChildItem -Path $parentPath -Filter "*.png" -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.Name -notmatch "(?i)_slicePreview\.png" -and
-            $_.Name -notmatch "(?i)^$([regex]::Escape($diParent.Name))\.png$"
-        } | Select-Object -First 1
-
-    # Processing overlay for card
+    # Processing Overlay
     $cardOverlay = New-Object System.Windows.Controls.TextBlock
     $cardOverlay.Text = "[ PROCESSING ]"
     $cardOverlay.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220,232,161,53))
@@ -974,30 +994,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
     $leftStack.Children.Add($cardGrid) | Out-Null
 
-    # Drag-drop for custom PNG on plate image
-    $pbModel.Tag = @{ P = $pJob }
-    $pbModel.Add_DragOver({
-        param($s, $e)
-        if ($e.Data.GetDataPresent([System.Windows.DataFormats]::FileDrop)) {
-            $files = $e.Data.GetData([System.Windows.DataFormats]::FileDrop)
-            if ($files[0] -match '(?i)\.(png|jpg|jpeg)$') { $e.Effects = [System.Windows.DragDropEffects]::Copy } else { $e.Effects = [System.Windows.DragDropEffects]::None }
-        }
-        $e.Handled = $true
-    })
-    $pbModel.Add_Drop({
-        param($s, $e)
-        $p = $s.Tag.P
-        $files = $e.Data.GetData([System.Windows.DataFormats]::FileDrop)
-        $dropped = $files[0]
-        if ($dropped -match '(?i)\.(png|jpg|jpeg)$') {
-            $dest = Join-Path $p.FolderPath (Split-Path $dropped -Leaf)
-            if ($dropped -ne $dest) { Copy-Item -Path $dropped -Destination $dest -Force }
-            $s.Source = Load-WpfImage $dest
-            $p.CustomImagePath = $dest
-        }
-    })
-
-    # Pick panel (with overlay)
+    # Pick Panel
     $pickGrid = New-Object System.Windows.Controls.Grid
     $pickGrid.Width = 350; $pickGrid.Height = 350
 
@@ -1015,7 +1012,6 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pickGrid.Children.Add($pickOverlay) | Out-Null
     $pJob.PickProcessingOverlay = $pickOverlay
 
-    # Load pick image
     if ($gcodeFile) {
         try {
             $zip = [System.IO.Compression.ZipFile]::OpenRead($gcodeFile.FullName)
@@ -1031,7 +1027,6 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         } catch {} finally { if ($null -ne $zip) { $zip.Dispose() } }
     }
     $leftStack.Children.Add($pickGrid) | Out-Null
-
     # ── RIGHT: Controls column ───────────────────────────────────────────────
     $rightStack = New-Object System.Windows.Controls.StackPanel
     $rightStack.Orientation = "Vertical"; $rightStack.Margin = New-Object System.Windows.Thickness(15,0,0,0)
