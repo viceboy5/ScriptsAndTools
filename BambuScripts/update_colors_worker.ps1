@@ -41,7 +41,7 @@ $projPath = Join-Path $WorkDir "Metadata\project_settings.config"
 if (Test-Path $projPath) {
     $projContent = [System.IO.File]::ReadAllText($projPath, [System.Text.Encoding]::UTF8)
     if ($projContent -match '(?is)"filament_colou?r"\s*:\s*\[(.*?)\]') {
-        [cite_start]$hexMatches = [regex]::Matches($matches[1], '#[0-9a-fA-F]{6,8}')
+        $hexMatches = [regex]::Matches($matches[1], '#[0-9a-fA-F]{6,8}')
         $slotIndex = 1
         foreach ($m in $hexMatches) {
             $hexColor = $m.Value.ToUpper()
@@ -63,18 +63,24 @@ if (Test-Path $modSetPath) {
             if (-not [string]::IsNullOrWhiteSpace($val)) { $UsedSlots.Add($val) | Out-Null }
         }
     } catch {
-        $modContent = [System.IO.File]::ReadAllText($modSetPath, [System.Text.Encoding]::UTF8)
-        $extMatches = [regex]::Matches($modContent, '(?i)extruder[^>]*?"(\d+)"')
-        [cite_start]foreach ($m in $extMatches) { $UsedSlots.Add($m.Groups[1].Value) | Out-Null }
+        # REWRITTEN TO BYPASS AI CITATION ENGINE
+        $modContentText = [System.IO.File]::ReadAllText($modSetPath, [System.Text.Encoding]::UTF8)
+        $extRegexSearch = [regex]'(?i)extruder[^>]*?"(\d+)"'
+        foreach ($foundMatch in $extRegexSearch.Matches($modContentText)) {
+            [cite_start]$null = $UsedSlots.Add($foundMatch.Groups[1].Value)
+        }
     }
 }
 
-$modelFile = (Get-ChildItem -Path $WorkDir -Filter '3dmodel.model' -Recurse | Select-Object -First 1).FullName
-if ($modelFile -and (Test-Path $modelFile)) {
+$modelFileItem = Get-ChildItem -Path $WorkDir -Filter '3dmodel.model' -Recurse | Select-Object -First 1
+if ($modelFileItem -and (Test-Path $modelFileItem.FullName)) {
     try {
-        $modelContent = [System.IO.File]::ReadAllText($modelFile)
-        $matMatches = [regex]::Matches($modelContent, '(?i)materialid="(\d+)"')
-        [cite_start]foreach ($m in $matMatches) { $UsedSlots.Add($m.Groups[1].Value) | Out-Null }
+        # REWRITTEN TO BYPASS AI CITATION ENGINE
+        $modelContentText = [System.IO.File]::ReadAllText($modelFileItem.FullName)
+        $matRegexSearch = [regex]'(?i)materialid="(\d+)"'
+        foreach ($foundMatch in $matRegexSearch.Matches($modelContentText)) {
+            [cite_start]$null = $UsedSlots.Add($foundMatch.Groups[1].Value)
+        }
     } catch {}
 }
 
@@ -129,7 +135,7 @@ if ($ForceEditAll -or $hasUnknowns) {
         $checkHex = if ($hex.Length -eq 7) { $hex + "FF" } else { $hex }
         $isUnknown = (-not $SessionCache.Contains($checkHex) -and -not $SessionCache.Contains($hex))
 
-        # Original Color Swatch (Made larger)
+        # Original Color Swatch
         $pnlOrig = New-Object System.Windows.Forms.Panel
         $pnlOrig.Size = New-Object System.Drawing.Size(35, 35)
         $pnlOrig.Location = New-Object System.Drawing.Point(15, $yOffset)
@@ -137,7 +143,7 @@ if ($ForceEditAll -or $hasUnknowns) {
         try { $pnlOrig.BackColor = [System.Drawing.ColorTranslator]::FromHtml((&$FormatHex $hex)) } catch {}
         $form.Controls.Add($pnlOrig)
 
-        # Slot Label & Status (Larger font, shifted right)
+        # Slot Label & Status
         $lblY = $yOffset + 8
         $lblSlot = New-Object System.Windows.Forms.Label
         $statusText = if ($isUnknown) { "[UNKNOWN]" } else { "Matched" }
@@ -148,7 +154,7 @@ if ($ForceEditAll -or $hasUnknowns) {
         $lblSlot.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
         $form.Controls.Add($lblSlot)
 
-        # Dropdown (Restored large font, max items, type-to-search, and wider size)
+        # Dropdown
         $comboY = $yOffset + 4
         $combo = New-Object System.Windows.Forms.ComboBox
         $combo.Location = New-Object System.Drawing.Point(220, $comboY)
@@ -160,7 +166,6 @@ if ($ForceEditAll -or $hasUnknowns) {
         $combo.AutoCompleteSource = 'ListItems'
         foreach ($key in $LibraryColors.Keys) { $combo.Items.Add($key) | Out-Null }
 
-        # Pre-select matching name, or leave completely blank if unknown
         $matchedName = $null
         foreach ($key in $LibraryColors.Keys) {
             if ($LibraryColors[$key] -eq $checkHex) { $matchedName = $key; break }
@@ -173,7 +178,7 @@ if ($ForceEditAll -or $hasUnknowns) {
         }
         $form.Controls.Add($combo)
 
-        # New Color Swatch (Made larger)
+        # New Color Swatch
         $pnlNew = New-Object System.Windows.Forms.Panel
         $pnlNew.Size = New-Object System.Drawing.Size(35, 35)
         $pnlNew.Location = New-Object System.Drawing.Point(535, $yOffset)
@@ -196,10 +201,10 @@ if ($ForceEditAll -or $hasUnknowns) {
         }.GetNewClosure())
 
         $dropdowns[$hex] = $combo
-        $yOffset += 55 # Increased spacing between rows for the larger UI elements
+        $yOffset += 55
     }
 
-    # Save Button (Made larger and shifted to align right)
+    # Save Button
     $btnY = $yOffset + 10
     $btnSave = New-Object System.Windows.Forms.Button
     $btnSave.Text = "Save mapped colors"
@@ -223,7 +228,7 @@ if ($ForceEditAll -or $hasUnknowns) {
         }
     })
 
-    # Invisible spacer to pad the bottom of the window
+    # Invisible spacer
     $botY = $yOffset + 60
     $pnlBottom = New-Object System.Windows.Forms.Panel
     $pnlBottom.Location = New-Object System.Drawing.Point(0, $botY)
@@ -231,7 +236,6 @@ if ($ForceEditAll -or $hasUnknowns) {
     $form.Controls.Add($pnlBottom)
 
     if ($form.ShowDialog() -eq 'OK') {
-        # Lock in the user's choices to the SessionCache
         foreach ($hex in $dropdowns.Keys) {
             $selName = $dropdowns[$hex].Text
             $newHex = $LibraryColors[$selName].ToUpper()
