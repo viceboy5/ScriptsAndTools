@@ -276,6 +276,23 @@ $btnProcessAll  = $window.FindName("BtnProcessAll")
 $btnCombineData = $window.FindName("BtnCombineData")
 $mainStack      = $window.FindName("MainStack")
 
+function Update-GlobalProcessAllStatus {
+    $hasAnyCollision = $false
+    foreach ($gp in $script:jobs) {
+        foreach ($p in $gp.Parents) {
+            if ($p.HasCollision) { $hasAnyCollision = $true; break }
+        }
+        if ($hasAnyCollision) { break }
+    }
+    if ($hasAnyCollision) {
+        $btnProcessAll.IsEnabled = $false
+        $btnProcessAll.Background = Get-WpfColor "#555555"
+    } else {
+        $btnProcessAll.IsEnabled = $true
+        $btnProcessAll.Background = Get-WpfColor "#4CAF72"
+    }
+}
+
 # --- 6. CORE LOGIC FUNCTIONS ---
 function Validate-PJob($pJob) {
     if ($pJob.IsQueued -or $pJob.IsDone) { return }
@@ -294,6 +311,8 @@ function Update-ParentPreview($pJob, $gpJob) {
     $ch = $pJob.TBChar.Text -replace '[^a-zA-Z0-9]', ''
     $ad = $pJob.TBAdj.Text -replace '[^a-zA-Z0-9]', ''
     $th = $gpJob.TBTheme.Text -replace '[^a-zA-Z0-9]', ''
+
+    if ($null -ne $pJob.LblCharCard) { $pJob.LblCharCard.Text = $ch.ToUpper() }
 
     $nameCounts = @{}
     foreach ($r in $pJob.FileRows) {
@@ -314,6 +333,7 @@ function Update-ParentPreview($pJob, $gpJob) {
     }
     $pJob.HasCollision = $hasCollision
     Validate-PJob $pJob
+    Update-GlobalProcessAllStatus
 }
 
 function Add-FileRow($pJob, $gpJob, $fi) {
@@ -832,6 +852,69 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
                 [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $gcodeImgPath, $true)
                 $pbCurrent.Source = Load-WpfImage $gcodeImgPath
             } else { $currentGrid.Visibility = "Collapsed" }
+            # --- OVERLAY LABELS ON IMAGE CARD ---
+    $lblCharCard = Create-TextBlock "" "#E8A135" 16 "Bold"
+    $lblCharCard.HorizontalAlignment = "Left"; $lblCharCard.VerticalAlignment = "Top"
+    $lblCharCard.Margin = New-Object System.Windows.Thickness(10, 10, 0, 0)
+    $cardGrid.Children.Add($lblCharCard) | Out-Null
+    $pJob.LblCharCard = $lblCharCard
+
+    $lblSkipTime = Create-TextBlock "Skip Time: 00" "#FFFFFF" 12 "Bold"
+    $lblSkipTime.HorizontalAlignment = "Left"; $lblSkipTime.VerticalAlignment = "Bottom"
+    $lblSkipTime.Margin = New-Object System.Windows.Thickness(10, 0, 0, 10)
+    $cardGrid.Children.Add($lblSkipTime) | Out-Null
+
+    # --- COLOR SLOTS (OVERLAID ON BOTTOM RIGHT OF IMAGE) ---
+    $colorsOverlayStack = New-Object System.Windows.Controls.StackPanel
+    $colorsOverlayStack.Orientation = "Vertical"
+    $colorsOverlayStack.HorizontalAlignment = "Right"
+    $colorsOverlayStack.VerticalAlignment = "Bottom"
+    $colorsOverlayStack.Margin = New-Object System.Windows.Thickness(0, 0, 10, 10)
+
+    foreach ($slotData in $activeSlots) {
+        $rowStack = New-Object System.Windows.Controls.StackPanel
+        $rowStack.Orientation = "Horizontal"; $rowStack.HorizontalAlignment = "Right"
+        $rowStack.Margin = New-Object System.Windows.Thickness(0,0,0,5)
+
+        $textStack = New-Object System.Windows.Controls.StackPanel
+        $textStack.Orientation = "Vertical"; $textStack.VerticalAlignment = "Center"
+        $textStack.Margin = New-Object System.Windows.Thickness(0,0,10,0)
+
+        $lblStatus = Create-TextBlock "" "#A0A0A0" 10 "Bold"
+        $lblStatus.HorizontalAlignment = "Right"
+        if ($slotData.Name) { $lblStatus.Text = "[MATCHED]"; $lblStatus.Foreground = Get-WpfColor "#4CAF72" }
+        else { $lblStatus.Text = "[UNMATCHED]"; $lblStatus.Foreground = Get-WpfColor "#D95F5F" }
+
+        $combo = New-Object System.Windows.Controls.ComboBox; $combo.Width = 140; $combo.IsEditable = $true
+        foreach ($k in $LibraryColors.Keys) { [void]$combo.Items.Add($k) }
+        if ($slotData.Name) { $combo.Text = $slotData.Name } else { $combo.Text = "Select Color..." }
+
+        $textStack.Children.Add($lblStatus) | Out-Null; $textStack.Children.Add($combo) | Out-Null
+
+        $swatchColor = if ([string]::IsNullOrWhiteSpace($slotData.OldHex)) { "#333333" } else { $slotData.OldHex }
+        $swatchBorder = New-Object System.Windows.Controls.Border
+        $swatchBorder.Width = 35; $swatchBorder.Height = 35
+        $swatchBorder.Background = Get-WpfColor $swatchColor
+        $swatchBorder.BorderBrush = Get-WpfColor "#2A2C35"; $swatchBorder.BorderThickness = New-Object System.Windows.Thickness(1)
+
+        $rowStack.Children.Add($textStack) | Out-Null; $rowStack.Children.Add($swatchBorder) | Out-Null
+        $colorsOverlayStack.Children.Add($rowStack) | Out-Null
+
+        $pJob.UISlots.Add([PSCustomObject]@{ OldHex = $slotData.OldHex; Combo = $combo; StatusLbl = $lblStatus; SwatchBorder = $swatchBorder }) | Out-Null
+
+        $combo.Tag = @{ StatusLbl = $lblStatus; OrigName = $slotData.Name; P = $pJob; Swatch = $swatchBorder }
+        $combo.AddHandler([System.Windows.Controls.Primitives.TextBoxBase]::TextChangedEvent, [System.Windows.Controls.TextChangedEventHandler]{
+            param($s, $e)
+            $data = $s.Tag
+            if ($LibraryColors.Contains($s.Text)) { $data.Swatch.Background = Get-WpfColor $LibraryColors[$s.Text] }
+            if ($s.Text -eq $data.OrigName) {
+                if ($data.OrigName) { $data.StatusLbl.Text = "[MATCHED]"; $data.StatusLbl.Foreground = Get-WpfColor "#4CAF72" }
+                else { $data.StatusLbl.Text = "[UNMATCHED]"; $data.StatusLbl.Foreground = Get-WpfColor "#D95F5F" }
+            } else { $data.StatusLbl.Text = "[CHANGED]"; $data.StatusLbl.Foreground = Get-WpfColor "#E8A135" }
+            Validate-PJob $data.P
+        })
+    }
+    $cardGrid.Children.Add($colorsOverlayStack) | Out-Null
         } catch { $currentGrid.Visibility = "Collapsed" }
         finally { if ($null -ne $zip) { $zip.Dispose() } }
     } else { $currentGrid.Visibility = "Collapsed" }
@@ -1069,49 +1152,6 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $adjStack.Children.Add($tbAdj) | Out-Null; $editStack.Children.Add($adjStack) | Out-Null
     $pJob.TBAdj = $tbAdj
     $editBox.Child = $editStack; $rightStack.Children.Add($editBox) | Out-Null
-
-    # Color slots with colored swatch
-    $colorsWrap = New-Object System.Windows.Controls.WrapPanel
-    $colorsWrap.Margin = New-Object System.Windows.Thickness(0,10,0,0)
-    foreach ($slotData in $activeSlots) {
-        $swatchStack = New-Object System.Windows.Controls.StackPanel; $swatchStack.Margin = New-Object System.Windows.Thickness(0,0,15,10)
-
-        # Colored swatch border
-        $swatchColor = if ([string]::IsNullOrWhiteSpace($slotData.OldHex)) { "#333333" } else { $slotData.OldHex }
-        $swatchBorder = New-Object System.Windows.Controls.Border
-        $swatchBorder.Width = 76; $swatchBorder.Height = 76
-        $swatchBorder.Background = Get-WpfColor $swatchColor
-        $swatchBorder.BorderBrush = Get-WpfColor "#2A2C35"; $swatchBorder.BorderThickness = New-Object System.Windows.Thickness(1)
-        $swatchBorder.Margin = New-Object System.Windows.Thickness(0,0,0,4)
-        $swatchStack.Children.Add($swatchBorder) | Out-Null
-
-        $lblStatus = Create-TextBlock "" "#A0A0A0" 10 "Bold"
-        if ($slotData.Name) { $lblStatus.Text = "[MATCHED]"; $lblStatus.Foreground = Get-WpfColor "#4CAF72" }
-        else { $lblStatus.Text = "[UNMATCHED]"; $lblStatus.Foreground = Get-WpfColor "#D95F5F" }
-
-        $combo = New-Object System.Windows.Controls.ComboBox; $combo.Width = 150; $combo.IsEditable = $true
-        foreach ($k in $LibraryColors.Keys) { [void]$combo.Items.Add($k) }
-        if ($slotData.Name) { $combo.Text = $slotData.Name } else { $combo.Text = "Select Color..." }
-
-        $swatchStack.Children.Add($lblStatus) | Out-Null; $swatchStack.Children.Add($combo) | Out-Null
-        $colorsWrap.Children.Add($swatchStack) | Out-Null
-        $pJob.UISlots.Add([PSCustomObject]@{ OldHex = $slotData.OldHex; Combo = $combo; StatusLbl = $lblStatus; SwatchBorder = $swatchBorder }) | Out-Null
-
-        $combo.Tag = @{ StatusLbl = $lblStatus; OrigName = $slotData.Name; P = $pJob; Swatch = $swatchBorder }
-        $combo.AddHandler([System.Windows.Controls.Primitives.TextBoxBase]::TextChangedEvent, [System.Windows.Controls.TextChangedEventHandler]{
-            param($s, $e)
-            $data = $s.Tag
-            if ($LibraryColors.Contains($s.Text)) {
-                $data.Swatch.Background = Get-WpfColor $LibraryColors[$s.Text]
-            }
-            if ($s.Text -eq $data.OrigName) {
-                if ($data.OrigName) { $data.StatusLbl.Text = "[MATCHED]"; $data.StatusLbl.Foreground = Get-WpfColor "#4CAF72" }
-                else { $data.StatusLbl.Text = "[UNMATCHED]"; $data.StatusLbl.Foreground = Get-WpfColor "#D95F5F" }
-            } else { $data.StatusLbl.Text = "[CHANGED]"; $data.StatusLbl.Foreground = Get-WpfColor "#E8A135" }
-            Validate-PJob $data.P
-        })
-    }
-    $rightStack.Children.Add($colorsWrap) | Out-Null
 
     # Files list
     $pnlFiles = New-Object System.Windows.Controls.StackPanel; $pnlFiles.Margin = New-Object System.Windows.Thickness(0,10,0,0)
@@ -1410,7 +1450,7 @@ $window.Add_Loaded({
         $idx++
     }
     $lblGlobalTitle.Text = "Queue Dashboard ($($gpQueue.Count) Theme(s) found)"
-    $btnProcessAll.IsEnabled = $true
+    Update-GlobalProcessAllStatus
     $script:queueTimer.Start()
 })
 
