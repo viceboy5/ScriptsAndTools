@@ -697,12 +697,24 @@ function Refresh-PJob($pJob, $gpJob) {
     if ($pickPath) { $pJob.PbPick.Source = Load-WpfImage $pickPath }
 
     # Reset overlays
-    $pJob.ProcessingOverlay.Text = "[ PROCESSING ]"
-    $pJob.ProcessingOverlay.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220,232,161,53))
-    $pJob.ProcessingOverlay.Foreground = Get-WpfColor "#000000"
-    $pJob.ProcessingOverlay.Visibility = "Collapsed"
+    $nestExists = Get-ChildItem -Path $pJob.FolderPath -Filter "*Nest.3mf" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    $amberBrush = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220,232,161,53))
+    $pJob.ProcessingOverlay.BorderBrush = $amberBrush
+    $pJob.ProcessingOverlay.Background  = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(30,232,161,53))
+    $pJob.CardStatusLabel.Text          = "[ PROCESSING ]"
+    $pJob.CardStatusLabel.Foreground    = $amberBrush
+    $pJob.ProcessingOverlay.Visibility  = "Collapsed"
     $pJob.PickProcessingOverlay.Visibility = "Collapsed"
     if ($pJob.FinishedOverlay) { $pJob.FinishedOverlay.Visibility = "Collapsed" }
+    if ($pJob.MergeBanner) { $pJob.MergeBanner.Visibility = if ($nestExists) { "Visible" } else { "Collapsed" } }
+    if ($pJob.ChkMerge) {
+        if ($nestExists) {
+            $pJob.ChkMerge.IsChecked = $false; $pJob.ChkMerge.IsEnabled = $false; $pJob.ChkMerge.Foreground = Get-WpfColor "#555555"
+            $pJob.ChkMerge.ToolTip = "Remove Nest.3mf or Revert Merge before merging again"
+        } else {
+            $pJob.ChkMerge.IsEnabled = $true; $pJob.ChkMerge.Foreground = Get-WpfColor "#FFFFFF"; $pJob.ChkMerge.ToolTip = $null
+        }
+    }
 
     # Reload file rows
     $pJob.PnlFiles.Children.Clear(); $pJob.FileRows.Clear()
@@ -729,8 +741,8 @@ function Enqueue-PJob($pJob, $gpJob) {
     $pJob.IsQueued = $true
     $pJob.BtnApply.Content = "Queued..."; $pJob.BtnApply.Background = Get-WpfColor "#E8A135"
     $pJob.RowPanel.IsEnabled = $false
-    $pJob.ProcessingOverlay.Text = "[ PREPARING ]"; $pJob.ProcessingOverlay.Visibility = "Visible"
-    $pJob.PickProcessingOverlay.Text = "[ PREPARING ]"; $pJob.PickProcessingOverlay.Visibility = "Visible"
+    $pJob.CardStatusLabel.Text = "[ PREPARING ]"; $pJob.ProcessingOverlay.Visibility = "Visible"
+    $pJob.PickStatusLabel.Text = "[ PREPARING ]"; $pJob.PickProcessingOverlay.Visibility = "Visible"
 
     $script:processQueue.Enqueue(@{ PJob = $pJob; GpJob = $gpJob })
 }
@@ -1299,16 +1311,23 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     }
     $cardGrid.Children.Add($colorsOverlayStack) | Out-Null
 
-    # Processing Overlay
-    $cardOverlay = New-Object System.Windows.Controls.TextBlock
-    $cardOverlay.Text = "[ PROCESSING ]"
-    $cardOverlay.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220,232,161,53))
-    $cardOverlay.Foreground = Get-WpfColor "#000000"
-    $cardOverlay.FontSize = 14; $cardOverlay.FontWeight = [System.Windows.FontWeights]::Bold
-    $cardOverlay.TextAlignment = "Center"; $cardOverlay.VerticalAlignment = "Center"; $cardOverlay.HorizontalAlignment = "Stretch"
-    $cardOverlay.Visibility = "Collapsed"; $cardOverlay.Padding = New-Object System.Windows.Thickness(0,196,0,0)
-    $cardGrid.Children.Add($cardOverlay) | Out-Null
-    $pJob.ProcessingOverlay = $cardOverlay
+    # Processing Overlay (border + bottom label)
+    $cardBorderOverlay = New-Object System.Windows.Controls.Border
+    $cardBorderOverlay.BorderThickness = New-Object System.Windows.Thickness(6)
+    $cardBorderOverlay.BorderBrush = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220,232,161,53))
+    $cardBorderOverlay.Background  = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(30,232,161,53))
+    $cardBorderOverlay.Visibility = "Collapsed"
+    $cardStatusLbl = New-Object System.Windows.Controls.TextBlock
+    $cardStatusLbl.Text = "[ PROCESSING ]"
+    $cardStatusLbl.Foreground = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(255,232,161,53))
+    $cardStatusLbl.FontSize = 13; $cardStatusLbl.FontWeight = [System.Windows.FontWeights]::Bold
+    $cardStatusLbl.TextAlignment = "Center"; $cardStatusLbl.VerticalAlignment = "Bottom"; $cardStatusLbl.HorizontalAlignment = "Stretch"
+    $cardStatusLbl.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(180,0,0,0))
+    $cardStatusLbl.Padding = New-Object System.Windows.Thickness(5,4,5,6)
+    $cardBorderOverlay.Child = $cardStatusLbl
+    $cardGrid.Children.Add($cardBorderOverlay) | Out-Null
+    $pJob.ProcessingOverlay = $cardBorderOverlay
+    $pJob.CardStatusLabel   = $cardStatusLbl
 
     $cardGrid.AllowDrop = $true
     $cardGrid.Tag = $pJob
@@ -1392,15 +1411,36 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         }
     })
 
-    $pickOverlay = New-Object System.Windows.Controls.TextBlock
-    $pickOverlay.Text = "[ PROCESSING ]"
-    $pickOverlay.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220,232,161,53))
-    $pickOverlay.Foreground = Get-WpfColor "#000000"
-    $pickOverlay.FontSize = 14; $pickOverlay.FontWeight = [System.Windows.FontWeights]::Bold
-    $pickOverlay.TextAlignment = "Center"; $pickOverlay.VerticalAlignment = "Center"; $pickOverlay.HorizontalAlignment = "Stretch"
-    $pickOverlay.Visibility = "Collapsed"; $pickOverlay.Padding = New-Object System.Windows.Thickness(0,196,0,0)
-    $pickGrid.Children.Add($pickOverlay) | Out-Null
-    $pJob.PickProcessingOverlay = $pickOverlay
+    # Pick processing border overlay
+    $pickBorderOverlay = New-Object System.Windows.Controls.Border
+    $pickBorderOverlay.BorderThickness = New-Object System.Windows.Thickness(6)
+    $pickBorderOverlay.BorderBrush = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220,232,161,53))
+    $pickBorderOverlay.Background  = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(30,232,161,53))
+    $pickBorderOverlay.Visibility = "Collapsed"
+    $pickStatusLbl = New-Object System.Windows.Controls.TextBlock
+    $pickStatusLbl.Text = "[ PROCESSING ]"
+    $pickStatusLbl.Foreground = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(255,232,161,53))
+    $pickStatusLbl.FontSize = 13; $pickStatusLbl.FontWeight = [System.Windows.FontWeights]::Bold
+    $pickStatusLbl.TextAlignment = "Center"; $pickStatusLbl.VerticalAlignment = "Bottom"; $pickStatusLbl.HorizontalAlignment = "Stretch"
+    $pickStatusLbl.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(180,0,0,0))
+    $pickStatusLbl.Padding = New-Object System.Windows.Thickness(5,4,5,6)
+    $pickBorderOverlay.Child = $pickStatusLbl
+    $pickGrid.Children.Add($pickBorderOverlay) | Out-Null
+    $pJob.PickProcessingOverlay = $pickBorderOverlay
+    $pJob.PickStatusLabel = $pickStatusLbl
+
+    # Merge detected banner (top of pick image)
+    $nestExists = Get-ChildItem -Path $parentPath -Filter "*Nest.3mf" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    $mergeBanner = New-Object System.Windows.Controls.TextBlock
+    $mergeBanner.Text = "MERGE DETECTED"
+    $mergeBanner.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(210,30,140,60))
+    $mergeBanner.Foreground = Get-WpfColor "#FFFFFF"
+    $mergeBanner.FontSize = 12; $mergeBanner.FontWeight = [System.Windows.FontWeights]::Bold
+    $mergeBanner.TextAlignment = "Center"; $mergeBanner.VerticalAlignment = "Top"; $mergeBanner.HorizontalAlignment = "Stretch"
+    $mergeBanner.Padding = New-Object System.Windows.Thickness(0,5,0,5)
+    $mergeBanner.Visibility = if ($nestExists) { "Visible" } else { "Collapsed" }
+    $pickGrid.Children.Add($mergeBanner) | Out-Null
+    $pJob.MergeBanner = $mergeBanner
 
     if ($gcodeFile) {
         try {
@@ -1519,6 +1559,10 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $rightStack.Children.Add($tasksBox) | Out-Null
 
     $pJob.ChkMerge = $chkMerge; $pJob.ChkSlice = $chkSlice; $pJob.ChkExtract = $chkExtract; $pJob.ChkImage = $chkImage; $pJob.ChkLogs = $chkLogs
+    if ($nestExists) {
+        $chkMerge.IsChecked = $false; $chkMerge.IsEnabled = $false; $chkMerge.Foreground = Get-WpfColor "#555555"
+        $chkMerge.ToolTip = "Remove Nest.3mf or Revert Merge before merging again"
+    }
 
     # Checkbox interdependencies
     $tasksData = @{ Merge = $chkMerge; Slice = $chkSlice; Extract = $chkExtract; Image = $chkImage; Logs = $chkLogs; PJob = $pJob; GpJob = $gpJob }
@@ -1546,15 +1590,15 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnSelAll.Tag = $tasksData
     $btnSelAll.Add_Click({
         $t = $this.Tag
-        $t.Merge.IsEnabled = $true; $t.Slice.IsEnabled = $true; $t.Extract.IsEnabled = $true; $t.Image.IsEnabled = $true; $t.Logs.IsEnabled = $true
-        $t.Merge.IsChecked = $true; $t.Slice.IsChecked = $true; $t.Extract.IsChecked = $true; $t.Image.IsChecked = $true; $t.Logs.IsChecked = $true
+        $t.Slice.IsChecked = $true; $t.Extract.IsChecked = $true; $t.Image.IsChecked = $true; $t.Logs.IsChecked = $true
+        if ($t.Merge.IsEnabled) { $t.Merge.IsChecked = $true }
     })
 
     $btnDeselAll.Tag = $tasksData
     $btnDeselAll.Add_Click({
         $t = $this.Tag
-        $t.Merge.IsEnabled = $true; $t.Slice.IsEnabled = $true; $t.Extract.IsEnabled = $true; $t.Image.IsEnabled = $true; $t.Logs.IsEnabled = $true
-        $t.Merge.IsChecked = $false; $t.Slice.IsChecked = $false; $t.Extract.IsChecked = $false; $t.Image.IsChecked = $false; $t.Logs.IsChecked = $false
+        $t.Slice.IsChecked = $false; $t.Extract.IsChecked = $false; $t.Image.IsChecked = $false; $t.Logs.IsChecked = $false
+        if ($t.Merge.IsEnabled) { $t.Merge.IsChecked = $false }
     })
 
     $btnRevertMerge.Tag = @{ P = $pJob; G = $gpJob }
@@ -1566,9 +1610,11 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $pj.BtnApply.Content = "Reverting..."; $pj.BtnApply.Width = 150
         if ($pj.BtnRevertDone) { $pj.BtnRevertDone.Visibility = "Collapsed" }
         $pj.RowPanel.IsEnabled = $false
-        $pj.ProcessingOverlay.Text = "[REVERTING...]"
-        $pj.ProcessingOverlay.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220, 217, 95, 95))
-        $pj.ProcessingOverlay.Foreground = Get-WpfColor "#FFFFFF"
+        $redBrush = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220, 217, 95, 95))
+        $pj.ProcessingOverlay.BorderBrush = $redBrush
+        $pj.ProcessingOverlay.Background  = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(30, 217, 95, 95))
+        $pj.CardStatusLabel.Text       = "[REVERTING...]"
+        $pj.CardStatusLabel.Foreground = $redBrush
         $pj.ProcessingOverlay.Visibility = "Visible"
         [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
         try {
@@ -1688,9 +1734,11 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $targetPath = if ($pj.ProcessedAnchorPath -ne "") { $pj.ProcessedAnchorPath } else { $pj.AnchorFile.FullName }
         $pj.BtnApply.Content = "Reverting..."; $pj.BtnApply.Width = 150; $pj.BtnRevertDone.Visibility = "Collapsed"
         $pj.RowPanel.IsEnabled = $false
-        $pj.ProcessingOverlay.Text = "[REVERTING...]"
-        $pj.ProcessingOverlay.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220, 217, 95, 95))
-        $pj.ProcessingOverlay.Foreground = Get-WpfColor "#FFFFFF"
+        $redBrush = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220, 217, 95, 95))
+        $pj.ProcessingOverlay.BorderBrush = $redBrush
+        $pj.ProcessingOverlay.Background  = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(30, 217, 95, 95))
+        $pj.CardStatusLabel.Text       = "[REVERTING...]"
+        $pj.CardStatusLabel.Foreground = $redBrush
         $pj.ProcessingOverlay.Visibility = "Visible"
         [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
         try {
@@ -1849,8 +1897,8 @@ $script:queueTimer.Add_Tick({
                     $statusText = $sr.ReadToEnd(); $sr.Dispose(); $fs.Dispose()
                     if ($statusText) {
                         $txt = "[ $($statusText.Trim()) ]"
-                        $pJob.ProcessingOverlay.Text = $txt
-                        $pJob.PickProcessingOverlay.Text = $txt
+                        $pJob.CardStatusLabel.Text = $txt
+                        $pJob.PickStatusLabel.Text = $txt
                         $pJob.BtnApply.Content = $statusText.Trim()
                     }
                 } catch {}
