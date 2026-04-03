@@ -50,8 +50,29 @@ public class NativeFolderBrowser {
     [ComImport, Guid("DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7")]
     private class FileOpenDialogImpl {}
 
-    [ComImport, Guid("42f85136-db7e-439c-85f1-e4075d135fc8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IFileDialog {
+    [ComImport, Guid("B63EA76D-1F85-456F-A19C-48159EFA858B"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IShellItemArray {
+        void BindToHandler([In] IntPtr pbc, [In] ref Guid bhid, [In] ref Guid riid, out IntPtr ppvOut);
+        void GetPropertyStore([In] int flags, [In] ref Guid riid, out IntPtr ppv);
+        void GetPropertyDescriptionList([In] ref Guid keyType, [In] ref Guid riid, out IntPtr ppv);
+        void GetAttributes([In] int AttribFlags, [In] uint sfgaoMask, out uint psfgaoAttribs);
+        void GetCount(out uint pdwNumItems);
+        void GetItemAt([In] uint dwIndex, [MarshalAs(UnmanagedType.Interface)] out IShellItem ppsi);
+        void EnumItems(out IntPtr ppenumShellItems);
+    }
+
+    [ComImport, Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IShellItem {
+        void BindToHandler([In] IntPtr pbc, [In] ref Guid bhid, [In] ref Guid riid, out IntPtr ppv);
+        void GetParent([MarshalAs(UnmanagedType.Interface)] out IShellItem ppsi);
+        void GetDisplayName([In] uint sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
+        void GetAttributes([In] uint sfgaoMask, out uint psfgaoAttribs);
+        void Compare([In, MarshalAs(UnmanagedType.Interface)] IShellItem psi, [In] uint hint, out int piOrder);
+    }
+
+    // Upgraded to IFileOpenDialog to unlock GetResults()
+    [ComImport, Guid("d57c7288-d4ad-4768-be02-9d969532d960"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IFileOpenDialog {
         [PreserveSig] int Show([In] IntPtr parent);
         void SetFileTypes([In] uint cFileTypes, [In] IntPtr rgFilterSpec);
         void SetFileTypeIndex([In] uint iFileType);
@@ -76,42 +97,43 @@ public class NativeFolderBrowser {
         void SetClientGuid([In] ref Guid guid);
         void ClearClientData();
         void SetFilter([MarshalAs(UnmanagedType.Interface)] IntPtr pFilter);
+        void GetResults([MarshalAs(UnmanagedType.Interface)] out IShellItemArray ppenum);
+        void GetSelectedItems([MarshalAs(UnmanagedType.Interface)] out IShellItemArray ppsai);
     }
 
-    [ComImport, Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IShellItem {
-        void BindToHandler([In] IntPtr pbc, [In] ref Guid bhid, [In] ref Guid riid, out IntPtr ppv);
-        void GetParent([MarshalAs(UnmanagedType.Interface)] out IShellItem ppsi);
-        void GetDisplayName([In] uint sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
-        void GetAttributes([In] uint sfgaoMask, out uint psfgaoAttribs);
-        void Compare([In, MarshalAs(UnmanagedType.Interface)] IShellItem psi, [In] uint hint, out int piOrder);
-    }
-
-    public static string ShowDialog(IntPtr ownerHandle, string title) {
+    public static string[] ShowDialog(IntPtr ownerHandle, string title) {
         try {
-            IFileDialog dialog = (IFileDialog)new FileOpenDialogImpl();
+            IFileOpenDialog dialog = (IFileOpenDialog)new FileOpenDialogImpl();
             uint options;
             dialog.GetOptions(out options);
 
-            // Apply FOS_PICKFOLDERS (0x20) and FOS_FORCEFILESYSTEM (0x40)
-            dialog.SetOptions(options | 0x00000020 | 0x00000040);
+            // Apply FOS_PICKFOLDERS (0x20) | FOS_FORCEFILESYSTEM (0x40) | FOS_ALLOWMULTISELECT (0x200)
+            dialog.SetOptions(options | 0x00000020 | 0x00000040 | 0x00000200);
             if (!string.IsNullOrEmpty(title)) dialog.SetTitle(title);
 
-            // Open the dialog tied directly to the WPF Window
             int hr = dialog.Show(ownerHandle);
-            if (hr != 0) return null; // Cancelled or error
+            if (hr != 0) return null;
 
-            IShellItem item;
-            dialog.GetResult(out item);
+            IShellItemArray resultsArray;
+            dialog.GetResults(out resultsArray);
 
-            // Retrieve the file system path (SIGDN_FILESYSPATH = 0x80058000)
-            string path;
-            item.GetDisplayName(0x80058000, out path);
+            uint count;
+            resultsArray.GetCount(out count);
+            string[] paths = new string[count];
 
-            Marshal.ReleaseComObject(item);
+            for (uint i = 0; i < count; i++) {
+                IShellItem item;
+                resultsArray.GetItemAt(i, out item);
+                string path;
+                item.GetDisplayName(0x80058000, out path); // 0x80058000 = SIGDN_FILESYSPATH
+                paths[i] = path;
+                Marshal.ReleaseComObject(item);
+            }
+
+            Marshal.ReleaseComObject(resultsArray);
             Marshal.ReleaseComObject(dialog);
 
-            return path;
+            return paths;
         } catch { return null; }
     }
 }
@@ -1764,21 +1786,19 @@ $btnBrowse.Add_Click({
     $interop = New-Object System.Windows.Interop.WindowInteropHelper($window)
     $hwnd = $interop.Handle
 
-    # 2. Call the new NativeFolderBrowser
-    $selectedPath = [NativeFolderBrowser]::ShowDialog($hwnd, "Select a folder containing Full.3mf files")
+    # 2. Call the new NativeFolderBrowser (Now returns an array of paths!)
+    $selectedPaths = [NativeFolderBrowser]::ShowDialog($hwnd, "Select folders containing Full.3mf files")
 
     # 3. Stop if the user closed the window or clicked Cancel
-    if ([string]::IsNullOrWhiteSpace($selectedPath)) { return }
+    if ($null -eq $selectedPaths -or $selectedPaths.Count -eq 0) { return }
 
-    $lblGlobalTitle.Text = "Scanning selected folder..."
+    $lblGlobalTitle.Text = "Scanning selected folders..."
     [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
 
-    # 4. Standard scanning & queueing logic
-    $newFound = @(Get-ChildItem -Path $selectedPath -Filter "*Full.3mf" -Recurse -File)
-    if ($newFound.Count -eq 0) {
-        [System.Windows.MessageBox]::Show("No Full.3mf files found in that folder.", "Nothing Found") | Out-Null
-        $lblGlobalTitle.Text = "Queue Dashboard ($($script:jobs.Count) Theme(s) found)"
-        return
+    # 4. Standard scanning & queueing logic (Looping through every folder you checked!)
+    $newFound = @()
+    foreach ($path in $selectedPaths) {
+        $newFound += @(Get-ChildItem -Path $path -Filter "*Full.3mf" -Recurse -File -ErrorAction SilentlyContinue)
     }
 
     $newGpQueue = [ordered]@{}
