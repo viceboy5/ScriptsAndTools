@@ -321,7 +321,7 @@ foreach ($f in $foundFiles) {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Batch Pre-Flight Editor - WPF Engine"
-        Width="1550" Height="850" MinWidth="1550" MinHeight="600"
+        Width="1550" Height="850" MinWidth="1100" MinHeight="600"
         Background="#16171B" WindowStartupLocation="CenterScreen" AllowDrop="True">
     <Grid>
         <Grid.RowDefinitions>
@@ -966,8 +966,10 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pJob.RowPanel = $pBorder
 
     $pGrid = New-Object System.Windows.Controls.Grid
-    $pGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::Auto}))
-    $pGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=(New-Object System.Windows.GridLength(1, [System.Windows.GridUnitType]::Star)); MinWidth=500}))
+    # Left column absorbs all the resizing
+    $pGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=(New-Object System.Windows.GridLength(1, [System.Windows.GridUnitType]::Star))}))
+    # Right column stays strictly rigid at 560px
+    $pGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=(New-Object System.Windows.GridLength(560))}))
     $pBorder.Child = $pGrid
 
 # ── LEFT COLUMN: Card panel + Pick panel ────────────────────────
@@ -975,7 +977,16 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $leftGrid.VerticalAlignment = "Top"
     $leftGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::Auto}))
     $leftGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::Auto}))
-    [System.Windows.Controls.Grid]::SetColumn($leftGrid, 0); $pGrid.Children.Add($leftGrid) | Out-Null
+
+    # The Viewbox perfectly scales everything inside it to fit the shrinking column
+    $viewbox = New-Object System.Windows.Controls.Viewbox
+    $viewbox.Stretch = "Uniform"
+    $viewbox.StretchDirection = [System.Windows.Controls.StretchDirection]::DownOnly
+    $viewbox.HorizontalAlignment = "Left"
+    $viewbox.VerticalAlignment = "Top"
+    $viewbox.Child = $leftGrid
+
+    [System.Windows.Controls.Grid]::SetColumn($viewbox, 0); $pGrid.Children.Add($viewbox) | Out-Null
 
     # Card panel
     $cardGrid = New-Object System.Windows.Controls.Grid
