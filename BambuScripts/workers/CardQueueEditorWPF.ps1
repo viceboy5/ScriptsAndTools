@@ -1610,7 +1610,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     # Files list
     $pnlFiles = New-Object System.Windows.Controls.StackPanel; $pnlFiles.Margin = New-Object System.Windows.Thickness(0,10,0,0)
     $rightStack.Children.Add($pnlFiles) | Out-Null; $pJob.PnlFiles = $pnlFiles
-    $files = Get-ChildItem -Path $parentPath -File -ErrorAction SilentlyContinue | Sort-Object Name
+    $files = Get-ChildItem -Path $parentPath -File -ErrorAction SilentlyContinue | Sort-Object { switch -Regex ($_.Name) { 'Final\.3mf$' {0} 'Nest\.3mf$' {1} 'Full\.3mf$' {2} 'Full\.gcode\.3mf$' {3} default {4} } }, Name
     foreach ($fi in $files) { Add-FileRow $pJob $gpJob $fi }
 
     # Apply + Revert + Delete Logs buttons
