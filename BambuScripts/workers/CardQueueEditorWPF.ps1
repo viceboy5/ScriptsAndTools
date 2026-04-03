@@ -396,6 +396,12 @@ function Update-ParentPreview($pJob, $gpJob) {
         else { $pJob.LblFolder.Text = "Folder: $(Split-Path $pJob.FolderPath -Leaf)" }
     }
 
+    # Update grandparent folder name preview (Prefix_Theme or just Theme)
+    if ($null -ne $gpJob.LblGpPreview) {
+        $gpPreview = if ($pf) { "${pf}_${th}" } else { $th }
+        $gpJob.LblGpPreview.Text = if ($gpPreview) { [char]0x2192 + " $gpPreview" } else { "" }
+    }
+
     $pJob.HasCollision = $hasCollision
     Validate-PJob $pJob
     Update-GlobalProcessAllStatus
@@ -990,7 +996,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     } else { $currentGrid.Visibility = "Collapsed" }
 
     # Overlay Labels
-    $lblCharCard = Create-TextBlock "" "#E8A135" 16 "Bold"
+    $lblCharCard = Create-TextBlock "" "#E8A135" 20 "Bold"
     $lblCharCard.HorizontalAlignment = "Right"; $lblCharCard.VerticalAlignment = "Top"
     $lblCharCard.Margin = New-Object System.Windows.Thickness(0, 10, 10, 0)
     $cardGrid.Children.Add($lblCharCard) | Out-Null
@@ -1031,7 +1037,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
         $swatchColor = if ([string]::IsNullOrWhiteSpace($slotData.OldHex) -or $slotData.OldHex.Length -lt 7) { "#333333" } else { $slotData.OldHex }
         $swatchBorder = New-Object System.Windows.Controls.Border
-        $swatchBorder.Width = 40; $swatchBorder.Height = 40
+        $swatchBorder.Width = 52; $swatchBorder.Height = 52
         $swatchBorder.Background = Get-WpfColor $swatchColor
         $swatchBorder.BorderBrush = Get-WpfColor "#2A2C35"; $swatchBorder.BorderThickness = New-Object System.Windows.Thickness(1)
 
@@ -1486,7 +1492,6 @@ function Build-GpJob($gpPath, $parentDict) {
     $cbPrefix.Background = Get-WpfColor "#1E2028"; $cbPrefix.Foreground = Get-WpfColor "#E8A135"
     $cbPrefix.BorderBrush = Get-WpfColor "#5A78C4"; $cbPrefix.BorderThickness = New-Object System.Windows.Thickness(1)
     $cbPrefix.VerticalAlignment = "Center"; $cbPrefix.Margin = New-Object System.Windows.Thickness(5,0,20,0)
-    # Override system brushes so the selected-item area and popup both render dark
     $cbPrefix.Resources[[System.Windows.SystemColors]::WindowBrushKey]          = Get-WpfColor "#1E2028"
     $cbPrefix.Resources[[System.Windows.SystemColors]::WindowTextBrushKey]      = Get-WpfColor "#E8A135"
     $cbPrefix.Resources[[System.Windows.SystemColors]::HighlightBrushKey]       = Get-WpfColor "#3A3C45"
@@ -1515,6 +1520,13 @@ function Build-GpJob($gpPath, $parentDict) {
     $chkSkip.Foreground = Get-WpfColor "#FFFFFF"; $chkSkip.VerticalAlignment = "Center"
     $chkSkip.Margin = New-Object System.Windows.Thickness(15,0,0,0)
     $headerStack.Children.Add($chkSkip) | Out-Null; $gpJob.ChkSkip = $chkSkip
+
+    # Live preview of the full grandparent folder name (Prefix_Theme or just Theme)
+    $lblGpPreview = Create-TextBlock "" "#6B9FD4" 14 "Bold"
+    $lblGpPreview.VerticalAlignment = "Center"; $lblGpPreview.Margin = New-Object System.Windows.Thickness(20,0,0,0)
+    $initGpPreview = if ($gpDetectedPrefix -ne "") { "$gpDetectedPrefix`_$gpNameForTheme" } else { $gpNameForTheme }
+    $lblGpPreview.Text = if ($initGpPreview) { [char]0x2192 + " $initGpPreview" } else { "" }
+    $headerStack.Children.Add($lblGpPreview) | Out-Null; $gpJob.LblGpPreview = $lblGpPreview
 
     $headerGrid.Children.Add($headerStack) | Out-Null
 
