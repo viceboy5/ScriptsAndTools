@@ -563,6 +563,7 @@ function Add-FileRow($pJob, $gpJob, $fi) {
     $fGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=(New-Object System.Windows.GridLength(1, [System.Windows.GridUnitType]::Star))}))
     $fGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=(New-Object System.Windows.GridLength(30))}))
     $fGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=(New-Object System.Windows.GridLength(1, [System.Windows.GridUnitType]::Star))}))
+    $fGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=(New-Object System.Windows.GridLength(45))}))
     $fGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=(New-Object System.Windows.GridLength(40))}))
     $fRow.Child = $fGrid
 
@@ -584,10 +585,18 @@ function Add-FileRow($pJob, $gpJob, $fi) {
     $lNew.TextWrapping = "Wrap"
     [System.Windows.Controls.Grid]::SetColumn($lNew, 3); $fGrid.Children.Add($lNew) | Out-Null
 
+    $btnOpen = New-Object System.Windows.Controls.Button
+    $btnOpen.Content = "Open"; $btnOpen.Background = Get-WpfColor "#2A2C35"; $btnOpen.Foreground = Get-WpfColor "#A0C4FF"
+    $btnOpen.BorderThickness = 0; $btnOpen.Width = 40; $btnOpen.Height = 20; $btnOpen.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnOpen.ToolTip = $fi.FullName
+    [System.Windows.Controls.Grid]::SetColumn($btnOpen, 4); $fGrid.Children.Add($btnOpen) | Out-Null
+    $btnOpen.Tag = $fi.FullName
+    $btnOpen.Add_Click({ Start-Process $this.Tag })
+
     $btnDel = New-Object System.Windows.Controls.Button
     $btnDel.Content = "X"; $btnDel.Background = Get-WpfColor "#D95F5F"; $btnDel.Foreground = Get-WpfColor "#FFFFFF"
     $btnDel.BorderThickness = 0; $btnDel.Width = 20; $btnDel.Height = 20; $btnDel.Cursor = [System.Windows.Input.Cursors]::Hand
-    [System.Windows.Controls.Grid]::SetColumn($btnDel, 4); $fGrid.Children.Add($btnDel) | Out-Null
+    [System.Windows.Controls.Grid]::SetColumn($btnDel, 5); $fGrid.Children.Add($btnDel) | Out-Null
 
     $frObj = [PSCustomObject]@{ OldPath = $fi.FullName; SuffixBox = $sBadge; OldLbl = $lOld; NewLbl = $lNew; Ext = $parsed.Extension; TargetName = "" }
     $pJob.FileRows.Add($frObj) | Out-Null
@@ -1475,7 +1484,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
     $tasksOuter = New-Object System.Windows.Controls.StackPanel
 
-    $tasksRow1 = New-Object System.Windows.Controls.StackPanel; $tasksRow1.Orientation = "Horizontal"
+    $tasksRow1 = New-Object System.Windows.Controls.WrapPanel; $tasksRow1.Orientation = "Horizontal"
     $chkMerge   = New-Object System.Windows.Controls.CheckBox; $chkMerge.Content   = "Merge";                $chkMerge.IsChecked   = $true; $chkMerge.Foreground   = Get-WpfColor "#FFFFFF"; $chkMerge.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
     $chkSlice   = New-Object System.Windows.Controls.CheckBox; $chkSlice.Content   = "Slice / Export Gcode"; $chkSlice.IsChecked   = $true; $chkSlice.Foreground   = Get-WpfColor "#FFFFFF"; $chkSlice.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
     $chkExtract = New-Object System.Windows.Controls.CheckBox; $chkExtract.Content = "Extract Data";         $chkExtract.IsChecked = $true; $chkExtract.Foreground = Get-WpfColor "#FFFFFF"; $chkExtract.Margin = New-Object System.Windows.Thickness(0,0,15,0)
