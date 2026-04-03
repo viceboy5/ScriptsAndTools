@@ -3,7 +3,7 @@ Set objFSO = CreateObject("Scripting.FileSystemObject")
 
 ' Get the exact folder where this VBScript lives
 strScriptFolder = objFSO.GetParentFolderName(WScript.ScriptFullName)
-strPs1 = objFSO.BuildPath(strScriptFolder, "CardQueueEditorWPF.ps1")
+strPs1 = objFSO.BuildPath(strScriptFolder, "..\workers\CardQueueEditorWPF.ps1")
 
 ' Added -STA (CRITICAL FOR WPF) and temporarily changed to WindowStyle Normal
 strCmd = "powershell.exe -STA -NoExit -ExecutionPolicy Bypass -WindowStyle Normal -NoProfile -File """ & strPs1 & """"

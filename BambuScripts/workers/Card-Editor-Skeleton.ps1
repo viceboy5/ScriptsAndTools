@@ -1081,7 +1081,7 @@ function Start-NextProcess {
         # ReplaceImageNew.bat handles Synology cloud stubs with retry logic.
         # It finds *Full.gcode.3mf in the folder and injects the matching _slicePreview.png.
         [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value `"IMAGE INJECTION...`" -Force")
-        [void]$sb.AppendLine("`$batPath = Join-Path `"$scriptDir`" `"ReplaceImageNew.bat`"")
+        [void]$sb.AppendLine("`$batPath = Join-Path `"$scriptDir`" `"..\callers\ReplaceImageNew.bat`"")
         [void]$sb.AppendLine("if (Test-Path `$batPath) {")
         [void]$sb.AppendLine("    `$argList = '/c `"`"' + `$batPath + '`" `"' + `"$dir`" + '`"`"'")
         [void]$sb.AppendLine("    Start-Process -FilePath `"cmd.exe`" -ArgumentList `$argList -Wait -WindowStyle Hidden")
@@ -1803,7 +1803,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $pj = $t.PJob
         $gp = $t.GpJob
 
-        $batPath = Join-Path $scriptDir "RevertMerge.bat"
+        $batPath = Join-Path $scriptDir "..\callers\RevertMerge.bat"
         if (Test-Path $batPath) {
             $targetPath = if ($pj.ProcessedAnchorPath -ne "") { $pj.ProcessedAnchorPath } else { $pj.AnchorFile.FullName }
 
@@ -1921,7 +1921,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnRevertDone.Add_Click({
         $t = $this.Tag
         $pj = $t.P; $gp = $t.G
-        $batPath = Join-Path $scriptDir "RevertMerge.bat"
+        $batPath = Join-Path $scriptDir "..\callers\RevertMerge.bat"
         if (Test-Path $batPath) {
             $targetPath = if ($pj.ProcessedAnchorPath -ne "") { $pj.ProcessedAnchorPath } else { $pj.AnchorFile.FullName }
             $pj.BtnApply.Text = "Reverting..."

@@ -248,6 +248,10 @@ foreach ($f in $foundFiles) {
         <Border Background="#1C1D23" Grid.Row="0">
             <Grid>
                 <TextBlock Name="LblGlobalTitle" Text="Loading files into queue..." Foreground="White" FontSize="18" FontWeight="Bold" VerticalAlignment="Center" Margin="15,0,0,0"/>
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Orientation="Vertical">
+                    <Button Name="BtnBrowse" Content="Browse Files" Background="#5A78C4" Foreground="White" FontWeight="Bold" Width="140" Height="30" BorderThickness="0" Cursor="Hand"/>
+                    <TextBlock Text="Browse or drop files to add" Foreground="#888888" FontSize="10" HorizontalAlignment="Center" Margin="0,4,0,0"/>
+                </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,15,0">
                     <Button Name="BtnCombineData" Content="Combine TSV Data" Background="#E8A135" Foreground="White" FontWeight="Bold" Width="180" Height="40" Margin="0,0,15,0" BorderThickness="0" Cursor="Hand"/>
                     <Button Name="BtnProcessAll" Content="Add All To Queue" Background="#4CAF72" Foreground="White" FontWeight="Bold" Width="220" Height="40" IsEnabled="False" BorderThickness="0" Cursor="Hand"/>
@@ -266,17 +270,21 @@ $window = [System.Windows.Markup.XamlReader]::Load($reader)
 $lblGlobalTitle = $window.FindName("LblGlobalTitle")
 $btnProcessAll  = $window.FindName("BtnProcessAll")
 $btnCombineData = $window.FindName("BtnCombineData")
+$btnBrowse      = $window.FindName("BtnBrowse")
 $mainStack      = $window.FindName("MainStack")
 
 function Update-GlobalProcessAllStatus {
-    $hasAnyCollision = $false
+    $hasAnyIssue = $false
     foreach ($gp in $script:jobs) {
         foreach ($p in $gp.Parents) {
-            if ($p.HasCollision) { $hasAnyCollision = $true; break }
+            if ($p.IsQueued -or $p.IsDone) { continue }
+            if ($p.HasCollision) { $hasAnyIssue = $true; break }
+            foreach ($slot in $p.UISlots) { if ($slot.StatusLbl.Text -eq "[UNMATCHED]") { $hasAnyIssue = $true; break } }
+            if ($hasAnyIssue) { break }
         }
-        if ($hasAnyCollision) { break }
+        if ($hasAnyIssue) { break }
     }
-    if ($hasAnyCollision) {
+    if ($hasAnyIssue) {
         $btnProcessAll.IsEnabled = $false
         $btnProcessAll.Background = Get-WpfColor "#555555"
     } else {
@@ -331,9 +339,26 @@ function Update-ParentPreview($pJob, $gpJob) {
     $hasCollision = $false
     foreach ($r in $pJob.FileRows) {
         $r.NewLbl.Text = $r.TargetName
-        if ($nameCounts[$r.TargetName] -gt 1) { $r.NewLbl.Foreground = Get-WpfColor "#D95F5F"; $hasCollision = $true }
-        else { $r.NewLbl.Foreground = Get-WpfColor "#4CAF72" }
+        if ($nameCounts[$r.TargetName] -gt 1) {
+            $r.NewLbl.Foreground = Get-WpfColor "#D95F5F"
+            if ($r.OldLbl) { $r.OldLbl.Foreground = Get-WpfColor "#D95F5F" }
+            $hasCollision = $true
+        } else {
+            $r.NewLbl.Foreground = Get-WpfColor "#4CAF72"
+            if ($r.OldLbl) { $r.OldLbl.Foreground = Get-WpfColor "#6B6E7A" }
+        }
     }
+    # Update folder label to preview the renamed folder name (Character_Adjective_Theme)
+    $folderParts = @()
+    if ($ch) { $folderParts += $ch }
+    if ($ad) { $folderParts += $ad }
+    if ($th) { $folderParts += $th }
+    $previewFolderName = $folderParts -join '_'
+    if ($null -ne $pJob.LblFolder) {
+        if ($previewFolderName) { $pJob.LblFolder.Text = "Folder: $previewFolderName" }
+        else { $pJob.LblFolder.Text = "Folder: $(Split-Path $pJob.FolderPath -Leaf)" }
+    }
+
     $pJob.HasCollision = $hasCollision
     Validate-PJob $pJob
     Update-GlobalProcessAllStatus
@@ -374,7 +399,7 @@ function Add-FileRow($pJob, $gpJob, $fi) {
     $btnDel.BorderThickness = 0; $btnDel.Width = 20; $btnDel.Height = 20; $btnDel.Cursor = [System.Windows.Input.Cursors]::Hand
     [System.Windows.Controls.Grid]::SetColumn($btnDel, 4); $fGrid.Children.Add($btnDel) | Out-Null
 
-    $frObj = [PSCustomObject]@{ OldPath = $fi.FullName; SuffixBox = $sBadge; NewLbl = $lNew; Ext = $parsed.Extension; TargetName = "" }
+    $frObj = [PSCustomObject]@{ OldPath = $fi.FullName; SuffixBox = $sBadge; OldLbl = $lOld; NewLbl = $lNew; Ext = $parsed.Extension; TargetName = "" }
     $pJob.FileRows.Add($frObj) | Out-Null
 
     $sBadge.Tag = @{ P = $pJob; G = $gpJob }
@@ -434,7 +459,7 @@ function Refresh-PJob($pJob, $gpJob) {
         Where-Object {
             $_.Name -notmatch "(?i)_slicePreview\.png" -and
             $_.Name -notmatch "(?i)^$([regex]::Escape($diParent.Name))\.png$" -and
-            $_.Name -notmatch "(?i)$([regex]::Escape($gpName))\.png$"
+            ($gpName -eq "" -or $_.Name -notmatch "(?i)$([regex]::Escape($gpName))\.png$")
         } | Select-Object -First 1
 
     if ($customPng) {
@@ -463,9 +488,12 @@ function Refresh-PJob($pJob, $gpJob) {
     if ($pickPath) { $pJob.PbPick.Source = Load-WpfImage $pickPath }
 
     # Reset overlays
+    $pJob.ProcessingOverlay.Text = "[ PROCESSING ]"
+    $pJob.ProcessingOverlay.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220,232,161,53))
+    $pJob.ProcessingOverlay.Foreground = Get-WpfColor "#000000"
     $pJob.ProcessingOverlay.Visibility = "Collapsed"
     $pJob.PickProcessingOverlay.Visibility = "Collapsed"
-    if ($pJob.PbPlateFinished) { $pJob.PbPlateFinished.Visibility = "Collapsed" }
+    if ($pJob.FinishedOverlay) { $pJob.FinishedOverlay.Visibility = "Collapsed" }
 
     # Reload file rows
     $pJob.PnlFiles.Children.Clear(); $pJob.FileRows.Clear()
@@ -727,7 +755,7 @@ function Start-NextProcess {
 
     if ($doImage) {
         [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value 'IMAGE INJECTION...' -Force")
-        [void]$sb.AppendLine("`$batPath = Join-Path `"$scriptDir`" 'ReplaceImageNew.bat'")
+        [void]$sb.AppendLine("`$batPath = Join-Path `"$scriptDir`" '..\callers\ReplaceImageNew.bat'")
         [void]$sb.AppendLine("if (Test-Path `$batPath) {")
         [void]$sb.AppendLine("    `$argList = '/c `"`"' + `$batPath + '`" `"' + `"$dir`" + '`"`"'")
         [void]$sb.AppendLine("    Start-Process -FilePath 'cmd.exe' -ArgumentList `$argList -Wait -WindowStyle Hidden")
@@ -820,22 +848,38 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pBorder.Child = $pGrid
 
 # ── LEFT COLUMN: Card panel + Pick panel ────────────────────────
-    $leftStack = New-Object System.Windows.Controls.StackPanel
-    $leftStack.Orientation = "Horizontal"; $leftStack.VerticalAlignment = "Top"
-    [System.Windows.Controls.Grid]::SetColumn($leftStack, 0); $pGrid.Children.Add($leftStack) | Out-Null
+    $leftGrid = New-Object System.Windows.Controls.Grid
+    $leftGrid.VerticalAlignment = "Top"
+    $leftGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::Auto}))
+    $leftGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::Auto}))
+    [System.Windows.Controls.Grid]::SetColumn($leftGrid, 0); $pGrid.Children.Add($leftGrid) | Out-Null
 
     # Card panel
     $cardGrid = New-Object System.Windows.Controls.Grid
-    $cardGrid.Width = 350; $cardGrid.Height = 350
+    $cardGrid.Height = 438; $cardGrid.Width = 438
     $cardGrid.Margin = New-Object System.Windows.Thickness(0,0,15,0)
+    $cardGrid.Background = [System.Windows.Media.Brushes]::Transparent
 
     $pbModel = New-Object System.Windows.Controls.Image
     $pbModel.Stretch = "Uniform"
     $pbModel.HorizontalAlignment = "Left"
     $pbModel.Margin = New-Object System.Windows.Thickness(10, 20, 150, 10)
-    $pbModel.AllowDrop = $true
+    $pbModel.Cursor = [System.Windows.Input.Cursors]::Hand
     $cardGrid.Children.Add($pbModel) | Out-Null
     $pJob.PbPlate = $pbModel
+    $pbModel.Add_MouseLeftButtonDown({
+        if ($_.ClickCount -ge 2 -and $null -ne $this.Source) {
+            $viewer = New-Object System.Windows.Window
+            $viewer.Title = "Card Image"; $viewer.Background = Get-WpfColor "#0D0E10"
+            $viewer.SizeToContent = "WidthAndHeight"; $viewer.WindowStartupLocation = "CenterScreen"
+            $viewer.ResizeMode = "CanResizeWithGrip"
+            $imgView = New-Object System.Windows.Controls.Image
+            $imgView.Source = $this.Source; $imgView.MaxWidth = 900; $imgView.MaxHeight = 900; $imgView.Stretch = "Uniform"
+            $imgView.Margin = New-Object System.Windows.Thickness(10)
+            $viewer.Content = $imgView
+            $viewer.ShowDialog() | Out-Null
+        }
+    })
 
     # Determine Main Image (Custom PNG vs Extracted Anchor 3MF)
     $diParent = [System.IO.DirectoryInfo]::new($parentPath)
@@ -844,7 +888,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         Where-Object {
             $_.Name -notmatch "(?i)_slicePreview\.png" -and
             $_.Name -notmatch "(?i)^$([regex]::Escape($diParent.Name))\.png$" -and
-            $_.Name -notmatch "(?i)$([regex]::Escape($gpName))\.png$"
+            ($gpName -eq "" -or $_.Name -notmatch "(?i)$([regex]::Escape($gpName))\.png$")
         } | Select-Object -First 1
 
     if ($customPng) {
@@ -858,11 +902,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $pbModel.Source = Load-WpfImage $baseImgPath
     }
 
-    # PbPlateFinished
-    $pbPlateFinished = New-Object System.Windows.Controls.Image
-    $pbPlateFinished.Stretch = "Uniform"; $pbPlateFinished.Visibility = "Collapsed"
-    $cardGrid.Children.Add($pbPlateFinished) | Out-Null
-    $pJob.PbPlateFinished = $pbPlateFinished
+    # (PbPlateFinished defined below as a full-width overlay on leftGrid)
 
     # [CURRENT] gcode thumbnail
     $currentGrid = New-Object System.Windows.Controls.Grid
@@ -875,6 +915,20 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $currentGrid.Children.Add($lblCurrentTag) | Out-Null
     $cardGrid.Children.Add($currentGrid) | Out-Null
     $pJob.PbCurrent = $pbCurrent; $pJob.CurrentThumb = $currentGrid
+    $pbCurrent.Cursor = [System.Windows.Input.Cursors]::Hand
+    $pbCurrent.Add_MouseLeftButtonDown({
+        if ($_.ClickCount -ge 2 -and $null -ne $this.Source) {
+            $viewer = New-Object System.Windows.Window
+            $viewer.Title = "Current Plate"; $viewer.Background = Get-WpfColor "#0D0E10"
+            $viewer.SizeToContent = "WidthAndHeight"; $viewer.WindowStartupLocation = "CenterScreen"
+            $viewer.ResizeMode = "CanResizeWithGrip"
+            $imgView = New-Object System.Windows.Controls.Image
+            $imgView.Source = $this.Source; $imgView.MaxWidth = 900; $imgView.MaxHeight = 900; $imgView.Stretch = "Uniform"
+            $imgView.Margin = New-Object System.Windows.Thickness(10)
+            $viewer.Content = $imgView
+            $viewer.ShowDialog() | Out-Null
+        }
+    })
 
     $gcodeFile = Get-ChildItem -Path $parentPath -Filter "*Full.gcode.3mf" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if ($gcodeFile) {
@@ -988,19 +1042,56 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $cardOverlay.Foreground = Get-WpfColor "#000000"
     $cardOverlay.FontSize = 14; $cardOverlay.FontWeight = [System.Windows.FontWeights]::Bold
     $cardOverlay.TextAlignment = "Center"; $cardOverlay.VerticalAlignment = "Center"; $cardOverlay.HorizontalAlignment = "Stretch"
-    $cardOverlay.Visibility = "Collapsed"; $cardOverlay.Padding = New-Object System.Windows.Thickness(0,155,0,0)
+    $cardOverlay.Visibility = "Collapsed"; $cardOverlay.Padding = New-Object System.Windows.Thickness(0,196,0,0)
     $cardGrid.Children.Add($cardOverlay) | Out-Null
     $pJob.ProcessingOverlay = $cardOverlay
 
-    $leftStack.Children.Add($cardGrid) | Out-Null
+    $cardGrid.AllowDrop = $true
+    $cardGrid.Tag = $pJob
+    $cardGrid.Add_DragOver({
+        $files = $_.Data.GetData([System.Windows.DataFormats]::FileDrop)
+        if ($files -and $files.Count -gt 0 -and [System.IO.Path]::GetExtension($files[0]) -imatch '\.png') {
+            $_.Effects = [System.Windows.DragDropEffects]::Copy
+        } else {
+            $_.Effects = [System.Windows.DragDropEffects]::None
+        }
+        $_.Handled = $true
+    })
+    $cardGrid.Add_Drop({
+        $files = $_.Data.GetData([System.Windows.DataFormats]::FileDrop)
+        if ($files -and $files.Count -gt 0 -and [System.IO.Path]::GetExtension($files[0]) -imatch '\.png') {
+            $job = $this.Tag
+            $srcPath = $files[0]
+            $destPath = Join-Path $job.FolderPath ([System.IO.Path]::GetFileName($srcPath))
+            Copy-Item -Path $srcPath -Destination $destPath -Force
+            $job.CustomImagePath = $destPath
+            $job.PbPlate.Source = Load-WpfImage $destPath
+        }
+        $_.Handled = $true
+    })
+    [System.Windows.Controls.Grid]::SetColumn($cardGrid, 0); $leftGrid.Children.Add($cardGrid) | Out-Null
 
     # Pick Panel
     $pickGrid = New-Object System.Windows.Controls.Grid
-    $pickGrid.Width = 350; $pickGrid.Height = 350
+    $pickGrid.Height = 438; $pickGrid.Width = 438
 
     $pbPick = New-Object System.Windows.Controls.Image; $pbPick.Stretch = "Uniform"
+    $pbPick.Cursor = [System.Windows.Input.Cursors]::Hand
     $pickGrid.Children.Add($pbPick) | Out-Null
     $pJob.PbPick = $pbPick
+    $pbPick.Add_MouseLeftButtonDown({
+        if ($_.ClickCount -ge 2 -and $null -ne $this.Source) {
+            $viewer = New-Object System.Windows.Window
+            $viewer.Title = "Pick Image"; $viewer.Background = Get-WpfColor "#0D0E10"
+            $viewer.SizeToContent = "WidthAndHeight"; $viewer.WindowStartupLocation = "CenterScreen"
+            $viewer.ResizeMode = "CanResizeWithGrip"
+            $imgView = New-Object System.Windows.Controls.Image
+            $imgView.Source = $this.Source; $imgView.MaxWidth = 900; $imgView.MaxHeight = 900; $imgView.Stretch = "Uniform"
+            $imgView.Margin = New-Object System.Windows.Thickness(10)
+            $viewer.Content = $imgView
+            $viewer.ShowDialog() | Out-Null
+        }
+    })
 
     $pickOverlay = New-Object System.Windows.Controls.TextBlock
     $pickOverlay.Text = "[ PROCESSING ]"
@@ -1008,7 +1099,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pickOverlay.Foreground = Get-WpfColor "#000000"
     $pickOverlay.FontSize = 14; $pickOverlay.FontWeight = [System.Windows.FontWeights]::Bold
     $pickOverlay.TextAlignment = "Center"; $pickOverlay.VerticalAlignment = "Center"; $pickOverlay.HorizontalAlignment = "Stretch"
-    $pickOverlay.Visibility = "Collapsed"; $pickOverlay.Padding = New-Object System.Windows.Thickness(0,155,0,0)
+    $pickOverlay.Visibility = "Collapsed"; $pickOverlay.Padding = New-Object System.Windows.Thickness(0,196,0,0)
     $pickGrid.Children.Add($pickOverlay) | Out-Null
     $pJob.PickProcessingOverlay = $pickOverlay
 
@@ -1026,7 +1117,34 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             }
         } catch {} finally { if ($null -ne $zip) { $zip.Dispose() } }
     }
-    $leftStack.Children.Add($pickGrid) | Out-Null
+    [System.Windows.Controls.Grid]::SetColumn($pickGrid, 1); $leftGrid.Children.Add($pickGrid) | Out-Null
+
+    # Finished image overlay — spans both card and pick columns, shown after processing completes
+    $finishedOverlay = New-Object System.Windows.Controls.Border
+    $finishedOverlay.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(230, 16, 17, 23))
+    $finishedOverlay.Visibility = "Collapsed"
+    [System.Windows.Controls.Grid]::SetColumn($finishedOverlay, 0)
+    $pbPlateFinished = New-Object System.Windows.Controls.Image
+    $pbPlateFinished.Stretch = "Uniform"
+    $pbPlateFinished.Cursor = [System.Windows.Input.Cursors]::Hand
+    $pbPlateFinished.Add_MouseLeftButtonDown({
+        if ($_.ClickCount -ge 2 -and $null -ne $this.Source) {
+            $viewer = New-Object System.Windows.Window
+            $viewer.Title = "Finished Plate"; $viewer.Background = Get-WpfColor "#0D0E10"
+            $viewer.SizeToContent = "WidthAndHeight"; $viewer.WindowStartupLocation = "CenterScreen"
+            $viewer.ResizeMode = "CanResizeWithGrip"
+            $imgView = New-Object System.Windows.Controls.Image
+            $imgView.Source = $this.Source; $imgView.MaxWidth = 900; $imgView.MaxHeight = 900; $imgView.Stretch = "Uniform"
+            $imgView.Margin = New-Object System.Windows.Thickness(10)
+            $viewer.Content = $imgView
+            $viewer.ShowDialog() | Out-Null
+        }
+    })
+    $finishedOverlay.Child = $pbPlateFinished
+    $leftGrid.Children.Add($finishedOverlay) | Out-Null
+    $pJob.PbPlateFinished = $pbPlateFinished
+    $pJob.FinishedOverlay  = $finishedOverlay
+
     # ── RIGHT: Controls column ───────────────────────────────────────────────
     $rightStack = New-Object System.Windows.Controls.StackPanel
     $rightStack.Orientation = "Vertical"; $rightStack.Margin = New-Object System.Windows.Thickness(15,0,0,0)
@@ -1140,12 +1258,17 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnRevertMerge.Tag = @{ P = $pJob; G = $gpJob }
     $btnRevertMerge.Add_Click({
         $t = $this.Tag; $pj = $t.P; $gp = $t.G
-        $batPath = Join-Path $scriptDir "RevertMerge.bat"
+        $batPath = Join-Path $scriptDir "..\callers\RevertMerge.bat"
         if (-not (Test-Path $batPath)) { [System.Windows.MessageBox]::Show("RevertMerge.bat not found.", "Error") | Out-Null; return }
         $targetPath = if ($pj.ProcessedAnchorPath -ne "") { $pj.ProcessedAnchorPath } else { $pj.AnchorFile.FullName }
         $pj.BtnApply.Content = "Reverting..."; $pj.BtnApply.Width = 150
         if ($pj.BtnRevertDone) { $pj.BtnRevertDone.Visibility = "Collapsed" }
         $pj.RowPanel.IsEnabled = $false
+        $pj.ProcessingOverlay.Text = "[REVERTING...]"
+        $pj.ProcessingOverlay.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220, 217, 95, 95))
+        $pj.ProcessingOverlay.Foreground = Get-WpfColor "#FFFFFF"
+        $pj.ProcessingOverlay.Visibility = "Visible"
+        [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
         try {
             $argList = '/c ""' + $batPath + '" "' + $targetPath + '""'
             $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $argList -WindowStyle Hidden -PassThru
@@ -1207,8 +1330,32 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnApply.Add_Click({
         $t = $this.Tag
         if ($this.Content -eq "KEEP") {
+            # Move the finished plate image to the [CURRENT] thumbnail
+            if ($t.P.PbPlateFinished.Source -ne $null) {
+                $t.P.PbCurrent.Source = $t.P.PbPlateFinished.Source
+                if ($t.P.CurrentThumb) { $t.P.CurrentThumb.Visibility = "Visible" }
+            }
+            # Reload card editor with folder PNG or 3MF plate_1.png
+            $diParent = [System.IO.DirectoryInfo]::new($t.P.FolderPath)
+            $gpName = if ($t.G.DiGrand) { $t.G.DiGrand.Name } else { "" }
+            $customPng = Get-ChildItem -Path $t.P.FolderPath -Filter "*.png" -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.Name -notmatch "(?i)_slicePreview\.png" -and
+                    $_.Name -notmatch "(?i)^$([regex]::Escape($diParent.Name))\.png$" -and
+                    ($gpName -eq "" -or $_.Name -notmatch "(?i)$([regex]::Escape($gpName))\.png$")
+                } | Select-Object -First 1
+            if ($customPng) {
+                $t.P.CustomImagePath = $customPng.FullName
+                $t.P.PbPlate.Source = Load-WpfImage $customPng.FullName
+            } else {
+                $t.P.CustomImagePath = $null
+                $baseImgPath = Join-Path $t.P.TempWork "Metadata\plate_1.png"
+                if (-not (Test-Path $baseImgPath)) { $baseImgPath = Join-Path $t.P.TempWork "Metadata\thumbnail.png" }
+                $t.P.PbPlate.Source = Load-WpfImage $baseImgPath
+            }
             $this.Content = "Finished"; $this.Background = Get-WpfColor "#333333"; $this.IsEnabled = $false; $this.Width = 150
             if ($t.P.BtnRevertDone) { $t.P.BtnRevertDone.Visibility = "Collapsed" }
+            if ($t.P.FinishedOverlay) { $t.P.FinishedOverlay.Visibility = "Collapsed" }
         } else {
             Enqueue-PJob $t.P $t.G
         }
@@ -1217,11 +1364,16 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnRevertDone.Tag = @{ P = $pJob; G = $gpJob }
     $btnRevertDone.Add_Click({
         $t = $this.Tag; $pj = $t.P; $gp = $t.G
-        $batPath = Join-Path $scriptDir "RevertMerge.bat"
+        $batPath = Join-Path $scriptDir "..\callers\RevertMerge.bat"
         if (-not (Test-Path $batPath)) { return }
         $targetPath = if ($pj.ProcessedAnchorPath -ne "") { $pj.ProcessedAnchorPath } else { $pj.AnchorFile.FullName }
         $pj.BtnApply.Content = "Reverting..."; $pj.BtnApply.Width = 150; $pj.BtnRevertDone.Visibility = "Collapsed"
         $pj.RowPanel.IsEnabled = $false
+        $pj.ProcessingOverlay.Text = "[REVERTING...]"
+        $pj.ProcessingOverlay.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220, 217, 95, 95))
+        $pj.ProcessingOverlay.Foreground = Get-WpfColor "#FFFFFF"
+        $pj.ProcessingOverlay.Visibility = "Visible"
+        [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
         try {
             $argList = '/c ""' + $batPath + '" "' + $targetPath + '""'
             $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $argList -WindowStyle Hidden -PassThru
@@ -1357,7 +1509,7 @@ $script:queueTimer.Add_Tick({
                             $bmp = Load-WpfImage $newPlate
                             $pJob.PbPlateFinished.Source = $bmp
                             $pJob.PbPlate.Source = $bmp
-                            $pJob.PbPlateFinished.Visibility = "Visible"
+                            $pJob.FinishedOverlay.Visibility = "Visible"
                         }
 
                         $pickEntry = $zip.Entries | Where-Object { ($_.FullName -replace "\\","/") -match "(?i)(^|/)pick_1\.png$" } | Select-Object -First 1
@@ -1467,6 +1619,52 @@ $btnProcessAll.Add_Click({
     foreach ($gpJob in $script:jobs) {
         foreach ($pJob in $gpJob.Parents) { Enqueue-PJob $pJob $gpJob }
     }
+})
+
+$btnBrowse.Add_Click({
+    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dialog.Description = "Select a folder containing Full.3mf files"
+    $dialog.ShowNewFolderButton = $false
+    if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
+    $browsedPath = $dialog.SelectedPath
+
+    $lblGlobalTitle.Text = "Scanning selected folder..."
+    [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
+
+    $newFound = @(Get-ChildItem -Path $browsedPath -Filter "*Full.3mf" -Recurse -File)
+    if ($newFound.Count -eq 0) {
+        [System.Windows.MessageBox]::Show("No Full.3mf files found in that folder.", "Nothing Found") | Out-Null
+        $lblGlobalTitle.Text = "Queue Dashboard ($($script:jobs.Count) Theme(s) found)"
+        return
+    }
+
+    $newGpQueue = [ordered]@{}
+    foreach ($f in $newFound) {
+        $parentPath = $f.DirectoryName
+        $gp = $f.Directory.Parent
+        $gpPath = if ($gp) { $gp.FullName } else { "ROOT_" + $parentPath }
+        $exists = $false
+        foreach ($j in $script:jobs) { foreach ($parentJob in $j.Parents) { if ($parentJob.FolderPath -eq $parentPath) { $exists = $true; break } } }
+        if ($exists) { continue }
+        if (-not $newGpQueue.Contains($gpPath)) { $newGpQueue[$gpPath] = [ordered]@{} }
+        if (-not $newGpQueue[$gpPath].Contains($parentPath)) { $newGpQueue[$gpPath][$parentPath] = $f }
+    }
+
+    foreach ($gpPath in $newGpQueue.Keys) {
+        $existingGp = $null
+        foreach ($j in $script:jobs) { if ($j.GpPath -eq $gpPath) { $existingGp = $j; break } }
+        if ($existingGp) {
+            foreach ($pKey in $newGpQueue[$gpPath].Keys) {
+                $pJob = Build-PJob $pKey $newGpQueue[$gpPath][$pKey] $existingGp
+                $existingGp.Parents.Add($pJob) | Out-Null
+            }
+        } else {
+            Build-GpJob $gpPath $newGpQueue[$gpPath]
+        }
+    }
+
+    $lblGlobalTitle.Text = "Queue Dashboard ($($script:jobs.Count) Theme(s) found)"
+    if ($script:jobs.Count -gt 0) { Update-GlobalProcessAllStatus }
 })
 
 # --- MAIN WINDOW DRAG & DROP HANDLER ---

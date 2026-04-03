@@ -1,0 +1,1 @@
+powershell.exe -ExecutionPolicy Bypass -NoProfile -File "%~dp0..\workers\Card-Editor-Skeleton.ps1" -NoExit

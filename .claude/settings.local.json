@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -lah /d/GitRepos/ScriptsAndTools/BambuScripts/.claude/worktrees/heuristic-dubinsky/BambuScripts/*.ps1)"
+    ]
+  }
+}

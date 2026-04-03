@@ -8,8 +8,8 @@ if "%~1"=="" (
     exit /b
 )
 
-echo Launching Plate Viewer...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0View_Plates_Worker.ps1" %*
+echo Launching Viewer...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\View_Picks_Worker.ps1" %*
 
 echo.
 pause
