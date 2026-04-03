@@ -321,7 +321,7 @@ foreach ($f in $foundFiles) {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Batch Pre-Flight Editor - WPF Engine"
-        Width="1550" Height="850" MinWidth="1200" MinHeight="600"
+        Width="1550" Height="850" MinWidth="1350" MinHeight="600"
         Background="#16171B" WindowStartupLocation="CenterScreen" AllowDrop="True">
     <Grid>
         <Grid.RowDefinitions>
@@ -473,7 +473,8 @@ function Add-FileRow($pJob, $gpJob, $fi) {
 
     $fRow = New-Object System.Windows.Controls.Border
     $fRow.Background = Get-WpfColor "#16171B"; $fRow.BorderBrush = Get-WpfColor "#2A2C35"
-    $fRow.BorderThickness = New-Object System.Windows.Thickness(0,0,0,1); $fRow.Height = 40
+    $fRow.BorderThickness = New-Object System.Windows.Thickness(0,0,0,1)
+    $fRow.MinHeight = 40; $fRow.Padding = New-Object System.Windows.Thickness(0, 5, 0, 5)
 
     $fGrid = New-Object System.Windows.Controls.Grid
     $fGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=(New-Object System.Windows.GridLength(70))}))
@@ -490,12 +491,15 @@ function Add-FileRow($pJob, $gpJob, $fi) {
 
     $lOld = Create-TextBlock $fi.Name "#6B6E7A" 11 "Normal"
     $lOld.Margin = New-Object System.Windows.Thickness(10,0,0,0)
+    $lOld.TextWrapping = "Wrap"
     [System.Windows.Controls.Grid]::SetColumn($lOld, 1); $fGrid.Children.Add($lOld) | Out-Null
 
     $lArr = Create-TextBlock "->" "#A0A0A0" 12 "Normal"
     [System.Windows.Controls.Grid]::SetColumn($lArr, 2); $fGrid.Children.Add($lArr) | Out-Null
 
     $lNew = Create-TextBlock "" "#4CAF72" 11 "Bold"
+    $lNew.Margin = New-Object System.Windows.Thickness(5,0,5,0)
+    $lNew.TextWrapping = "Wrap"
     [System.Windows.Controls.Grid]::SetColumn($lNew, 3); $fGrid.Children.Add($lNew) | Out-Null
 
     $btnDel = New-Object System.Windows.Controls.Button
@@ -963,7 +967,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
     $pGrid = New-Object System.Windows.Controls.Grid
     $pGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::Auto}))
-    $pGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=(New-Object System.Windows.GridLength(1, [System.Windows.GridUnitType]::Star))}))
+    $pGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=(New-Object System.Windows.GridLength(1, [System.Windows.GridUnitType]::Star)); MinWidth=500}))
     $pBorder.Child = $pGrid
 
 # ── LEFT COLUMN: Card panel + Pick panel ────────────────────────
