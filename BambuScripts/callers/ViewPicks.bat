@@ -9,7 +9,7 @@ if "%~1"=="" (
 )
 
 echo Launching Viewer...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\View_Picks_Worker.ps1" %*
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\ViewPicks_worker.ps1" %*
 
 echo.
 pause
