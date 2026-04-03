@@ -321,7 +321,7 @@ foreach ($f in $foundFiles) {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Batch Pre-Flight Editor - WPF Engine"
-        Width="1550" Height="850" MinWidth="1350" MinHeight="600"
+        Width="1550" Height="850" MinWidth="1550" MinHeight="600"
         Background="#16171B" WindowStartupLocation="CenterScreen" AllowDrop="True">
     <Grid>
         <Grid.RowDefinitions>
