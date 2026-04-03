@@ -1123,7 +1123,9 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         if ($slotData.Name) { $lblStatus.Text = "[MATCHED]"; $lblStatus.Foreground = Get-WpfColor "#4CAF72" }
         else { $lblStatus.Text = "[UNMATCHED]"; $lblStatus.Foreground = Get-WpfColor "#D95F5F" }
 
-        $combo = New-Object System.Windows.Controls.ComboBox; $combo.Width = 110; $combo.IsEditable = $true
+        $combo = New-Object System.Windows.Controls.ComboBox; $combo.IsEditable = $true
+        $combo.MinWidth = 110; $combo.MaxWidth = 210 # Safe limits so it doesn't hit the image
+        $combo.Width = [System.Double]::NaN # Tells WPF to Auto-size dynamically!
         foreach ($k in $LibraryColors.Keys) { [void]$combo.Items.Add($k) }
         if ($slotData.Name) { $combo.Text = $slotData.Name } else { $combo.Text = "Select Color..." }
 
