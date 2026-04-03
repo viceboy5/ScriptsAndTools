@@ -468,7 +468,7 @@ $btnStart.Add_Click({
                         $forceFlag = if ($doColors) { "-ForceEditAll" } else { "" }
                         Write-Log "  -> Scanning Colors$(if ($doColors) { ' (all slots)' } else { ' (unknowns only)' })..." "Cyan"
                         try {
-                            $command = "& `"$scriptDir\update_colors_worker.ps1`" -WorkDir `"$tempWork`" -FileName `"$inputName`" -OriginalZip `"$inputPath`" $forceFlag *>&1"
+                            $command = "& `"$scriptDir\ColorUpdateOnly_worker.ps1`" -WorkDir `"$tempWork`" -FileName `"$inputName`" -OriginalZip `"$inputPath`" $forceFlag *>&1"
                             Invoke-Expression $command | ForEach-Object { Write-Log "     $_" "LightGray"; [System.Windows.Forms.Application]::DoEvents() }
                         } catch { Write-Log "  [!] Error: $_" "Red" }
 
@@ -632,7 +632,7 @@ $btnStart.Add_Click({
                     Write-Log "  -> Slicing & Exporting Gcode..." "Cyan"
                     $isolatedPath = Join-Path $fileDir "$finalBase.3mf"
                     try {
-                        $command = "& `"$scriptDir\slicer_automation_worker.ps1`" -InputPath `"$inputPath`" -IsolatedPath `"$isolatedPath`" *>&1"
+                        $command = "& `"$scriptDir\Slice_worker.ps1`" -InputPath `"$inputPath`" -IsolatedPath `"$isolatedPath`" *>&1"
                         Invoke-Expression $command | ForEach-Object { Write-Log "     $_" "LightGray"; [System.Windows.Forms.Application]::DoEvents() }
                     } catch { Write-Log "  [!] Error: $_" "Red" }
                 }
@@ -669,7 +669,7 @@ $btnStart.Add_Click({
                     if (Test-Path $isolatedPath) {
                         Write-Log "  -> Re-slicing Final for skip-time data..." "Yellow"
                         try {
-                            $command = "& `"$scriptDir\slicer_automation_worker.ps1`" -InputPath `"$isolatedPath`" *>&1"
+                            $command = "& `"$scriptDir\Slice_worker.ps1`" -InputPath `"$isolatedPath`" *>&1"
                             Invoke-Expression $command | ForEach-Object { Write-Log "     $_" "LightGray"; [System.Windows.Forms.Application]::DoEvents() }
                             if (Test-Path $singleFileCheck) {
                                 Write-Log "  -> Final.gcode.3mf ready for skip-time extraction." "Yellow"
@@ -711,7 +711,7 @@ $btnStart.Add_Click({
 
                     Write-Log "  -> Extracting Data / Generating Image..." "Cyan"
                     try {
-                        $command = "& `"$scriptDir\Extract-3MFData.ps1`" $extractArgs *>&1"
+                        $command = "& `"$scriptDir\DataExtract_worker.ps1`" $extractArgs *>&1"
                         Invoke-Expression $command | ForEach-Object { Write-Log "     $_" "LightGray"; [System.Windows.Forms.Application]::DoEvents() }
                         $waitMs = 0
                         while (-not (Test-Path $expectedPreviewPng) -and $waitMs -lt 5000) {

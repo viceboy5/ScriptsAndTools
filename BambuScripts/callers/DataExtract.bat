@@ -79,16 +79,16 @@ if exist "!SINGLE_3MF_PATH!" (
 
     if exist "!SINGLE_GCODE_PATH!" (
         echo   [SUCCESS] Slicing complete. Extracting data...
-        powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\Extract-3MFData.ps1" -InputFile "!INPUT_GCODE!" -SingleFile "!SINGLE_GCODE_PATH!" -MasterTsvPath "!MASTER_TSV!"
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\DataExtract_worker.ps1" -InputFile "!INPUT_GCODE!" -SingleFile "!SINGLE_GCODE_PATH!" -MasterTsvPath "!MASTER_TSV!"
 
         echo   [CLEANUP] Deleting temporary !SINGLE_GCODE_PATH!...
         del /f /q "!SINGLE_GCODE_PATH!"
     ) else (
         echo   [ERROR] Bambu Studio failed to generate the Final.gcode.3mf file.
-        powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\Extract-3MFData.ps1" -InputFile "!INPUT_GCODE!" -MasterTsvPath "!MASTER_TSV!"
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\DataExtract_worker.ps1" -InputFile "!INPUT_GCODE!" -MasterTsvPath "!MASTER_TSV!"
     )
 ) else (
     echo   [SKIP] No matching !SINGLE_3MF_NAME! found in directory.
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\Extract-3MFData.ps1" -InputFile "!INPUT_GCODE!" -MasterTsvPath "!MASTER_TSV!"
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\DataExtract_worker.ps1" -InputFile "!INPUT_GCODE!" -MasterTsvPath "!MASTER_TSV!"
 )
 exit /b

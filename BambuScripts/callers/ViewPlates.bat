@@ -9,7 +9,7 @@ if "%~1"=="" (
 )
 
 echo Launching Plate Viewer...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\View_Plates_Worker.ps1" %*
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\ViewPlates_worker.ps1" %*
 
 echo.
 pause

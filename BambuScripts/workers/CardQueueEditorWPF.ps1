@@ -773,7 +773,7 @@ function Start-NextProcess {
     if ($doSlice) {
         [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value 'SLICING...' -Force")
         [void]$sb.AppendLine("Start-Sleep -Seconds 3")
-        [void]$sb.AppendLine("& `"$scriptDir\slicer_automation_worker.ps1`" -InputPath `"$anchorPath`" -IsolatedPath `"$finalPath`"")
+        [void]$sb.AppendLine("& `"$scriptDir\Slice_worker.ps1`" -InputPath `"$anchorPath`" -IsolatedPath `"$finalPath`"")
     } elseif ($doExtract -or $doImage) {
         # No full slice requested, but we need gcode for data extraction — re-slice Final only
         [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value 'RE-SLICING FINAL FOR DATA...' -Force")
@@ -786,7 +786,7 @@ function Start-NextProcess {
         [void]$sb.AppendLine("}")
         [void]$sb.AppendLine("if (Test-Path `"$finalPath`") {")
         [void]$sb.AppendLine("    Start-Sleep -Seconds 3")
-        [void]$sb.AppendLine("    & `"$scriptDir\slicer_automation_worker.ps1`" -InputPath `"$finalPath`"")
+        [void]$sb.AppendLine("    & `"$scriptDir\Slice_worker.ps1`" -InputPath `"$finalPath`"")
         [void]$sb.AppendLine("}")
     }
 
@@ -795,7 +795,7 @@ function Start-NextProcess {
         $imageFlag = if ($doImage) { "-GenerateImage" } else { "" }
         [void]$sb.AppendLine("if (Test-Path `"$slicedFile`") {")
         [void]$sb.AppendLine("    Remove-Item `"$tsvFile`" -Force -ErrorAction SilentlyContinue")
-        [void]$sb.AppendLine("    & `"$scriptDir\Extract-3MFData.ps1`" -InputFile `"$slicedFile`" -SingleFile `"$singleFile`" -IndividualTsvPath `"$tsvFile`" $imageFlag")
+        [void]$sb.AppendLine("    & `"$scriptDir\DataExtract_worker.ps1`" -InputFile `"$slicedFile`" -SingleFile `"$singleFile`" -IndividualTsvPath `"$tsvFile`" $imageFlag")
         [void]$sb.AppendLine("    Remove-Item `"$singleFile`" -Force -ErrorAction SilentlyContinue")
         [void]$sb.AppendLine("} else {")
         [void]$sb.AppendLine("    Set-Content -Path `"$statusFile`" -Value '[ERROR] SLICE FAILED - MISSING GCODE' -Force")

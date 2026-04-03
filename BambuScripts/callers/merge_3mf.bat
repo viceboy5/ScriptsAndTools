@@ -184,7 +184,7 @@ if errorlevel 1 ( echo   ERROR: Extract failed. & set /a PREP_ERRORS+=1 & goto c
 
 if "!DO_COLORS!"=="1" (
     echo   Checking/Updating Colors...
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\update_colors_worker.ps1" -WorkDir "!WORK!" -FileName "!INPUTNAME!" -OriginalZip "!INPUT!"
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\ColorUpdateOnly_worker.ps1" -WorkDir "!WORK!" -FileName "!INPUTNAME!" -OriginalZip "!INPUT!"
 )
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" -WorkDir "!WORK!" -InputPath "!INPUT!" -OutputPath "!TEMPOUT!" -ReportPath "nul"
@@ -229,7 +229,7 @@ echo [!_SIDX!/!PREP_PROCESSED!] Processing Phase 2: !INPUTNAME!
 
 :: 1. CONDITIONAL SLICING
 if "!DO_SLICE!"=="1" (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\slicer_automation_worker.ps1" -InputPath "!INPUT!" -IsolatedPath "!FINAL_PATH!"
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\Slice_worker.ps1" -InputPath "!INPUT!" -IsolatedPath "!FINAL_PATH!"
     if errorlevel 1 (
         set /a SLICE_ERRORS+=1
         goto :eof
@@ -249,10 +249,10 @@ set "EXTRACT_FLAGS="
 if "!DO_EXTRACT!"=="0" set "EXTRACT_FLAGS=-SkipExtraction"
 
 if exist "!SLICED_FINAL_TEMP!" (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\Extract-3MFData.ps1" -InputFile "!SLICED_OUT!" -SingleFile "!SLICED_FINAL_TEMP!" -MasterTsvPath "!MASTER_DATA!" -IndividualTsvPath "!INPUTDIR!!INPUTBASE!_Data.tsv" !GEN_IMAGE_SWITCH! !EXTRACT_FLAGS!
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\DataExtract_worker.ps1" -InputFile "!SLICED_OUT!" -SingleFile "!SLICED_FINAL_TEMP!" -MasterTsvPath "!MASTER_DATA!" -IndividualTsvPath "!INPUTDIR!!INPUTBASE!_Data.tsv" !GEN_IMAGE_SWITCH! !EXTRACT_FLAGS!
     del "!SLICED_FINAL_TEMP!" /q
 ) else (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\Extract-3MFData.ps1" -InputFile "!SLICED_OUT!" -MasterTsvPath "!MASTER_DATA!" -IndividualTsvPath "!INPUTDIR!!INPUTBASE!_Data.tsv" !GEN_IMAGE_SWITCH! !EXTRACT_FLAGS!
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\DataExtract_worker.ps1" -InputFile "!SLICED_OUT!" -MasterTsvPath "!MASTER_DATA!" -IndividualTsvPath "!INPUTDIR!!INPUTBASE!_Data.tsv" !GEN_IMAGE_SWITCH! !EXTRACT_FLAGS!
 )
 
 echo   OK --^> Success.

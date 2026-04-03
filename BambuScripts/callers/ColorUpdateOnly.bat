@@ -51,7 +51,7 @@ for /r "%masterDir%" %%F in (*Full.3mf) do (
             echo [ERROR] Failed to extract !fileName! - File might be in use.
         ) else (
             :: 3. Call the PowerShell worker
-            powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\update_colors_worker.ps1" -WorkDir "!localTemp!" -FileName "!fileName!" -OriginalZip "!targetFile!" !forceSwitch!
+            powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\ColorUpdateOnly_worker.ps1" -WorkDir "!localTemp!" -FileName "!fileName!" -OriginalZip "!targetFile!" !forceSwitch!
         )
 
         :: 4. Clean up the temporary reading directory
