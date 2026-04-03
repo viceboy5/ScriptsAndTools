@@ -278,10 +278,6 @@ foreach ($f in $foundFiles) {
         <Border Background="#1C1D23" Grid.Row="0">
             <Grid>
                 <TextBlock Name="LblGlobalTitle" Text="Loading files into queue..." Foreground="White" FontSize="18" FontWeight="Bold" VerticalAlignment="Center" Margin="15,0,0,0"/>
-                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Orientation="Vertical">
-                    <Button Name="BtnBrowse" Content="Browse Files" Background="#5A78C4" Foreground="White" FontWeight="Bold" Width="140" Height="30" BorderThickness="0" Cursor="Hand"/>
-                    <TextBlock Text="Browse or drop files to add" Foreground="#888888" FontSize="10" HorizontalAlignment="Center" Margin="0,4,0,0"/>
-                </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,15,0">
                     <Button Name="BtnCombineData" Content="Combine TSV Data" Background="#E8A135" Foreground="White" FontWeight="Bold" Width="180" Height="40" Margin="0,0,15,0" BorderThickness="0" Cursor="Hand"/>
                     <Button Name="BtnProcessAll" Content="Add All To Queue" Background="#4CAF72" Foreground="White" FontWeight="Bold" Width="220" Height="40" IsEnabled="False" BorderThickness="0" Cursor="Hand"/>
@@ -300,7 +296,6 @@ $window = [System.Windows.Markup.XamlReader]::Load($reader)
 $lblGlobalTitle = $window.FindName("LblGlobalTitle")
 $btnProcessAll  = $window.FindName("BtnProcessAll")
 $btnCombineData = $window.FindName("BtnCombineData")
-$btnBrowse      = $window.FindName("BtnBrowse")
 $mainStack      = $window.FindName("MainStack")
 
 function Update-GlobalProcessAllStatus {
@@ -1775,50 +1770,6 @@ $btnProcessAll.Add_Click({
     foreach ($gpJob in $script:jobs) {
         foreach ($pJob in $gpJob.Parents) { Enqueue-PJob $pJob $gpJob }
     }
-})
-
-$btnBrowse.Add_Click({
-    $interop = New-Object System.Windows.Interop.WindowInteropHelper($window)
-    $browsedPath = [ModernFolderPicker]::Pick($interop.Handle, "Select a folder containing Full.3mf files")
-    if (-not $browsedPath) { return }
-
-    $lblGlobalTitle.Text = "Scanning selected folder..."
-    [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
-
-    $newFound = @(Get-ChildItem -Path $browsedPath -Filter "*Full.3mf" -Recurse -File)
-    if ($newFound.Count -eq 0) {
-        [System.Windows.MessageBox]::Show("No Full.3mf files found in that folder.", "Nothing Found") | Out-Null
-        $lblGlobalTitle.Text = "Queue Dashboard ($($script:jobs.Count) Theme(s) found)"
-        return
-    }
-
-    $newGpQueue = [ordered]@{}
-    foreach ($f in $newFound) {
-        $parentPath = $f.DirectoryName
-        $gp = $f.Directory.Parent
-        $gpPath = if ($gp) { $gp.FullName } else { "ROOT_" + $parentPath }
-        $exists = $false
-        foreach ($j in $script:jobs) { foreach ($parentJob in $j.Parents) { if ($parentJob.FolderPath -eq $parentPath) { $exists = $true; break } } }
-        if ($exists) { continue }
-        if (-not $newGpQueue.Contains($gpPath)) { $newGpQueue[$gpPath] = [ordered]@{} }
-        if (-not $newGpQueue[$gpPath].Contains($parentPath)) { $newGpQueue[$gpPath][$parentPath] = $f }
-    }
-
-    foreach ($gpPath in $newGpQueue.Keys) {
-        $existingGp = $null
-        foreach ($j in $script:jobs) { if ($j.GpPath -eq $gpPath) { $existingGp = $j; break } }
-        if ($existingGp) {
-            foreach ($pKey in $newGpQueue[$gpPath].Keys) {
-                $pJob = Build-PJob $pKey $newGpQueue[$gpPath][$pKey] $existingGp
-                $existingGp.Parents.Add($pJob) | Out-Null
-            }
-        } else {
-            Build-GpJob $gpPath $newGpQueue[$gpPath]
-        }
-    }
-
-    $lblGlobalTitle.Text = "Queue Dashboard ($($script:jobs.Count) Theme(s) found)"
-    if ($script:jobs.Count -gt 0) { Update-GlobalProcessAllStatus }
 })
 
 # --- MAIN WINDOW DRAG & DROP HANDLER ---
