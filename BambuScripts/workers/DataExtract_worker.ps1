@@ -437,18 +437,17 @@ if ($GenerateImage) {
             }
 
             if (Test-Path $sourceImg) {
-                # Build Python arguments
-                # Pass $expectedPng as --out so Python's os.path.dirname() resolves correctly
-                $pyArgs = @($pyScript, "--name", "`"$projectName`"", "--time", "`"$timeAdd`"", "--img", "`"$sourceImg`"", "--out", "`"$expectedPng`"", "--colors")
+                # Build Python arguments as a single strict string to protect spaces in paths!
+                $pyArgsStr = "`"$pyScript`" --name `"$projectName`" --time `"$timeAdd`" --img `"$sourceImg`" --out `"$expectedPng`" --colors"
                 foreach ($i in 1..4) {
                     if ($filData[$i].g -gt 0) {
-                        $pyArgs += "`"$($filData[$i].color)|$($filData[$i].rawHex)|$($filData[$i].g)`""
+                        $pyArgsStr += " `"$($filData[$i].color)|$($filData[$i].rawHex)|$($filData[$i].g)`""
                     }
                 }
 
                 $pyLog = Join-Path $env:TEMP "python_error.log"
                 # Call Python to build the image
-                $proc = Start-Process -FilePath "py.exe" -ArgumentList $pyArgs -NoNewWindow -PassThru -RedirectStandardError $pyLog
+                $proc = Start-Process -FilePath "py.exe" -ArgumentList $pyArgsStr -NoNewWindow -PassThru -RedirectStandardError $pyLog
                 # Poll instead of -Wait so the GUI stays responsive during Python's collision detection
                 while (-not $proc.HasExited) {
                     [System.Windows.Forms.Application]::DoEvents()
