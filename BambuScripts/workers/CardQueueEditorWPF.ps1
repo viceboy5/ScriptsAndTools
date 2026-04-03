@@ -144,10 +144,11 @@ try {
     using System;
     using System.Drawing;
     using System.Collections.Generic;
-    public class MapLine { public Point Start; public Point End; public Color LineColor; }
+    public class MapLine  { public Point Start; public Point End; public Color LineColor; }
+    public class MapBounds { public Rectangle Bounds; public Color BoxColor; }
     public class FastMergeMap {
         public static List<MapLine> GetMergeLines(Bitmap pre, Bitmap post) {
-            var preAnchors = new Dictionary<int, Point>();
+            var preAnchors  = new Dictionary<int, Point>();
             var postAnchors = new Dictionary<int, Point>();
             int w = pre.Width; int h = pre.Height;
             for (int y = 0; y < h; y++) {
@@ -176,6 +177,56 @@ try {
                 }
             }
             return lines;
+        }
+        public static List<MapBounds> GetUnmatchedBounds(Bitmap pre, Bitmap post) {
+            // Rebuild the same anchor maps and positional links as GetMergeLines
+            var preAnchors  = new Dictionary<int, Point>();
+            var postAnchors = new Dictionary<int, Point>();
+            int w = pre.Width; int h = pre.Height;
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++) {
+                    Color cPre = pre.GetPixel(x, y);
+                    if (cPre.A == 255 && (cPre.R > 10 || cPre.G > 10 || cPre.B > 10)) {
+                        int argb = cPre.ToArgb();
+                        if (!preAnchors.ContainsKey(argb)) preAnchors[argb] = new Point(x, y);
+                    }
+                    if (x < post.Width && y < post.Height) {
+                        Color cPost = post.GetPixel(x, y);
+                        if (cPost.A == 255 && (cPost.R > 10 || cPost.G > 10 || cPost.B > 10)) {
+                            int argb = cPost.ToArgb();
+                            if (!postAnchors.ContainsKey(argb)) postAnchors[argb] = new Point(x, y);
+                        }
+                    }
+                }
+            // A post color is "matched" if a pre-anchor position lands on it
+            var matchedPost = new HashSet<int>();
+            foreach (var oldPt in preAnchors.Values) {
+                if (oldPt.X < post.Width && oldPt.Y < post.Height) {
+                    Color c = post.GetPixel(oldPt.X, oldPt.Y);
+                    int argb = c.ToArgb();
+                    if (postAnchors.ContainsKey(argb)) matchedPost.Add(argb);
+                }
+            }
+            // Any post color never reached by a pre-anchor = unmatched
+            var unmatched = new HashSet<int>();
+            foreach (int argb in postAnchors.Keys)
+                if (!matchedPost.Contains(argb)) unmatched.Add(argb);
+            if (unmatched.Count == 0) return new List<MapBounds>();
+            var minX = new Dictionary<int,int>(); var minY = new Dictionary<int,int>();
+            var maxX = new Dictionary<int,int>(); var maxY = new Dictionary<int,int>();
+            foreach (int a in unmatched) { minX[a] = int.MaxValue; minY[a] = int.MaxValue; maxX[a] = 0; maxY[a] = 0; }
+            for (int y = 0; y < post.Height; y++)
+                for (int x = 0; x < post.Width; x++) {
+                    Color c = post.GetPixel(x, y);
+                    int a = c.ToArgb();
+                    if (!unmatched.Contains(a)) continue;
+                    if (x < minX[a]) minX[a] = x; if (y < minY[a]) minY[a] = y;
+                    if (x > maxX[a]) maxX[a] = x; if (y > maxY[a]) maxY[a] = y;
+                }
+            var result = new List<MapBounds>();
+            foreach (int a in unmatched)
+                result.Add(new MapBounds { Bounds = new Rectangle(minX[a]-2, minY[a]-2, maxX[a]-minX[a]+4, maxY[a]-minY[a]+4), BoxColor = Color.FromArgb(a) });
+            return result;
         }
     }
 '@ -ReferencedAssemblies "System.Drawing"
@@ -289,6 +340,37 @@ function Invoke-RandomizePickColors($sourcePath, $destPath) {
         $bmp.Save($destPath) | Out-Null; $bmp.Dispose()
         return $true
     } catch { return $false }
+}
+
+function Get-ImageBasedMergeMap {
+    param([string]$preMergePath, [string]$postMergePath)
+    if (-not (Test-Path $preMergePath) -or -not (Test-Path $postMergePath)) { return $null }
+    try {
+        $bmpPre  = New-Object System.Drawing.Bitmap($preMergePath)
+        $bmpPost = New-Object System.Drawing.Bitmap($postMergePath)
+        $lines = [FastMergeMap]::GetMergeLines($bmpPre, $bmpPost)
+        $g = [System.Drawing.Graphics]::FromImage($bmpPost)
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        foreach ($l in $lines) {
+            $borderPen = New-Object System.Drawing.Pen([System.Drawing.Color]::Black, 5)
+            $colorPen  = New-Object System.Drawing.Pen($l.LineColor, 2)
+            # Outline then color for the connecting line
+            $g.DrawLine($borderPen, $l.Start, $l.End)
+            $g.DrawLine($colorPen,  $l.Start, $l.End)
+            # Crosshairs at each end
+            $g.DrawLine($borderPen, ($l.Start.X - 3), $l.Start.Y, ($l.Start.X + 3), $l.Start.Y)
+            $g.DrawLine($borderPen, $l.Start.X, ($l.Start.Y - 3), $l.Start.X, ($l.Start.Y + 3))
+            $g.DrawLine($colorPen,  ($l.Start.X - 3), $l.Start.Y, ($l.Start.X + 3), $l.Start.Y)
+            $g.DrawLine($colorPen,  $l.Start.X, ($l.Start.Y - 3), $l.Start.X, ($l.Start.Y + 3))
+            $g.DrawLine($borderPen, ($l.End.X - 3), $l.End.Y, ($l.End.X + 3), $l.End.Y)
+            $g.DrawLine($borderPen, $l.End.X, ($l.End.Y - 3), $l.End.X, ($l.End.Y + 3))
+            $g.DrawLine($colorPen,  ($l.End.X - 3), $l.End.Y, ($l.End.X + 3), $l.End.Y)
+            $g.DrawLine($colorPen,  $l.End.X, ($l.End.Y - 3), $l.End.X, ($l.End.Y + 3))
+            $borderPen.Dispose(); $colorPen.Dispose()
+        }
+        $g.Dispose(); $bmpPre.Dispose()
+        return $bmpPost
+    } catch { return $null }
 }
 
 # --- 4. BACKEND QUEUE DATA ---
@@ -1242,16 +1324,50 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pickGrid.Children.Add($pbPick) | Out-Null
     $pJob.PbPick = $pbPick
     $pbPick.Add_MouseLeftButtonDown({
-        if ($_.ClickCount -ge 2 -and $null -ne $this.Source) {
-            $viewer = New-Object System.Windows.Window
-            $viewer.Title = "Pick Image"; $viewer.Background = Get-WpfColor "#0D0E10"
-            $viewer.SizeToContent = "WidthAndHeight"; $viewer.WindowStartupLocation = "CenterScreen"
-            $viewer.ResizeMode = "CanResizeWithGrip"
-            $imgView = New-Object System.Windows.Controls.Image
-            $imgView.Source = $this.Source; $imgView.MaxWidth = 900; $imgView.MaxHeight = 900; $imgView.Stretch = "Uniform"
-            $imgView.Margin = New-Object System.Windows.Thickness(10)
-            $viewer.Content = $imgView
-            $viewer.ShowDialog() | Out-Null
+        if ($_.ClickCount -ge 2) {
+            $t = $this.Tag
+            if ($null -eq $t -or -not $t.Path) { return }
+            $preMergePath = $null
+            try {
+                [System.Windows.Input.Mouse]::OverrideCursor = [System.Windows.Input.Cursors]::Wait
+                $dir      = Split-Path $t.Original3mf -Parent
+                $base     = (Split-Path $t.Original3mf -Leaf) -replace '(?i)_?Full\.gcode\.3mf$|_?Full\.3mf$', ''
+                $nestFile = Join-Path $dir "${base}_Nest.3mf"
+                if (-not (Test-Path $nestFile)) { [System.Windows.MessageBox]::Show("Nest.3mf not found:`n$nestFile", "Merge Map Error"); return }
+                $preMergePath = Join-Path $env:TEMP "pre_verify_$([guid]::NewGuid().ToString().Substring(0,8)).png"
+                $zip = [System.IO.Compression.ZipFile]::OpenRead($nestFile)
+                $pickEntry = $zip.Entries | Where-Object { ($_.FullName -replace "\\","/") -match "pick_1\.png$" } | Select-Object -First 1
+                if ($null -eq $pickEntry) { $zip.Dispose(); [System.Windows.MessageBox]::Show("No pick_1.png found in:`n$nestFile", "Merge Map Error"); return }
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($pickEntry, $preMergePath, $true)
+                $zip.Dispose()
+                $annotatedBmp = Get-ImageBasedMergeMap -preMergePath $preMergePath -postMergePath $t.Path
+                if ($null -ne $annotatedBmp) {
+                    $ms = New-Object System.IO.MemoryStream
+                    $annotatedBmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+                    $annotatedBmp.Dispose()
+                    $ms.Position = 0
+                    $bmpSource = New-Object System.Windows.Media.Imaging.BitmapImage
+                    $bmpSource.BeginInit()
+                    $bmpSource.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+                    $bmpSource.StreamSource = $ms
+                    $bmpSource.EndInit()
+                    $ms.Dispose()
+                    $viewer = New-Object System.Windows.Window
+                    $viewer.Title = "Merged RGB Verification Overlay"; $viewer.Background = Get-WpfColor "#000000"
+                    $viewer.SizeToContent = "WidthAndHeight"; $viewer.WindowStartupLocation = "CenterScreen"
+                    $viewer.ResizeMode = "CanResizeWithGrip"
+                    $imgView = New-Object System.Windows.Controls.Image
+                    $imgView.Source = $bmpSource; $imgView.MaxWidth = 900; $imgView.MaxHeight = 900; $imgView.Stretch = "Uniform"
+                    $imgView.Margin = New-Object System.Windows.Thickness(10)
+                    $viewer.Content = $imgView
+                    $viewer.ShowDialog() | Out-Null
+                }
+            } catch {
+                [System.Windows.MessageBox]::Show("Error: $($_.Exception.Message)", "Merge Map Error")
+            } finally {
+                [System.Windows.Input.Mouse]::OverrideCursor = $null
+                if ($preMergePath -and (Test-Path $preMergePath)) { Remove-Item $preMergePath -Force -ErrorAction SilentlyContinue }
+            }
         }
     })
 
@@ -1276,6 +1392,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
                 Invoke-RandomizePickColors $rawPickPath $pickPath | Out-Null
                 if (-not (Test-Path $pickPath)) { $pickPath = $rawPickPath }
                 $pbPick.Source = Load-WpfImage $pickPath
+                $pbPick.Tag = @{ Path = $pickPath; Original3mf = $anchorFile.FullName }
             }
         } catch {} finally { if ($null -ne $zip) { $zip.Dispose() } }
     }
