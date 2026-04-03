@@ -144,10 +144,11 @@ try {
     using System;
     using System.Drawing;
     using System.Collections.Generic;
-    public class MapLine { public Point Start; public Point End; public Color LineColor; }
+    public class MapLine  { public Point Start; public Point End; public Color LineColor; }
+    public class MapBounds { public Rectangle Bounds; public Color BoxColor; }
     public class FastMergeMap {
         public static List<MapLine> GetMergeLines(Bitmap pre, Bitmap post) {
-            var preAnchors = new Dictionary<int, Point>();
+            var preAnchors  = new Dictionary<int, Point>();
             var postAnchors = new Dictionary<int, Point>();
             int w = pre.Width; int h = pre.Height;
             for (int y = 0; y < h; y++) {
@@ -176,6 +177,56 @@ try {
                 }
             }
             return lines;
+        }
+        public static List<MapBounds> GetUnmatchedBounds(Bitmap pre, Bitmap post) {
+            // Rebuild the same anchor maps and positional links as GetMergeLines
+            var preAnchors  = new Dictionary<int, Point>();
+            var postAnchors = new Dictionary<int, Point>();
+            int w = pre.Width; int h = pre.Height;
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++) {
+                    Color cPre = pre.GetPixel(x, y);
+                    if (cPre.A == 255 && (cPre.R > 10 || cPre.G > 10 || cPre.B > 10)) {
+                        int argb = cPre.ToArgb();
+                        if (!preAnchors.ContainsKey(argb)) preAnchors[argb] = new Point(x, y);
+                    }
+                    if (x < post.Width && y < post.Height) {
+                        Color cPost = post.GetPixel(x, y);
+                        if (cPost.A == 255 && (cPost.R > 10 || cPost.G > 10 || cPost.B > 10)) {
+                            int argb = cPost.ToArgb();
+                            if (!postAnchors.ContainsKey(argb)) postAnchors[argb] = new Point(x, y);
+                        }
+                    }
+                }
+            // A post color is "matched" if a pre-anchor position lands on it
+            var matchedPost = new HashSet<int>();
+            foreach (var oldPt in preAnchors.Values) {
+                if (oldPt.X < post.Width && oldPt.Y < post.Height) {
+                    Color c = post.GetPixel(oldPt.X, oldPt.Y);
+                    int argb = c.ToArgb();
+                    if (postAnchors.ContainsKey(argb)) matchedPost.Add(argb);
+                }
+            }
+            // Any post color never reached by a pre-anchor = unmatched
+            var unmatched = new HashSet<int>();
+            foreach (int argb in postAnchors.Keys)
+                if (!matchedPost.Contains(argb)) unmatched.Add(argb);
+            if (unmatched.Count == 0) return new List<MapBounds>();
+            var minX = new Dictionary<int,int>(); var minY = new Dictionary<int,int>();
+            var maxX = new Dictionary<int,int>(); var maxY = new Dictionary<int,int>();
+            foreach (int a in unmatched) { minX[a] = int.MaxValue; minY[a] = int.MaxValue; maxX[a] = 0; maxY[a] = 0; }
+            for (int y = 0; y < post.Height; y++)
+                for (int x = 0; x < post.Width; x++) {
+                    Color c = post.GetPixel(x, y);
+                    int a = c.ToArgb();
+                    if (!unmatched.Contains(a)) continue;
+                    if (x < minX[a]) minX[a] = x; if (y < minY[a]) minY[a] = y;
+                    if (x > maxX[a]) maxX[a] = x; if (y > maxY[a]) maxY[a] = y;
+                }
+            var result = new List<MapBounds>();
+            foreach (int a in unmatched)
+                result.Add(new MapBounds { Bounds = new Rectangle(minX[a]-2, minY[a]-2, maxX[a]-minX[a]+4, maxY[a]-minY[a]+4), BoxColor = Color.FromArgb(a) });
+            return result;
         }
     }
 '@ -ReferencedAssemblies "System.Drawing"
@@ -289,6 +340,37 @@ function Invoke-RandomizePickColors($sourcePath, $destPath) {
         $bmp.Save($destPath) | Out-Null; $bmp.Dispose()
         return $true
     } catch { return $false }
+}
+
+function Get-ImageBasedMergeMap {
+    param([string]$preMergePath, [string]$postMergePath)
+    if (-not (Test-Path $preMergePath) -or -not (Test-Path $postMergePath)) { return $null }
+    try {
+        $bmpPre  = New-Object System.Drawing.Bitmap($preMergePath)
+        $bmpPost = New-Object System.Drawing.Bitmap($postMergePath)
+        $lines = [FastMergeMap]::GetMergeLines($bmpPre, $bmpPost)
+        $g = [System.Drawing.Graphics]::FromImage($bmpPost)
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        foreach ($l in $lines) {
+            $borderPen = New-Object System.Drawing.Pen([System.Drawing.Color]::Black, 5)
+            $colorPen  = New-Object System.Drawing.Pen($l.LineColor, 2)
+            # Outline then color for the connecting line
+            $g.DrawLine($borderPen, $l.Start, $l.End)
+            $g.DrawLine($colorPen,  $l.Start, $l.End)
+            # Crosshairs at each end
+            $g.DrawLine($borderPen, ($l.Start.X - 3), $l.Start.Y, ($l.Start.X + 3), $l.Start.Y)
+            $g.DrawLine($borderPen, $l.Start.X, ($l.Start.Y - 3), $l.Start.X, ($l.Start.Y + 3))
+            $g.DrawLine($colorPen,  ($l.Start.X - 3), $l.Start.Y, ($l.Start.X + 3), $l.Start.Y)
+            $g.DrawLine($colorPen,  $l.Start.X, ($l.Start.Y - 3), $l.Start.X, ($l.Start.Y + 3))
+            $g.DrawLine($borderPen, ($l.End.X - 3), $l.End.Y, ($l.End.X + 3), $l.End.Y)
+            $g.DrawLine($borderPen, $l.End.X, ($l.End.Y - 3), $l.End.X, ($l.End.Y + 3))
+            $g.DrawLine($colorPen,  ($l.End.X - 3), $l.End.Y, ($l.End.X + 3), $l.End.Y)
+            $g.DrawLine($colorPen,  $l.End.X, ($l.End.Y - 3), $l.End.X, ($l.End.Y + 3))
+            $borderPen.Dispose(); $colorPen.Dispose()
+        }
+        $g.Dispose(); $bmpPre.Dispose()
+        return $bmpPost
+    } catch { return $null }
 }
 
 # --- 4. BACKEND QUEUE DATA ---
@@ -435,13 +517,20 @@ function Update-ParentPreview($pJob, $gpJob) {
 
     $hasCollision = $false
     foreach ($r in $pJob.FileRows) {
-        $r.NewLbl.Text = $r.TargetName
+        $r.NewLbl.Inlines.Clear()
+        $sfx     = $r.SuffixBox.Text -replace '[^a-zA-Z0-9]', ''
+        $sfxPart = if ($sfx) { "_${sfx}$($r.Ext)" } else { $r.Ext }
+        $baseLen = $r.TargetName.Length - $sfxPart.Length
+        $basePart = if ($baseLen -gt 0) { $r.TargetName.Substring(0, $baseLen) } else { "" }
         if ($nameCounts[$r.TargetName] -gt 1) {
-            $r.NewLbl.Foreground = Get-WpfColor "#D95F5F"
+            $run = New-Object System.Windows.Documents.Run($r.TargetName); $run.Foreground = Get-WpfColor "#D95F5F"
+            $r.NewLbl.Inlines.Add($run)
             if ($r.OldLbl) { $r.OldLbl.Foreground = Get-WpfColor "#D95F5F" }
             $hasCollision = $true
         } else {
-            $r.NewLbl.Foreground = Get-WpfColor "#4CAF72"
+            $runBase = New-Object System.Windows.Documents.Run($basePart); $runBase.Foreground = Get-WpfColor "#90B8C8"
+            $runSfx  = New-Object System.Windows.Documents.Run($sfxPart);  $runSfx.Foreground  = Get-WpfColor $r.BaseColor
+            $r.NewLbl.Inlines.Add($runBase); $r.NewLbl.Inlines.Add($runSfx)
             if ($r.OldLbl) { $r.OldLbl.Foreground = Get-WpfColor "#6B6E7A" }
         }
     }
@@ -481,6 +570,7 @@ function Add-FileRow($pJob, $gpJob, $fi) {
     $fGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=(New-Object System.Windows.GridLength(1, [System.Windows.GridUnitType]::Star))}))
     $fGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=(New-Object System.Windows.GridLength(30))}))
     $fGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=(New-Object System.Windows.GridLength(1, [System.Windows.GridUnitType]::Star))}))
+    $fGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=(New-Object System.Windows.GridLength(45))}))
     $fGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=(New-Object System.Windows.GridLength(40))}))
     $fRow.Child = $fGrid
 
@@ -497,17 +587,30 @@ function Add-FileRow($pJob, $gpJob, $fi) {
     $lArr = Create-TextBlock "->" "#A0A0A0" 12 "Normal"
     [System.Windows.Controls.Grid]::SetColumn($lArr, 2); $fGrid.Children.Add($lArr) | Out-Null
 
-    $lNew = Create-TextBlock "" "#4CAF72" 11 "Bold"
+    $newNameColor = if     ($fi.Name -imatch 'Nest\.3mf$')        { "#FF69B4" }  # Pink
+                   elseif ($fi.Name -imatch 'Full\.gcode\.3mf$') { "#4CAF72" }  # Green
+                   elseif ($fi.Name -imatch 'Full\.3mf$')        { "#B57BFF" }  # Purple
+                   elseif ($fi.Name -imatch 'Final\.3mf$')       { "#FFD700" }  # Yellow
+                   else                                           { "#90B8C8" }  # Blue-grey
+    $lNew = Create-TextBlock "" $newNameColor 11 "Bold"
     $lNew.Margin = New-Object System.Windows.Thickness(5,0,5,0)
     $lNew.TextWrapping = "Wrap"
     [System.Windows.Controls.Grid]::SetColumn($lNew, 3); $fGrid.Children.Add($lNew) | Out-Null
 
+    $btnOpen = New-Object System.Windows.Controls.Button
+    $btnOpen.Content = "Open"; $btnOpen.Background = Get-WpfColor "#2A2C35"; $btnOpen.Foreground = Get-WpfColor "#A0C4FF"
+    $btnOpen.BorderThickness = 0; $btnOpen.Width = 40; $btnOpen.Height = 20; $btnOpen.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnOpen.ToolTip = $fi.FullName
+    [System.Windows.Controls.Grid]::SetColumn($btnOpen, 4); $fGrid.Children.Add($btnOpen) | Out-Null
+    $btnOpen.Tag = $fi.FullName
+    $btnOpen.Add_Click({ Start-Process $this.Tag })
+
     $btnDel = New-Object System.Windows.Controls.Button
     $btnDel.Content = "X"; $btnDel.Background = Get-WpfColor "#D95F5F"; $btnDel.Foreground = Get-WpfColor "#FFFFFF"
     $btnDel.BorderThickness = 0; $btnDel.Width = 20; $btnDel.Height = 20; $btnDel.Cursor = [System.Windows.Input.Cursors]::Hand
-    [System.Windows.Controls.Grid]::SetColumn($btnDel, 4); $fGrid.Children.Add($btnDel) | Out-Null
+    [System.Windows.Controls.Grid]::SetColumn($btnDel, 5); $fGrid.Children.Add($btnDel) | Out-Null
 
-    $frObj = [PSCustomObject]@{ OldPath = $fi.FullName; SuffixBox = $sBadge; OldLbl = $lOld; NewLbl = $lNew; Ext = $parsed.Extension; TargetName = "" }
+    $frObj = [PSCustomObject]@{ OldPath = $fi.FullName; SuffixBox = $sBadge; OldLbl = $lOld; NewLbl = $lNew; Ext = $parsed.Extension; TargetName = ""; BaseColor = $newNameColor }
     $pJob.FileRows.Add($frObj) | Out-Null
 
     $sBadge.Tag = @{ P = $pJob; G = $gpJob }
@@ -594,16 +697,28 @@ function Refresh-PJob($pJob, $gpJob) {
     if ($pickPath) { $pJob.PbPick.Source = Load-WpfImage $pickPath }
 
     # Reset overlays
-    $pJob.ProcessingOverlay.Text = "[ PROCESSING ]"
-    $pJob.ProcessingOverlay.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220,232,161,53))
-    $pJob.ProcessingOverlay.Foreground = Get-WpfColor "#000000"
-    $pJob.ProcessingOverlay.Visibility = "Collapsed"
+    $nestExists = Get-ChildItem -Path $pJob.FolderPath -Filter "*Nest.3mf" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    $amberBrush = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220,232,161,53))
+    $pJob.ProcessingOverlay.BorderBrush = $amberBrush
+    $pJob.ProcessingOverlay.Background  = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(30,232,161,53))
+    $pJob.CardStatusLabel.Text          = "[ PROCESSING ]"
+    $pJob.CardStatusLabel.Foreground    = $amberBrush
+    $pJob.ProcessingOverlay.Visibility  = "Collapsed"
     $pJob.PickProcessingOverlay.Visibility = "Collapsed"
     if ($pJob.FinishedOverlay) { $pJob.FinishedOverlay.Visibility = "Collapsed" }
+    if ($pJob.MergeBanner) { $pJob.MergeBanner.Visibility = if ($nestExists) { "Visible" } else { "Collapsed" } }
+    if ($pJob.ChkMerge) {
+        if ($nestExists) {
+            $pJob.ChkMerge.IsChecked = $false; $pJob.ChkMerge.IsEnabled = $false; $pJob.ChkMerge.Foreground = Get-WpfColor "#555555"
+            $pJob.ChkMerge.ToolTip = "Remove Nest.3mf or Revert Merge before merging again"
+        } else {
+            $pJob.ChkMerge.IsEnabled = $true; $pJob.ChkMerge.Foreground = Get-WpfColor "#FFFFFF"; $pJob.ChkMerge.ToolTip = $null
+        }
+    }
 
     # Reload file rows
     $pJob.PnlFiles.Children.Clear(); $pJob.FileRows.Clear()
-    $files = Get-ChildItem -Path $pJob.FolderPath -File -ErrorAction SilentlyContinue | Sort-Object Name
+    $files = Get-ChildItem -Path $pJob.FolderPath -File -ErrorAction SilentlyContinue | Sort-Object { switch -Regex ($_.Name) { 'Final\.3mf$' {0} 'Nest\.3mf$' {1} 'Full\.3mf$' {2} 'Full\.gcode\.3mf$' {3} default {4} } }, Name
     foreach ($fi in $files) { Add-FileRow $pJob $gpJob $fi }
     Update-ParentPreview $pJob $gpJob
 
@@ -626,8 +741,8 @@ function Enqueue-PJob($pJob, $gpJob) {
     $pJob.IsQueued = $true
     $pJob.BtnApply.Content = "Queued..."; $pJob.BtnApply.Background = Get-WpfColor "#E8A135"
     $pJob.RowPanel.IsEnabled = $false
-    $pJob.ProcessingOverlay.Text = "[ PREPARING ]"; $pJob.ProcessingOverlay.Visibility = "Visible"
-    $pJob.PickProcessingOverlay.Text = "[ PREPARING ]"; $pJob.PickProcessingOverlay.Visibility = "Visible"
+    $pJob.CardStatusLabel.Text = "[ PREPARING ]"; $pJob.ProcessingOverlay.Visibility = "Visible"
+    $pJob.PickStatusLabel.Text = "[ PREPARING ]"; $pJob.PickProcessingOverlay.Visibility = "Visible"
 
     $script:processQueue.Enqueue(@{ PJob = $pJob; GpJob = $gpJob })
 }
@@ -683,7 +798,7 @@ function Start-NextProcess {
     $currentAnchorLocation = $pJob.AnchorFile.FullName
     foreach ($r in $pJob.FileRows) {
         if ((Split-Path $r.OldPath -Leaf) -eq $pJob.AnchorFile.Name) {
-            $anchorTargetName = $r.NewLbl.Text; $anchorFileRow = $r; $currentAnchorLocation = $r.OldPath; break
+            $anchorTargetName = $r.TargetName; $anchorFileRow = $r; $currentAnchorLocation = $r.OldPath; break
         }
     }
     if ($anchorTargetName -eq "") { $anchorTargetName = $pJob.AnchorFile.Name }
@@ -715,7 +830,7 @@ function Start-NextProcess {
     # Rename all other files
     foreach ($r in $pJob.FileRows) {
         if ($r.OldPath -eq $pJob.ProcessedAnchorPath) { continue }
-        $targetName = $r.NewLbl.Text
+        $targetName = $r.TargetName
         $newPath = Join-Path $pJob.FolderPath $targetName
         if ($r.OldPath -ne $newPath -and (Test-Path $r.OldPath)) {
             Rename-Item $r.OldPath $targetName -Force; $r.OldPath = $newPath
@@ -1196,16 +1311,23 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     }
     $cardGrid.Children.Add($colorsOverlayStack) | Out-Null
 
-    # Processing Overlay
-    $cardOverlay = New-Object System.Windows.Controls.TextBlock
-    $cardOverlay.Text = "[ PROCESSING ]"
-    $cardOverlay.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220,232,161,53))
-    $cardOverlay.Foreground = Get-WpfColor "#000000"
-    $cardOverlay.FontSize = 14; $cardOverlay.FontWeight = [System.Windows.FontWeights]::Bold
-    $cardOverlay.TextAlignment = "Center"; $cardOverlay.VerticalAlignment = "Center"; $cardOverlay.HorizontalAlignment = "Stretch"
-    $cardOverlay.Visibility = "Collapsed"; $cardOverlay.Padding = New-Object System.Windows.Thickness(0,196,0,0)
-    $cardGrid.Children.Add($cardOverlay) | Out-Null
-    $pJob.ProcessingOverlay = $cardOverlay
+    # Processing Overlay (border + bottom label)
+    $cardBorderOverlay = New-Object System.Windows.Controls.Border
+    $cardBorderOverlay.BorderThickness = New-Object System.Windows.Thickness(6)
+    $cardBorderOverlay.BorderBrush = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220,232,161,53))
+    $cardBorderOverlay.Background  = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(30,232,161,53))
+    $cardBorderOverlay.Visibility = "Collapsed"
+    $cardStatusLbl = New-Object System.Windows.Controls.TextBlock
+    $cardStatusLbl.Text = "[ PROCESSING ]"
+    $cardStatusLbl.Foreground = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(255,232,161,53))
+    $cardStatusLbl.FontSize = 13; $cardStatusLbl.FontWeight = [System.Windows.FontWeights]::Bold
+    $cardStatusLbl.TextAlignment = "Center"; $cardStatusLbl.VerticalAlignment = "Bottom"; $cardStatusLbl.HorizontalAlignment = "Stretch"
+    $cardStatusLbl.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(180,0,0,0))
+    $cardStatusLbl.Padding = New-Object System.Windows.Thickness(5,4,5,6)
+    $cardBorderOverlay.Child = $cardStatusLbl
+    $cardGrid.Children.Add($cardBorderOverlay) | Out-Null
+    $pJob.ProcessingOverlay = $cardBorderOverlay
+    $pJob.CardStatusLabel   = $cardStatusLbl
 
     $cardGrid.AllowDrop = $true
     $cardGrid.Tag = $pJob
@@ -1242,28 +1364,83 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pickGrid.Children.Add($pbPick) | Out-Null
     $pJob.PbPick = $pbPick
     $pbPick.Add_MouseLeftButtonDown({
-        if ($_.ClickCount -ge 2 -and $null -ne $this.Source) {
-            $viewer = New-Object System.Windows.Window
-            $viewer.Title = "Pick Image"; $viewer.Background = Get-WpfColor "#0D0E10"
-            $viewer.SizeToContent = "WidthAndHeight"; $viewer.WindowStartupLocation = "CenterScreen"
-            $viewer.ResizeMode = "CanResizeWithGrip"
-            $imgView = New-Object System.Windows.Controls.Image
-            $imgView.Source = $this.Source; $imgView.MaxWidth = 900; $imgView.MaxHeight = 900; $imgView.Stretch = "Uniform"
-            $imgView.Margin = New-Object System.Windows.Thickness(10)
-            $viewer.Content = $imgView
-            $viewer.ShowDialog() | Out-Null
+        if ($_.ClickCount -ge 2) {
+            $t = $this.Tag
+            if ($null -eq $t -or -not $t.Path) { return }
+            $preMergePath = $null
+            try {
+                [System.Windows.Input.Mouse]::OverrideCursor = [System.Windows.Input.Cursors]::Wait
+                $dir      = Split-Path $t.Original3mf -Parent
+                $base     = (Split-Path $t.Original3mf -Leaf) -replace '(?i)_?Full\.gcode\.3mf$|_?Full\.3mf$', ''
+                $nestFile = Join-Path $dir "${base}_Nest.3mf"
+                if (-not (Test-Path $nestFile)) { [System.Windows.MessageBox]::Show("Nest.3mf not found:`n$nestFile", "Merge Map Error"); return }
+                $preMergePath = Join-Path $env:TEMP "pre_verify_$([guid]::NewGuid().ToString().Substring(0,8)).png"
+                $zip = [System.IO.Compression.ZipFile]::OpenRead($nestFile)
+                $pickEntry = $zip.Entries | Where-Object { ($_.FullName -replace "\\","/") -match "pick_1\.png$" } | Select-Object -First 1
+                if ($null -eq $pickEntry) { $zip.Dispose(); [System.Windows.MessageBox]::Show("No pick_1.png found in:`n$nestFile", "Merge Map Error"); return }
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($pickEntry, $preMergePath, $true)
+                $zip.Dispose()
+                $annotatedBmp = Get-ImageBasedMergeMap -preMergePath $preMergePath -postMergePath $t.Path
+                if ($null -ne $annotatedBmp) {
+                    $ms = New-Object System.IO.MemoryStream
+                    $annotatedBmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+                    $annotatedBmp.Dispose()
+                    $ms.Position = 0
+                    $bmpSource = New-Object System.Windows.Media.Imaging.BitmapImage
+                    $bmpSource.BeginInit()
+                    $bmpSource.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+                    $bmpSource.StreamSource = $ms
+                    $bmpSource.EndInit()
+                    $ms.Dispose()
+                    $viewer = New-Object System.Windows.Window
+                    $viewer.Title = "Merged RGB Verification Overlay"; $viewer.Background = Get-WpfColor "#000000"
+                    $viewer.SizeToContent = "WidthAndHeight"; $viewer.WindowStartupLocation = "CenterScreen"
+                    $viewer.ResizeMode = "CanResizeWithGrip"
+                    $imgView = New-Object System.Windows.Controls.Image
+                    $imgView.Source = $bmpSource; $imgView.MaxWidth = 900; $imgView.MaxHeight = 900; $imgView.Stretch = "Uniform"
+                    $imgView.Margin = New-Object System.Windows.Thickness(10)
+                    $viewer.Content = $imgView
+                    $viewer.ShowDialog() | Out-Null
+                }
+            } catch {
+                [System.Windows.MessageBox]::Show("Error: $($_.Exception.Message)", "Merge Map Error")
+            } finally {
+                [System.Windows.Input.Mouse]::OverrideCursor = $null
+                if ($preMergePath -and (Test-Path $preMergePath)) { Remove-Item $preMergePath -Force -ErrorAction SilentlyContinue }
+            }
         }
     })
 
-    $pickOverlay = New-Object System.Windows.Controls.TextBlock
-    $pickOverlay.Text = "[ PROCESSING ]"
-    $pickOverlay.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220,232,161,53))
-    $pickOverlay.Foreground = Get-WpfColor "#000000"
-    $pickOverlay.FontSize = 14; $pickOverlay.FontWeight = [System.Windows.FontWeights]::Bold
-    $pickOverlay.TextAlignment = "Center"; $pickOverlay.VerticalAlignment = "Center"; $pickOverlay.HorizontalAlignment = "Stretch"
-    $pickOverlay.Visibility = "Collapsed"; $pickOverlay.Padding = New-Object System.Windows.Thickness(0,196,0,0)
-    $pickGrid.Children.Add($pickOverlay) | Out-Null
-    $pJob.PickProcessingOverlay = $pickOverlay
+    # Pick processing border overlay
+    $pickBorderOverlay = New-Object System.Windows.Controls.Border
+    $pickBorderOverlay.BorderThickness = New-Object System.Windows.Thickness(6)
+    $pickBorderOverlay.BorderBrush = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220,232,161,53))
+    $pickBorderOverlay.Background  = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(30,232,161,53))
+    $pickBorderOverlay.Visibility = "Collapsed"
+    $pickStatusLbl = New-Object System.Windows.Controls.TextBlock
+    $pickStatusLbl.Text = "[ PROCESSING ]"
+    $pickStatusLbl.Foreground = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(255,232,161,53))
+    $pickStatusLbl.FontSize = 13; $pickStatusLbl.FontWeight = [System.Windows.FontWeights]::Bold
+    $pickStatusLbl.TextAlignment = "Center"; $pickStatusLbl.VerticalAlignment = "Bottom"; $pickStatusLbl.HorizontalAlignment = "Stretch"
+    $pickStatusLbl.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(180,0,0,0))
+    $pickStatusLbl.Padding = New-Object System.Windows.Thickness(5,4,5,6)
+    $pickBorderOverlay.Child = $pickStatusLbl
+    $pickGrid.Children.Add($pickBorderOverlay) | Out-Null
+    $pJob.PickProcessingOverlay = $pickBorderOverlay
+    $pJob.PickStatusLabel = $pickStatusLbl
+
+    # Merge detected banner (top of pick image)
+    $nestExists = Get-ChildItem -Path $parentPath -Filter "*Nest.3mf" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    $mergeBanner = New-Object System.Windows.Controls.TextBlock
+    $mergeBanner.Text = "MERGE DETECTED"
+    $mergeBanner.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(210,30,140,60))
+    $mergeBanner.Foreground = Get-WpfColor "#FFFFFF"
+    $mergeBanner.FontSize = 12; $mergeBanner.FontWeight = [System.Windows.FontWeights]::Bold
+    $mergeBanner.TextAlignment = "Center"; $mergeBanner.VerticalAlignment = "Top"; $mergeBanner.HorizontalAlignment = "Stretch"
+    $mergeBanner.Padding = New-Object System.Windows.Thickness(0,5,0,5)
+    $mergeBanner.Visibility = if ($nestExists) { "Visible" } else { "Collapsed" }
+    $pickGrid.Children.Add($mergeBanner) | Out-Null
+    $pJob.MergeBanner = $mergeBanner
 
     if ($gcodeFile) {
         try {
@@ -1276,6 +1453,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
                 Invoke-RandomizePickColors $rawPickPath $pickPath | Out-Null
                 if (-not (Test-Path $pickPath)) { $pickPath = $rawPickPath }
                 $pbPick.Source = Load-WpfImage $pickPath
+                $pbPick.Tag = @{ Path = $pickPath; Original3mf = $anchorFile.FullName }
             }
         } catch {} finally { if ($null -ne $zip) { $zip.Dispose() } }
     }
@@ -1358,7 +1536,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
     $tasksOuter = New-Object System.Windows.Controls.StackPanel
 
-    $tasksRow1 = New-Object System.Windows.Controls.StackPanel; $tasksRow1.Orientation = "Horizontal"
+    $tasksRow1 = New-Object System.Windows.Controls.WrapPanel; $tasksRow1.Orientation = "Horizontal"
     $chkMerge   = New-Object System.Windows.Controls.CheckBox; $chkMerge.Content   = "Merge";                $chkMerge.IsChecked   = $true; $chkMerge.Foreground   = Get-WpfColor "#FFFFFF"; $chkMerge.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
     $chkSlice   = New-Object System.Windows.Controls.CheckBox; $chkSlice.Content   = "Slice / Export Gcode"; $chkSlice.IsChecked   = $true; $chkSlice.Foreground   = Get-WpfColor "#FFFFFF"; $chkSlice.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
     $chkExtract = New-Object System.Windows.Controls.CheckBox; $chkExtract.Content = "Extract Data";         $chkExtract.IsChecked = $true; $chkExtract.Foreground = Get-WpfColor "#FFFFFF"; $chkExtract.Margin = New-Object System.Windows.Thickness(0,0,15,0)
@@ -1381,6 +1559,10 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $rightStack.Children.Add($tasksBox) | Out-Null
 
     $pJob.ChkMerge = $chkMerge; $pJob.ChkSlice = $chkSlice; $pJob.ChkExtract = $chkExtract; $pJob.ChkImage = $chkImage; $pJob.ChkLogs = $chkLogs
+    if ($nestExists) {
+        $chkMerge.IsChecked = $false; $chkMerge.IsEnabled = $false; $chkMerge.Foreground = Get-WpfColor "#555555"
+        $chkMerge.ToolTip = "Remove Nest.3mf or Revert Merge before merging again"
+    }
 
     # Checkbox interdependencies
     $tasksData = @{ Merge = $chkMerge; Slice = $chkSlice; Extract = $chkExtract; Image = $chkImage; Logs = $chkLogs; PJob = $pJob; GpJob = $gpJob }
@@ -1408,15 +1590,15 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnSelAll.Tag = $tasksData
     $btnSelAll.Add_Click({
         $t = $this.Tag
-        $t.Merge.IsEnabled = $true; $t.Slice.IsEnabled = $true; $t.Extract.IsEnabled = $true; $t.Image.IsEnabled = $true; $t.Logs.IsEnabled = $true
-        $t.Merge.IsChecked = $true; $t.Slice.IsChecked = $true; $t.Extract.IsChecked = $true; $t.Image.IsChecked = $true; $t.Logs.IsChecked = $true
+        $t.Slice.IsChecked = $true; $t.Extract.IsChecked = $true; $t.Image.IsChecked = $true; $t.Logs.IsChecked = $true
+        if ($t.Merge.IsEnabled) { $t.Merge.IsChecked = $true }
     })
 
     $btnDeselAll.Tag = $tasksData
     $btnDeselAll.Add_Click({
         $t = $this.Tag
-        $t.Merge.IsEnabled = $true; $t.Slice.IsEnabled = $true; $t.Extract.IsEnabled = $true; $t.Image.IsEnabled = $true; $t.Logs.IsEnabled = $true
-        $t.Merge.IsChecked = $false; $t.Slice.IsChecked = $false; $t.Extract.IsChecked = $false; $t.Image.IsChecked = $false; $t.Logs.IsChecked = $false
+        $t.Slice.IsChecked = $false; $t.Extract.IsChecked = $false; $t.Image.IsChecked = $false; $t.Logs.IsChecked = $false
+        if ($t.Merge.IsEnabled) { $t.Merge.IsChecked = $false }
     })
 
     $btnRevertMerge.Tag = @{ P = $pJob; G = $gpJob }
@@ -1428,9 +1610,11 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $pj.BtnApply.Content = "Reverting..."; $pj.BtnApply.Width = 150
         if ($pj.BtnRevertDone) { $pj.BtnRevertDone.Visibility = "Collapsed" }
         $pj.RowPanel.IsEnabled = $false
-        $pj.ProcessingOverlay.Text = "[REVERTING...]"
-        $pj.ProcessingOverlay.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220, 217, 95, 95))
-        $pj.ProcessingOverlay.Foreground = Get-WpfColor "#FFFFFF"
+        $redBrush = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220, 217, 95, 95))
+        $pj.ProcessingOverlay.BorderBrush = $redBrush
+        $pj.ProcessingOverlay.Background  = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(30, 217, 95, 95))
+        $pj.CardStatusLabel.Text       = "[REVERTING...]"
+        $pj.CardStatusLabel.Foreground = $redBrush
         $pj.ProcessingOverlay.Visibility = "Visible"
         [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
         try {
@@ -1472,7 +1656,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     # Files list
     $pnlFiles = New-Object System.Windows.Controls.StackPanel; $pnlFiles.Margin = New-Object System.Windows.Thickness(0,10,0,0)
     $rightStack.Children.Add($pnlFiles) | Out-Null; $pJob.PnlFiles = $pnlFiles
-    $files = Get-ChildItem -Path $parentPath -File -ErrorAction SilentlyContinue | Sort-Object Name
+    $files = Get-ChildItem -Path $parentPath -File -ErrorAction SilentlyContinue | Sort-Object { switch -Regex ($_.Name) { 'Final\.3mf$' {0} 'Nest\.3mf$' {1} 'Full\.3mf$' {2} 'Full\.gcode\.3mf$' {3} default {4} } }, Name
     foreach ($fi in $files) { Add-FileRow $pJob $gpJob $fi }
 
     # Apply + Revert + Delete Logs buttons
@@ -1550,9 +1734,11 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $targetPath = if ($pj.ProcessedAnchorPath -ne "") { $pj.ProcessedAnchorPath } else { $pj.AnchorFile.FullName }
         $pj.BtnApply.Content = "Reverting..."; $pj.BtnApply.Width = 150; $pj.BtnRevertDone.Visibility = "Collapsed"
         $pj.RowPanel.IsEnabled = $false
-        $pj.ProcessingOverlay.Text = "[REVERTING...]"
-        $pj.ProcessingOverlay.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220, 217, 95, 95))
-        $pj.ProcessingOverlay.Foreground = Get-WpfColor "#FFFFFF"
+        $redBrush = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220, 217, 95, 95))
+        $pj.ProcessingOverlay.BorderBrush = $redBrush
+        $pj.ProcessingOverlay.Background  = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(30, 217, 95, 95))
+        $pj.CardStatusLabel.Text       = "[REVERTING...]"
+        $pj.CardStatusLabel.Foreground = $redBrush
         $pj.ProcessingOverlay.Visibility = "Visible"
         [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
         try {
@@ -1711,8 +1897,8 @@ $script:queueTimer.Add_Tick({
                     $statusText = $sr.ReadToEnd(); $sr.Dispose(); $fs.Dispose()
                     if ($statusText) {
                         $txt = "[ $($statusText.Trim()) ]"
-                        $pJob.ProcessingOverlay.Text = $txt
-                        $pJob.PickProcessingOverlay.Text = $txt
+                        $pJob.CardStatusLabel.Text = $txt
+                        $pJob.PickStatusLabel.Text = $txt
                         $pJob.BtnApply.Content = $statusText.Trim()
                     }
                 } catch {}
@@ -1775,7 +1961,7 @@ $script:queueTimer.Add_Tick({
 
             # Reload file rows
             $pJob.PnlFiles.Children.Clear(); $pJob.FileRows.Clear()
-            $files = Get-ChildItem -Path $pJob.FolderPath -File -ErrorAction SilentlyContinue | Sort-Object Name
+            $files = Get-ChildItem -Path $pJob.FolderPath -File -ErrorAction SilentlyContinue | Sort-Object { switch -Regex ($_.Name) { 'Final\.3mf$' {0} 'Nest\.3mf$' {1} 'Full\.3mf$' {2} 'Full\.gcode\.3mf$' {3} default {4} } }, Name
             foreach ($fi in $files) { Add-FileRow $pJob $gpJob $fi }
             Update-ParentPreview $pJob $gpJob
 
