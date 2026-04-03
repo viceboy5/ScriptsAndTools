@@ -182,12 +182,41 @@ function ParseFile([string]$filename) {
 function SmartFill([string]$anchorName, [string]$gpName) {
     $stem = $anchorName -replace '(?i)\.gcode\.3mf$|\.3mf$', ''
     $stem = $stem -replace '(?i)_Full$', ''
-    $escaped = [regex]::Escape($gpName)
-    if ($gpName -ne '' -and $stem -imatch "^(.+)_${escaped}$") { $prefix = $Matches[1] } else { $prefix = $stem }
-    $parts = $prefix -split '_'
-    # BUG FIX: was returning $parts (full array) instead of $parts[0] for Char
+
+    # Strip printer prefix from gpName so we match against the bare theme token
+    # e.g. gpName "P2S_Puppies" -> cleanGpName "Puppies"
+    $cleanGpName = $gpName
+    if ($gpName -ne '') {
+        $gpParts = $gpName -split '_'
+        if ($gpParts.Count -gt 1 -and $script:PrinterPrefixes -icontains $gpParts[0]) {
+            $cleanGpName = ($gpParts[1..($gpParts.Count-1)] -join '_')
+        }
+    }
+
+    # Try to strip the theme by matching the cleaned gpName at the end of the stem
+    $themeStripped = $false
+    $prefix = $stem
+    if ($cleanGpName -ne '') {
+        $escaped = [regex]::Escape($cleanGpName)
+        if ($stem -imatch "^(.+)_${escaped}$") { $prefix = $Matches[1]; $themeStripped = $true }
+    }
+
+    # Strip known printer prefix (e.g. P2S_, X1C_) so it doesn't bleed into Character/Adjective
+    $prefParts = $prefix -split '_'
+    if ($prefParts.Count -gt 1 -and $script:PrinterPrefixes -icontains $prefParts[0]) {
+        $prefix = ($prefParts[1..($prefParts.Count-1)] -join '_')
+    }
+
+    # Positional fallback: if theme wasn't matched via gpName AND we still have 3+ tokens,
+    # treat the last token as the theme and strip it.
+    # Convention: Prefix_Char_Adj_Theme_Suffix — after stripping prefix+suffix, max 3 remain.
+    $parts = [string[]]($prefix -split '_' | Where-Object { $_ -ne '' })
+    if (-not $themeStripped -and $parts.Count -ge 3) {
+        $parts = $parts[0..($parts.Count-2)]
+    }
+
     if ($parts.Count -ge 2) { return @{ Char = $parts[0]; Adj = ($parts[1..($parts.Count-1)] -join '') } }
-    return @{ Char = $prefix; Adj = '' }
+    return @{ Char = ($parts -join ''); Adj = '' }
 }
 
 function Invoke-RandomizePickColors($sourcePath, $destPath) {
@@ -215,6 +244,7 @@ $script:processQueue = New-Object System.Collections.Queue
 $script:activeProcess = $null
 $script:activeProcessJob = $null
 $gpQueue = [ordered]@{}
+$script:PrinterPrefixes = @('P2S', 'X1C', 'H2S')
 
 # Check for files passed by the VBScript, otherwise launch empty
 $foundFiles = @()
@@ -311,6 +341,11 @@ function Update-ParentPreview($pJob, $gpJob) {
     $ch = $pJob.TBChar.Text -replace '[^a-zA-Z0-9]', ''
     $ad = $pJob.TBAdj.Text -replace '[^a-zA-Z0-9]', ''
     $th = $gpJob.TBTheme.Text -replace '[^a-zA-Z0-9]', ''
+    $pf = ""
+    if ($null -ne $gpJob.CbPrefix -and $null -ne $gpJob.CbPrefix.SelectedItem) {
+        $pf = $gpJob.CbPrefix.SelectedItem.ToString()
+        if ($pf -eq "(none)") { $pf = "" }
+    }
 
     # 1. Split CamelCase into spaces (e.g., "BabyDragon" -> "Baby Dragon")
     $chSpaced = $ch -creplace '([a-z])([A-Z])', '$1 $2'
@@ -329,6 +364,7 @@ function Update-ParentPreview($pJob, $gpJob) {
     foreach ($r in $pJob.FileRows) {
         $sf = $r.SuffixBox.Text -replace '[^a-zA-Z0-9]', ''
         $parts = New-Object System.Collections.ArrayList
+        if ($pf) { [void]$parts.Add($pf) }
         if ($ch) { [void]$parts.Add($ch) }; if ($ad) { [void]$parts.Add($ad) }
         if ($th) { [void]$parts.Add($th) }; if ($sf) { [void]$parts.Add($sf) }
         $r.TargetName = ($parts.ToArray() -join '_') + $r.Ext
@@ -348,8 +384,9 @@ function Update-ParentPreview($pJob, $gpJob) {
             if ($r.OldLbl) { $r.OldLbl.Foreground = Get-WpfColor "#6B6E7A" }
         }
     }
-    # Update folder label to preview the renamed folder name (Character_Adjective_Theme)
+    # Update folder label to preview the renamed folder name (Prefix_Character_Adjective_Theme)
     $folderParts = @()
+    if ($pf) { $folderParts += $pf }
     if ($ch) { $folderParts += $ch }
     if ($ad) { $folderParts += $ad }
     if ($th) { $folderParts += $th }
@@ -357,6 +394,12 @@ function Update-ParentPreview($pJob, $gpJob) {
     if ($null -ne $pJob.LblFolder) {
         if ($previewFolderName) { $pJob.LblFolder.Text = "Folder: $previewFolderName" }
         else { $pJob.LblFolder.Text = "Folder: $(Split-Path $pJob.FolderPath -Leaf)" }
+    }
+
+    # Update grandparent folder name preview (Prefix_Theme or just Theme)
+    if ($null -ne $gpJob.LblGpPreview) {
+        $gpPreview = if ($pf) { "${pf}_${th}" } else { $th }
+        $gpJob.LblGpPreview.Text = if ($gpPreview) { [char]0x2192 + " $gpPreview" } else { "" }
     }
 
     $pJob.HasCollision = $hasCollision
@@ -535,6 +578,11 @@ function Start-NextProcess {
     $pJob.BtnApply.Content = "Processing..."; $pJob.IsQueued = $false
 
     $th = $gpJob.TBTheme.Text -replace '[^a-zA-Z0-9]', ''
+    $pf = ""
+    if ($null -ne $gpJob.CbPrefix -and $null -ne $gpJob.CbPrefix.SelectedItem) {
+        $pf = $gpJob.CbPrefix.SelectedItem.ToString()
+        if ($pf -eq "(none)") { $pf = "" }
+    }
     $oldGrand = if ($gpJob.DiGrand) { $gpJob.DiGrand.FullName } else { "" }
 
     # Uncheck merge/image if colors unresolved
@@ -615,9 +663,10 @@ function Start-NextProcess {
     $cleanChar = $pJob.TBChar.Text -replace '[^a-zA-Z0-9]', ''
     $cleanAdj  = $pJob.TBAdj.Text  -replace '[^a-zA-Z0-9]', ''
     $pParts = New-Object System.Collections.ArrayList
-    if ($cleanChar) { $pParts.Add($cleanChar) | Out-Null }
-    if ($cleanAdj)  { $pParts.Add($cleanAdj)  | Out-Null }
-    if ($th)        { $pParts.Add($th)         | Out-Null }
+    if ($pf)        { $pParts.Add($pf)         | Out-Null }
+    if ($cleanChar) { $pParts.Add($cleanChar)  | Out-Null }
+    if ($cleanAdj)  { $pParts.Add($cleanAdj)   | Out-Null }
+    if ($th)        { $pParts.Add($th)          | Out-Null }
     $newParentName = $pParts.ToArray() -join '_'
 
     $oldFolder = $pJob.FolderPath
@@ -633,10 +682,11 @@ function Start-NextProcess {
     }
 
     # Rename grandparent folder and propagate to ALL jobs
-    if (-not $gpJob.ChkSkip.IsChecked -and $th -ne '' -and $oldGrand -ne '' -and $th -ne (Split-Path $oldGrand -Leaf)) {
-        $newGrand = Join-Path (Split-Path $oldGrand -Parent) $th
+    $newGpFolderName = if ($pf) { "${pf}_${th}" } else { $th }
+    if (-not $gpJob.ChkSkip.IsChecked -and $newGpFolderName -ne '' -and $oldGrand -ne '' -and $newGpFolderName -ne (Split-Path $oldGrand -Leaf)) {
+        $newGrand = Join-Path (Split-Path $oldGrand -Parent) $newGpFolderName
         try {
-            Rename-Item $oldGrand $th -Force -ErrorAction Stop
+            Rename-Item $oldGrand $newGpFolderName -Force -ErrorAction Stop
             $gpJob.GpPath = $newGrand; $gpJob.DiGrand = [System.IO.DirectoryInfo]::new($newGrand)
             foreach ($p in $gpJob.Parents) {
                 $p.FolderPath = $p.FolderPath.Replace($oldGrand, $newGrand)
@@ -946,7 +996,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     } else { $currentGrid.Visibility = "Collapsed" }
 
     # Overlay Labels
-    $lblCharCard = Create-TextBlock "" "#E8A135" 16 "Bold"
+    $lblCharCard = Create-TextBlock "" "#E8A135" 20 "Bold"
     $lblCharCard.HorizontalAlignment = "Right"; $lblCharCard.VerticalAlignment = "Top"
     $lblCharCard.Margin = New-Object System.Windows.Thickness(0, 10, 10, 0)
     $cardGrid.Children.Add($lblCharCard) | Out-Null
@@ -987,7 +1037,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
         $swatchColor = if ([string]::IsNullOrWhiteSpace($slotData.OldHex) -or $slotData.OldHex.Length -lt 7) { "#333333" } else { $slotData.OldHex }
         $swatchBorder = New-Object System.Windows.Controls.Border
-        $swatchBorder.Width = 40; $swatchBorder.Height = 40
+        $swatchBorder.Width = 52; $swatchBorder.Height = 52
         $swatchBorder.Background = Get-WpfColor $swatchColor
         $swatchBorder.BorderBrush = Get-WpfColor "#2A2C35"; $swatchBorder.BorderThickness = New-Object System.Windows.Thickness(1)
 
@@ -1399,7 +1449,27 @@ function Build-GpJob($gpPath, $parentDict) {
     $diGrand = if ($gpPath -notlike "ROOT_*") { [System.IO.DirectoryInfo]::new($gpPath) } else { $null }
     $gpName = if ($diGrand) { $diGrand.Name } else { "(No Parent Folder)" }
 
-    $gpJob = @{ GpPath = $gpPath; DiGrand = $diGrand; Parents = New-Object System.Collections.ArrayList }
+    # Detect printer prefix from grandparent folder name (e.g. "P2S_Puppies" -> prefix "P2S", theme "Puppies")
+    $gpDetectedPrefix = ""; $gpNameForTheme = $gpName
+    if ($gpName -ne "(No Parent Folder)") {
+        $gpParts = $gpName -split '_'
+        if ($gpParts.Count -gt 1 -and $script:PrinterPrefixes -icontains $gpParts[0]) {
+            $gpDetectedPrefix = $gpParts[0]
+            $gpNameForTheme = ($gpParts[1..($gpParts.Count-1)] -join '_')
+        }
+        # Fallback: detect from first anchor file stem if not found in folder name
+        if ($gpDetectedPrefix -eq "") {
+            foreach ($pKey in $parentDict.Keys) {
+                $stemTest = ($parentDict[$pKey]).BaseName -replace '(?i)_Full$', ''
+                $afParts = $stemTest -split '_'
+                if ($afParts.Count -gt 0 -and $script:PrinterPrefixes -icontains $afParts[0]) {
+                    $gpDetectedPrefix = $afParts[0]; break
+                }
+            }
+        }
+    }
+
+    $gpJob = @{ GpPath = $gpPath; DiGrand = $diGrand; Parents = New-Object System.Collections.ArrayList; CbPrefix = $null }
     $script:jobs.Add($gpJob) | Out-Null
 
     $container = New-Object System.Windows.Controls.Border
@@ -1414,10 +1484,34 @@ function Build-GpJob($gpPath, $parentDict) {
     $headerGrid.Background = Get-WpfColor "#2A2C35"; $headerGrid.Height = 60
 
     $headerStack = New-Object System.Windows.Controls.StackPanel; $headerStack.Orientation = "Horizontal"
-    $lblGP = Create-TextBlock "Grandparent Theme: " "#E8A135" 14 "Bold"
-    $lblGP.Margin = New-Object System.Windows.Thickness(15,0,0,0); $headerStack.Children.Add($lblGP) | Out-Null
 
-    $tbTheme = New-Object System.Windows.Controls.TextBox; $tbTheme.Text = $gpName; $tbTheme.Width = 250
+    # Printer prefix dropdown
+    $lblPrefix = Create-TextBlock "Printer: " "#E8A135" 14 "Bold"
+    $lblPrefix.Margin = New-Object System.Windows.Thickness(15,0,0,0); $headerStack.Children.Add($lblPrefix) | Out-Null
+    $cbPrefix = New-Object System.Windows.Controls.ComboBox; $cbPrefix.Width = 85
+    $cbPrefix.Background = Get-WpfColor "#1E2028"; $cbPrefix.Foreground = Get-WpfColor "#E8A135"
+    $cbPrefix.BorderBrush = Get-WpfColor "#5A78C4"; $cbPrefix.BorderThickness = New-Object System.Windows.Thickness(1)
+    $cbPrefix.VerticalAlignment = "Center"; $cbPrefix.Margin = New-Object System.Windows.Thickness(5,0,20,0)
+    $cbPrefix.Resources[[System.Windows.SystemColors]::WindowBrushKey]          = Get-WpfColor "#1E2028"
+    $cbPrefix.Resources[[System.Windows.SystemColors]::WindowTextBrushKey]      = Get-WpfColor "#E8A135"
+    $cbPrefix.Resources[[System.Windows.SystemColors]::HighlightBrushKey]       = Get-WpfColor "#3A3C45"
+    $cbPrefix.Resources[[System.Windows.SystemColors]::HighlightTextBrushKey]   = Get-WpfColor "#FFFFFF"
+    $cbItemStyle = New-Object System.Windows.Style([System.Windows.Controls.ComboBoxItem])
+    $cbItemStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::BackgroundProperty, (Get-WpfColor "#1E2028"))))
+    $cbItemStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::ForegroundProperty, (Get-WpfColor "#E8A135"))))
+    $cbPrefix.ItemContainerStyle = $cbItemStyle
+    [void]$cbPrefix.Items.Add("(none)")
+    foreach ($pfx in $script:PrinterPrefixes) { [void]$cbPrefix.Items.Add($pfx) }
+    if ($gpDetectedPrefix -ne "" -and $script:PrinterPrefixes -icontains $gpDetectedPrefix) {
+        $cbPrefix.SelectedItem = $gpDetectedPrefix
+    } else { $cbPrefix.SelectedIndex = 0 }
+    $headerStack.Children.Add($cbPrefix) | Out-Null; $gpJob.CbPrefix = $cbPrefix
+
+    # Grandparent theme label + textbox
+    $lblGP = Create-TextBlock "Grandparent Theme: " "#E8A135" 14 "Bold"
+    $lblGP.Margin = New-Object System.Windows.Thickness(0,0,0,0); $headerStack.Children.Add($lblGP) | Out-Null
+
+    $tbTheme = New-Object System.Windows.Controls.TextBox; $tbTheme.Text = $gpNameForTheme; $tbTheme.Width = 250
     $tbTheme.Background = Get-WpfColor "#1E2028"; $tbTheme.Foreground = Get-WpfColor "#FFFFFF"
     $tbTheme.VerticalAlignment = "Center"; $tbTheme.Margin = New-Object System.Windows.Thickness(10,0,0,0)
     $headerStack.Children.Add($tbTheme) | Out-Null; $gpJob.TBTheme = $tbTheme
@@ -1426,6 +1520,13 @@ function Build-GpJob($gpPath, $parentDict) {
     $chkSkip.Foreground = Get-WpfColor "#FFFFFF"; $chkSkip.VerticalAlignment = "Center"
     $chkSkip.Margin = New-Object System.Windows.Thickness(15,0,0,0)
     $headerStack.Children.Add($chkSkip) | Out-Null; $gpJob.ChkSkip = $chkSkip
+
+    # Live preview of the full grandparent folder name (Prefix_Theme or just Theme)
+    $lblGpPreview = Create-TextBlock "" "#6B9FD4" 14 "Bold"
+    $lblGpPreview.VerticalAlignment = "Center"; $lblGpPreview.Margin = New-Object System.Windows.Thickness(20,0,0,0)
+    $initGpPreview = if ($gpDetectedPrefix -ne "") { "$gpDetectedPrefix`_$gpNameForTheme" } else { $gpNameForTheme }
+    $lblGpPreview.Text = if ($initGpPreview) { [char]0x2192 + " $initGpPreview" } else { "" }
+    $headerStack.Children.Add($lblGpPreview) | Out-Null; $gpJob.LblGpPreview = $lblGpPreview
 
     $headerGrid.Children.Add($headerStack) | Out-Null
 
@@ -1454,6 +1555,8 @@ function Build-GpJob($gpPath, $parentDict) {
 
     $tbTheme.Tag = $gpJob
     $tbTheme.Add_TextChanged({ foreach ($p in $this.Tag.Parents) { Update-ParentPreview $p $this.Tag } })
+    $cbPrefix.Tag = $gpJob
+    $cbPrefix.Add_SelectionChanged({ foreach ($p in $this.Tag.Parents) { Update-ParentPreview $p $this.Tag } })
     $mainStack.Children.Add($container) | Out-Null
 }
 
