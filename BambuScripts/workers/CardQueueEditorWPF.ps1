@@ -551,7 +551,7 @@ function Refresh-PJob($pJob, $gpJob) {
     $pJob.IsDone = $false; $pJob.IsQueued = $false
 
     $pJob.ChkMerge.IsEnabled = $true; $pJob.ChkSlice.IsEnabled = $true
-    $pJob.ChkExtract.IsEnabled = $true; $pJob.ChkImage.IsEnabled = $true
+    $pJob.ChkExtract.IsEnabled = $true; $pJob.ChkImage.IsEnabled = $true; $pJob.ChkLogs.IsEnabled = $true
     $pJob.ChkMerge.IsChecked = $true; $pJob.ChkSlice.IsChecked = $true
     $pJob.ChkExtract.IsChecked = $true; $pJob.ChkImage.IsChecked = $true
 }
@@ -740,6 +740,7 @@ function Start-NextProcess {
     $doSlice   = $pJob.ChkSlice.IsChecked
     $doExtract = $pJob.ChkExtract.IsChecked
     $doImage   = $pJob.ChkImage.IsChecked
+    $doLogs    = $pJob.ChkLogs.IsChecked
 
     $anchorPath = $pJob.ProcessedAnchorPath
     $nestPath   = Join-Path $dir "$($basePrefix)Nest.3mf"
@@ -752,6 +753,7 @@ function Start-NextProcess {
     $tsvFile    = Join-Path $dir "${tsvBaseName}_Data.tsv"
 
     [void]$sb.AppendLine("`$ErrorActionPreference = 'Continue'")
+    if ($doLogs) { [void]$sb.AppendLine("Start-Transcript -Path `"$dir\Worker_PS_Log.txt`" -Force") }
     [void]$sb.AppendLine("Add-Type -AssemblyName System.IO.Compression.FileSystem")
 
     if ($doMerge) {
@@ -761,7 +763,6 @@ function Start-NextProcess {
         [void]$sb.AppendLine("    if (Test-Path `"$nestPath`") { Remove-Item `"$nestPath`" -Force }")
         [void]$sb.AppendLine("    Rename-Item -Path `"$anchorPath`" -NewName `"$($basePrefix)Nest.3mf`" -Force")
         [void]$sb.AppendLine("    Rename-Item -Path `"$tempOut`"    -NewName `"$($baseName).3mf`"      -Force")
-        [void]$sb.AppendLine("    Get-ChildItem -Path `"$dir`" -Filter `"*MergeReport*.txt`" -ErrorAction SilentlyContinue | ForEach-Object { Remove-Item `$_.FullName -Force -ErrorAction SilentlyContinue }")
         [void]$sb.AppendLine("} else { Write-Host '[ERROR] Merge produced no output.' -ForegroundColor Red; exit 1 }")
         [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value 'ISOLATING FINAL...' -Force")
         [void]$sb.AppendLine("New-Item -ItemType Directory -Path `"$tempIso`" -Force | Out-Null")
@@ -775,7 +776,6 @@ function Start-NextProcess {
         [void]$sb.AppendLine("Start-Sleep -Seconds 3")
         [void]$sb.AppendLine("& `"$scriptDir\Slice_worker.ps1`" -InputPath `"$anchorPath`" -IsolatedPath `"$finalPath`"")
     } elseif ($doExtract -or $doImage) {
-        # No full slice requested, but we need gcode for data extraction — re-slice Final only
         [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value 'RE-SLICING FINAL FOR DATA...' -Force")
         [void]$sb.AppendLine("if (-not (Test-Path `"$finalPath`") -and (Test-Path `"$nestPath`")) {")
         [void]$sb.AppendLine("    `$tmpR = Join-Path `$env:TEMP `"iso_reslice_$([guid]::NewGuid().ToString().Substring(0,8))`"")
@@ -808,11 +808,21 @@ function Start-NextProcess {
         [void]$sb.AppendLine("`$batPath = Join-Path `"$scriptDir`" '..\callers\ReplaceImageNew.bat'")
         [void]$sb.AppendLine("if (Test-Path `$batPath) {")
         [void]$sb.AppendLine("    `$argList = '/c `"`"' + `$batPath + '`" `"' + `"$dir`" + '`"`"'")
-        [void]$sb.AppendLine("    Start-Process -FilePath 'cmd.exe' -ArgumentList `$argList -Wait -WindowStyle Hidden")
+        if ($doLogs) {
+            [void]$sb.AppendLine("    Start-Process -FilePath 'cmd.exe' -ArgumentList `$argList -Wait -WindowStyle Hidden -RedirectStandardOutput `"$dir\ImageGen_Log.txt`" -RedirectStandardError `"$dir\ImageGen_Errors.txt`"")
+        } else {
+            [void]$sb.AppendLine("    Start-Process -FilePath 'cmd.exe' -ArgumentList `$argList -Wait -WindowStyle Hidden")
+        }
         [void]$sb.AppendLine("}")
     }
 
-    [void]$sb.AppendLine("Get-ChildItem -Path `"$dir`" -Filter `"*ProcessLog*.txt`" -ErrorAction SilentlyContinue | Remove-Item -Force")
+    if ($doLogs) {
+        [void]$sb.AppendLine("Stop-Transcript")
+    } else {
+        [void]$sb.AppendLine("Get-ChildItem -Path `"$dir`" -Filter `"*ProcessLog*.txt`" -ErrorAction SilentlyContinue | Remove-Item -Force")
+        [void]$sb.AppendLine("Get-ChildItem -Path `"$dir`" -Filter `"*_Log.txt`" -ErrorAction SilentlyContinue | Remove-Item -Force")
+        [void]$sb.AppendLine("Get-ChildItem -Path `"$dir`" -Filter `"*_Errors.txt`" -ErrorAction SilentlyContinue | Remove-Item -Force")
+    }
     [void]$sb.AppendLine("Remove-Item `"$statusFile`" -Force -ErrorAction SilentlyContinue")
     [void]$sb.AppendLine("Remove-Item `"$($pJob.TempWork)`" -Recurse -Force -ErrorAction SilentlyContinue")
 
@@ -1250,9 +1260,11 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $chkMerge   = New-Object System.Windows.Controls.CheckBox; $chkMerge.Content   = "Merge";                $chkMerge.IsChecked   = $true; $chkMerge.Foreground   = Get-WpfColor "#FFFFFF"; $chkMerge.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
     $chkSlice   = New-Object System.Windows.Controls.CheckBox; $chkSlice.Content   = "Slice / Export Gcode"; $chkSlice.IsChecked   = $true; $chkSlice.Foreground   = Get-WpfColor "#FFFFFF"; $chkSlice.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
     $chkExtract = New-Object System.Windows.Controls.CheckBox; $chkExtract.Content = "Extract Data";         $chkExtract.IsChecked = $true; $chkExtract.Foreground = Get-WpfColor "#FFFFFF"; $chkExtract.Margin = New-Object System.Windows.Thickness(0,0,15,0)
-    $chkImage   = New-Object System.Windows.Controls.CheckBox; $chkImage.Content   = "Generate Image Card";  $chkImage.IsChecked   = $true; $chkImage.Foreground   = Get-WpfColor "#FFFFFF"
+    $chkImage   = New-Object System.Windows.Controls.CheckBox; $chkImage.Content   = "Generate Image Card";  $chkImage.IsChecked   = $true; $chkImage.Foreground   = Get-WpfColor "#FFFFFF"; $chkImage.Margin = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkLogs    = New-Object System.Windows.Controls.CheckBox; $chkLogs.Content    = "Create Logs";          $chkLogs.IsChecked    = $false; $chkLogs.Foreground   = Get-WpfColor "#FFFFFF"
     $tasksRow1.Children.Add($chkMerge) | Out-Null; $tasksRow1.Children.Add($chkSlice) | Out-Null
     $tasksRow1.Children.Add($chkExtract) | Out-Null; $tasksRow1.Children.Add($chkImage) | Out-Null
+    $tasksRow1.Children.Add($chkLogs) | Out-Null
     $tasksOuter.Children.Add($tasksRow1) | Out-Null
 
     $tasksRow2 = New-Object System.Windows.Controls.StackPanel
@@ -1266,10 +1278,10 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $tasksBox.Child = $tasksOuter
     $rightStack.Children.Add($tasksBox) | Out-Null
 
-    $pJob.ChkMerge = $chkMerge; $pJob.ChkSlice = $chkSlice; $pJob.ChkExtract = $chkExtract; $pJob.ChkImage = $chkImage
+    $pJob.ChkMerge = $chkMerge; $pJob.ChkSlice = $chkSlice; $pJob.ChkExtract = $chkExtract; $pJob.ChkImage = $chkImage; $pJob.ChkLogs = $chkLogs
 
     # Checkbox interdependencies
-    $tasksData = @{ Merge = $chkMerge; Slice = $chkSlice; Extract = $chkExtract; Image = $chkImage; PJob = $pJob; GpJob = $gpJob }
+    $tasksData = @{ Merge = $chkMerge; Slice = $chkSlice; Extract = $chkExtract; Image = $chkImage; Logs = $chkLogs; PJob = $pJob; GpJob = $gpJob }
 
     $chkSlice.Tag = $tasksData
     $chkSlice.Add_Checked({ if ($this.IsChecked) { $this.Tag.Extract.IsChecked = $true } })
@@ -1294,15 +1306,15 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnSelAll.Tag = $tasksData
     $btnSelAll.Add_Click({
         $t = $this.Tag
-        $t.Merge.IsEnabled = $true; $t.Slice.IsEnabled = $true; $t.Extract.IsEnabled = $true; $t.Image.IsEnabled = $true
-        $t.Merge.IsChecked = $true; $t.Slice.IsChecked = $true; $t.Extract.IsChecked = $true; $t.Image.IsChecked = $true
+        $t.Merge.IsEnabled = $true; $t.Slice.IsEnabled = $true; $t.Extract.IsEnabled = $true; $t.Image.IsEnabled = $true; $t.Logs.IsEnabled = $true
+        $t.Merge.IsChecked = $true; $t.Slice.IsChecked = $true; $t.Extract.IsChecked = $true; $t.Image.IsChecked = $true; $t.Logs.IsChecked = $true
     })
 
     $btnDeselAll.Tag = $tasksData
     $btnDeselAll.Add_Click({
         $t = $this.Tag
-        $t.Merge.IsEnabled = $true; $t.Slice.IsEnabled = $true; $t.Extract.IsEnabled = $true; $t.Image.IsEnabled = $true
-        $t.Merge.IsChecked = $false; $t.Slice.IsChecked = $false; $t.Extract.IsChecked = $false; $t.Image.IsChecked = $false
+        $t.Merge.IsEnabled = $true; $t.Slice.IsEnabled = $true; $t.Extract.IsEnabled = $true; $t.Image.IsEnabled = $true; $t.Logs.IsEnabled = $true
+        $t.Merge.IsChecked = $false; $t.Slice.IsChecked = $false; $t.Extract.IsChecked = $false; $t.Image.IsChecked = $false; $t.Logs.IsChecked = $false
     })
 
     $btnRevertMerge.Tag = @{ P = $pJob; G = $gpJob }
@@ -1361,8 +1373,29 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $files = Get-ChildItem -Path $parentPath -File -ErrorAction SilentlyContinue | Sort-Object Name
     foreach ($fi in $files) { Add-FileRow $pJob $gpJob $fi }
 
-    # Apply + Revert Done buttons
+    # Apply + Revert + Delete Logs buttons
     $applyRow = New-Object System.Windows.Controls.StackPanel; $applyRow.Orientation = "Horizontal"; $applyRow.HorizontalAlignment = "Right"; $applyRow.Margin = New-Object System.Windows.Thickness(0,15,0,0)
+
+    $btnDeleteLogs = New-Object System.Windows.Controls.Button
+    $btnDeleteLogs.Content = "Delete Logs"; $btnDeleteLogs.Background = Get-WpfColor "#555555"; $btnDeleteLogs.Foreground = Get-WpfColor "#FFFFFF"
+    $btnDeleteLogs.FontWeight = [System.Windows.FontWeights]::Bold; $btnDeleteLogs.Width = 100; $btnDeleteLogs.Height = 35; $btnDeleteLogs.BorderThickness = 0
+    $btnDeleteLogs.Margin = New-Object System.Windows.Thickness(0,0,15,0); $btnDeleteLogs.Cursor = [System.Windows.Input.Cursors]::Hand
+    $applyRow.Children.Add($btnDeleteLogs) | Out-Null
+
+    $btnDeleteLogs.Tag = @{ P = $pJob }
+    $btnDeleteLogs.Add_Click({
+        $t = $this.Tag
+        $logs = Get-ChildItem -Path $t.P.FolderPath -Include "*_Log.txt", "*_Errors.txt", "*ProcessLog*.txt" -Recurse -File -ErrorAction SilentlyContinue
+        if ($logs.Count -gt 0) {
+            $res = [System.Windows.MessageBox]::Show("Found $($logs.Count) log files in this folder. Are you sure you want to delete them?", "Confirm Delete Logs", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
+            if ($res -eq 'Yes') {
+                $logs | Remove-Item -Force -ErrorAction SilentlyContinue
+                [System.Windows.MessageBox]::Show("Logs deleted successfully.", "Logs Cleared", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+            }
+        } else {
+            [System.Windows.MessageBox]::Show("No log files found in this folder.", "No Logs", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        }
+    })
 
     $btnApply = New-Object System.Windows.Controls.Button
     $btnApply.Content = "Add to Queue"; $btnApply.Background = Get-WpfColor "#4CAF72"; $btnApply.Foreground = Get-WpfColor "#FFFFFF"
