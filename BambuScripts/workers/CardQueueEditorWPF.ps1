@@ -499,20 +499,18 @@ function Refresh-PJob($pJob, $gpJob) {
     $diParent = [System.IO.DirectoryInfo]::new($pJob.FolderPath)
     $gpName = if ($gpJob.DiGrand) { $gpJob.DiGrand.Name } else { "" }
     $customPng = Get-ChildItem -Path $pJob.FolderPath -Filter "*.png" -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.Name -notmatch "(?i)_slicePreview\.png" -and
-            $_.Name -notmatch "(?i)^$([regex]::Escape($diParent.Name))\.png$" -and
-            ($gpName -eq "" -or $_.Name -notmatch "(?i)$([regex]::Escape($gpName))\.png$")
-        } | Select-Object -First 1
+        Where-Object { $_.Name -notmatch "(?i)_slicePreview\.png" } | Select-Object -First 1
 
     if ($customPng) {
         $pJob.CustomImagePath = $customPng.FullName
         $pJob.PbPlate.Source = Load-WpfImage $customPng.FullName
+        if ($pJob.BtnBrowseImg) { $pJob.BtnBrowseImg.Background = Get-WpfColor "#4CAF72" }
     } else {
         $pJob.CustomImagePath = $null
         $baseImgPath = Join-Path $pJob.TempWork "Metadata\plate_1.png"
         if (-not (Test-Path $baseImgPath)) { $baseImgPath = Join-Path $pJob.TempWork "Metadata\thumbnail.png" }
         $pJob.PbPlate.Source = Load-WpfImage $baseImgPath
+        if ($pJob.BtnBrowseImg) { $pJob.BtnBrowseImg.Background = Get-WpfColor "#E8A135" }
     }
     $pickPath = $null
     if ($gcodeFile) {
@@ -945,11 +943,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $diParent = [System.IO.DirectoryInfo]::new($parentPath)
     $gpName = if ($gpJob.DiGrand) { $gpJob.DiGrand.Name } else { "" }
     $customPng = Get-ChildItem -Path $parentPath -Filter "*.png" -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.Name -notmatch "(?i)_slicePreview\.png" -and
-            $_.Name -notmatch "(?i)^$([regex]::Escape($diParent.Name))\.png$" -and
-            ($gpName -eq "" -or $_.Name -notmatch "(?i)$([regex]::Escape($gpName))\.png$")
-        } | Select-Object -First 1
+        Where-Object { $_.Name -notmatch "(?i)_slicePreview\.png" } | Select-Object -First 1
 
     if ($customPng) {
         $pJob.CustomImagePath = $customPng.FullName
@@ -1016,6 +1010,35 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $lblSkipTime.HorizontalAlignment = "Left"; $lblSkipTime.VerticalAlignment = "Bottom"
     $lblSkipTime.Margin = New-Object System.Windows.Thickness(10, 0, 0, 10)
     $cardGrid.Children.Add($lblSkipTime) | Out-Null
+    $btnBrowseImg = New-Object System.Windows.Controls.Button
+    $btnBrowseImg.Content = "Browse Images"
+    $btnBrowseImg.Foreground = Get-WpfColor "#FFFFFF"
+    $btnBrowseImg.FontWeight = [System.Windows.FontWeights]::Bold
+    $btnBrowseImg.Width = 110; $btnBrowseImg.Height = 22
+    $btnBrowseImg.BorderThickness = 0; $btnBrowseImg.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnBrowseImg.HorizontalAlignment = "Left"; $btnBrowseImg.VerticalAlignment = "Bottom"
+    $btnBrowseImg.Margin = New-Object System.Windows.Thickness(10, 0, 0, 30)
+
+    if ($pJob.CustomImagePath) { $btnBrowseImg.Background = Get-WpfColor "#4CAF72" }
+    else { $btnBrowseImg.Background = Get-WpfColor "#E8A135" }
+
+    $btnBrowseImg.Tag = $pJob
+    $btnBrowseImg.Add_Click({
+        $job = $this.Tag
+        $dialog = New-Object Microsoft.Win32.OpenFileDialog
+        $dialog.Title = "Select Custom Card Image"
+        $dialog.Filter = "Image Files (*.png;*.jpg;*.jpeg)|*.png;*.jpg;*.jpeg"
+        if ($dialog.ShowDialog() -eq $true) {
+            $srcPath = $dialog.FileName
+            $destPath = Join-Path $job.FolderPath ([System.IO.Path]::GetFileName($srcPath))
+            if ($srcPath -ne $destPath) { Copy-Item -Path $srcPath -Destination $destPath -Force }
+            $job.CustomImagePath = $destPath
+            $job.PbPlate.Source = Load-WpfImage $destPath
+            $this.Background = Get-WpfColor "#4CAF72"
+        }
+    })
+    $cardGrid.Children.Add($btnBrowseImg) | Out-Null
+    $pJob.BtnBrowseImg = $btnBrowseImg
 
     # Color Slots (Protected against malformed hex codes)
     $colorsOverlayStack = New-Object System.Windows.Controls.StackPanel
@@ -1119,13 +1142,14 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     })
     $cardGrid.Add_Drop({
         $files = $_.Data.GetData([System.Windows.DataFormats]::FileDrop)
-        if ($files -and $files.Count -gt 0 -and [System.IO.Path]::GetExtension($files[0]) -imatch '\.png') {
+        if ($files -and $files.Count -gt 0 -and [System.IO.Path]::GetExtension($files) -imatch '\.(png|jpg|jpeg)$') {
             $job = $this.Tag
-            $srcPath = $files[0]
+            $srcPath = $files
             $destPath = Join-Path $job.FolderPath ([System.IO.Path]::GetFileName($srcPath))
-            Copy-Item -Path $srcPath -Destination $destPath -Force
+            if ($srcPath -ne $destPath) { Copy-Item -Path $srcPath -Destination $destPath -Force }
             $job.CustomImagePath = $destPath
             $job.PbPlate.Source = Load-WpfImage $destPath
+            if ($job.BtnBrowseImg) { $job.BtnBrowseImg.Background = Get-WpfColor "#4CAF72" }
         }
         $_.Handled = $true
     })
@@ -1422,11 +1446,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             $diParent = [System.IO.DirectoryInfo]::new($t.P.FolderPath)
             $gpName = if ($t.G.DiGrand) { $t.G.DiGrand.Name } else { "" }
             $customPng = Get-ChildItem -Path $t.P.FolderPath -Filter "*.png" -ErrorAction SilentlyContinue |
-                Where-Object {
-                    $_.Name -notmatch "(?i)_slicePreview\.png" -and
-                    $_.Name -notmatch "(?i)^$([regex]::Escape($diParent.Name))\.png$" -and
-                    ($gpName -eq "" -or $_.Name -notmatch "(?i)$([regex]::Escape($gpName))\.png$")
-                } | Select-Object -First 1
+                Where-Object { $_.Name -notmatch "(?i)_slicePreview\.png" } | Select-Object -First 1
             if ($customPng) {
                 $t.P.CustomImagePath = $customPng.FullName
                 $t.P.PbPlate.Source = Load-WpfImage $customPng.FullName
@@ -1758,11 +1778,9 @@ $btnProcessAll.Add_Click({
 })
 
 $btnBrowse.Add_Click({
-    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dialog.Description = "Select a folder containing Full.3mf files"
-    $dialog.ShowNewFolderButton = $false
-    if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
-    $browsedPath = $dialog.SelectedPath
+    $interop = New-Object System.Windows.Interop.WindowInteropHelper($window)
+    $browsedPath = [ModernFolderPicker]::Pick($interop.Handle, "Select a folder containing Full.3mf files")
+    if (-not $browsedPath) { return }
 
     $lblGlobalTitle.Text = "Scanning selected folder..."
     [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
