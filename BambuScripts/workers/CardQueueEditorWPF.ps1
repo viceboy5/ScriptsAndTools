@@ -517,13 +517,20 @@ function Update-ParentPreview($pJob, $gpJob) {
 
     $hasCollision = $false
     foreach ($r in $pJob.FileRows) {
-        $r.NewLbl.Text = $r.TargetName
+        $r.NewLbl.Inlines.Clear()
+        $sfx     = $r.SuffixBox.Text -replace '[^a-zA-Z0-9]', ''
+        $sfxPart = if ($sfx) { "_${sfx}$($r.Ext)" } else { $r.Ext }
+        $baseLen = $r.TargetName.Length - $sfxPart.Length
+        $basePart = if ($baseLen -gt 0) { $r.TargetName.Substring(0, $baseLen) } else { "" }
         if ($nameCounts[$r.TargetName] -gt 1) {
-            $r.NewLbl.Foreground = Get-WpfColor "#D95F5F"
+            $run = New-Object System.Windows.Documents.Run($r.TargetName); $run.Foreground = Get-WpfColor "#D95F5F"
+            $r.NewLbl.Inlines.Add($run)
             if ($r.OldLbl) { $r.OldLbl.Foreground = Get-WpfColor "#D95F5F" }
             $hasCollision = $true
         } else {
-            $r.NewLbl.Foreground = Get-WpfColor "#4CAF72"
+            $runBase = New-Object System.Windows.Documents.Run($basePart); $runBase.Foreground = Get-WpfColor "#90B8C8"
+            $runSfx  = New-Object System.Windows.Documents.Run($sfxPart);  $runSfx.Foreground  = Get-WpfColor $r.BaseColor
+            $r.NewLbl.Inlines.Add($runBase); $r.NewLbl.Inlines.Add($runSfx)
             if ($r.OldLbl) { $r.OldLbl.Foreground = Get-WpfColor "#6B6E7A" }
         }
     }
@@ -580,7 +587,12 @@ function Add-FileRow($pJob, $gpJob, $fi) {
     $lArr = Create-TextBlock "->" "#A0A0A0" 12 "Normal"
     [System.Windows.Controls.Grid]::SetColumn($lArr, 2); $fGrid.Children.Add($lArr) | Out-Null
 
-    $lNew = Create-TextBlock "" "#4CAF72" 11 "Bold"
+    $newNameColor = if     ($fi.Name -imatch 'Nest\.3mf$')        { "#FF69B4" }  # Pink
+                   elseif ($fi.Name -imatch 'Full\.gcode\.3mf$') { "#4CAF72" }  # Green
+                   elseif ($fi.Name -imatch 'Full\.3mf$')        { "#B57BFF" }  # Purple
+                   elseif ($fi.Name -imatch 'Final\.3mf$')       { "#FFD700" }  # Yellow
+                   else                                           { "#90B8C8" }  # Blue-grey
+    $lNew = Create-TextBlock "" $newNameColor 11 "Bold"
     $lNew.Margin = New-Object System.Windows.Thickness(5,0,5,0)
     $lNew.TextWrapping = "Wrap"
     [System.Windows.Controls.Grid]::SetColumn($lNew, 3); $fGrid.Children.Add($lNew) | Out-Null
@@ -598,7 +610,7 @@ function Add-FileRow($pJob, $gpJob, $fi) {
     $btnDel.BorderThickness = 0; $btnDel.Width = 20; $btnDel.Height = 20; $btnDel.Cursor = [System.Windows.Input.Cursors]::Hand
     [System.Windows.Controls.Grid]::SetColumn($btnDel, 5); $fGrid.Children.Add($btnDel) | Out-Null
 
-    $frObj = [PSCustomObject]@{ OldPath = $fi.FullName; SuffixBox = $sBadge; OldLbl = $lOld; NewLbl = $lNew; Ext = $parsed.Extension; TargetName = "" }
+    $frObj = [PSCustomObject]@{ OldPath = $fi.FullName; SuffixBox = $sBadge; OldLbl = $lOld; NewLbl = $lNew; Ext = $parsed.Extension; TargetName = ""; BaseColor = $newNameColor }
     $pJob.FileRows.Add($frObj) | Out-Null
 
     $sBadge.Tag = @{ P = $pJob; G = $gpJob }
@@ -694,7 +706,7 @@ function Refresh-PJob($pJob, $gpJob) {
 
     # Reload file rows
     $pJob.PnlFiles.Children.Clear(); $pJob.FileRows.Clear()
-    $files = Get-ChildItem -Path $pJob.FolderPath -File -ErrorAction SilentlyContinue | Sort-Object Name
+    $files = Get-ChildItem -Path $pJob.FolderPath -File -ErrorAction SilentlyContinue | Sort-Object { switch -Regex ($_.Name) { 'Final\.3mf$' {0} 'Nest\.3mf$' {1} 'Full\.3mf$' {2} 'Full\.gcode\.3mf$' {3} default {4} } }, Name
     foreach ($fi in $files) { Add-FileRow $pJob $gpJob $fi }
     Update-ParentPreview $pJob $gpJob
 
@@ -774,7 +786,7 @@ function Start-NextProcess {
     $currentAnchorLocation = $pJob.AnchorFile.FullName
     foreach ($r in $pJob.FileRows) {
         if ((Split-Path $r.OldPath -Leaf) -eq $pJob.AnchorFile.Name) {
-            $anchorTargetName = $r.NewLbl.Text; $anchorFileRow = $r; $currentAnchorLocation = $r.OldPath; break
+            $anchorTargetName = $r.TargetName; $anchorFileRow = $r; $currentAnchorLocation = $r.OldPath; break
         }
     }
     if ($anchorTargetName -eq "") { $anchorTargetName = $pJob.AnchorFile.Name }
@@ -806,7 +818,7 @@ function Start-NextProcess {
     # Rename all other files
     foreach ($r in $pJob.FileRows) {
         if ($r.OldPath -eq $pJob.ProcessedAnchorPath) { continue }
-        $targetName = $r.NewLbl.Text
+        $targetName = $r.TargetName
         $newPath = Join-Path $pJob.FolderPath $targetName
         if ($r.OldPath -ne $newPath -and (Test-Path $r.OldPath)) {
             Rename-Item $r.OldPath $targetName -Force; $r.OldPath = $newPath
@@ -1901,7 +1913,7 @@ $script:queueTimer.Add_Tick({
 
             # Reload file rows
             $pJob.PnlFiles.Children.Clear(); $pJob.FileRows.Clear()
-            $files = Get-ChildItem -Path $pJob.FolderPath -File -ErrorAction SilentlyContinue | Sort-Object Name
+            $files = Get-ChildItem -Path $pJob.FolderPath -File -ErrorAction SilentlyContinue | Sort-Object { switch -Regex ($_.Name) { 'Final\.3mf$' {0} 'Nest\.3mf$' {1} 'Full\.3mf$' {2} 'Full\.gcode\.3mf$' {3} default {4} } }, Name
             foreach ($fi in $files) { Add-FileRow $pJob $gpJob $fi }
             Update-ParentPreview $pJob $gpJob
 
