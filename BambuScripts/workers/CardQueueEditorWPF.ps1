@@ -42,49 +42,80 @@ if (Test-Path $colorCsvPath) {
 }
 
 # --- 2. C# CLASSES ---
-Add-Type @'
+Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
-public static class ModernFolderPicker {
+
+public class NativeFolderBrowser {
+    [ComImport, Guid("DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7")]
+    private class FileOpenDialogImpl {}
+
+    [ComImport, Guid("42f85136-db7e-439c-85f1-e4075d135fc8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IFileDialog {
+        [PreserveSig] int Show([In] IntPtr parent);
+        void SetFileTypes([In] uint cFileTypes, [In] IntPtr rgFilterSpec);
+        void SetFileTypeIndex([In] uint iFileType);
+        void GetFileTypeIndex(out uint piFileType);
+        void Advise([In, MarshalAs(UnmanagedType.Interface)] IntPtr pfde, out uint pdwCookie);
+        void Unadvise([In] uint dwCookie);
+        void SetOptions([In] uint fos);
+        void GetOptions(out uint pfos);
+        void SetDefaultFolder([In, MarshalAs(UnmanagedType.Interface)] IntPtr psi);
+        void SetFolder([In, MarshalAs(UnmanagedType.Interface)] IntPtr psi);
+        void GetFolder([MarshalAs(UnmanagedType.Interface)] out IntPtr ppsi);
+        void GetCurrentSelection([MarshalAs(UnmanagedType.Interface)] out IntPtr ppsi);
+        void SetFileName([In, MarshalAs(UnmanagedType.LPWStr)] string pszName);
+        void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string pszName);
+        void SetTitle([In, MarshalAs(UnmanagedType.LPWStr)] string pszTitle);
+        void SetOkButtonLabel([In, MarshalAs(UnmanagedType.LPWStr)] string pszText);
+        void SetFileNameLabel([In, MarshalAs(UnmanagedType.LPWStr)] string pszLabel);
+        void GetResult([MarshalAs(UnmanagedType.Interface)] out IShellItem ppsi);
+        void AddPlace([In, MarshalAs(UnmanagedType.Interface)] IntPtr psi, int fdap);
+        void SetDefaultExtension([In, MarshalAs(UnmanagedType.LPWStr)] string pszDefaultExtension);
+        void Close([MarshalAs(UnmanagedType.Error)] int hr);
+        void SetClientGuid([In] ref Guid guid);
+        void ClearClientData();
+        void SetFilter([MarshalAs(UnmanagedType.Interface)] IntPtr pFilter);
+    }
+
     [ComImport, Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IShellItem {
-        void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
-        void GetParent(out IShellItem ppsi);
-        void GetDisplayName(uint sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
-        void GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
-        void Compare(IShellItem psi, uint hint, out int piOrder);
+        void BindToHandler([In] IntPtr pbc, [In] ref Guid bhid, [In] ref Guid riid, out IntPtr ppv);
+        void GetParent([MarshalAs(UnmanagedType.Interface)] out IShellItem ppsi);
+        void GetDisplayName([In] uint sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
+        void GetAttributes([In] uint sfgaoMask, out uint psfgaoAttribs);
+        void Compare([In, MarshalAs(UnmanagedType.Interface)] IShellItem psi, [In] uint hint, out int piOrder);
     }
-    [ComImport, Guid("D57C7288-D4AD-4768-BE02-9D969532D960"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IFileOpenDialog {
-        [PreserveSig] int Show(IntPtr hwndOwner);
-        void SetOptions(uint fos);
-        void GetOptions(out uint pfos);
-        void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string pszTitle);
-        void GetResult(out IShellItem ppsi);
-    }
-    static readonly Guid CLSID_FileOpenDialog = new Guid("DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7");
-    const uint FOS_PICKFOLDERS = 0x00000020;
-    const uint FOS_FORCEFILESYSTEM = 0x00000040;
-    const uint SIGDN_FILESYSPATH = 0x80058000;
-    public static string Pick(IntPtr owner, string title) {
+
+    public static string ShowDialog(IntPtr ownerHandle, string title) {
         try {
-            Type t = Type.GetTypeFromCLSID(CLSID_FileOpenDialog);
-            object inst = Activator.CreateInstance(t);
-            var dialog = (IFileOpenDialog)inst;
-            try {
-                uint opts; dialog.GetOptions(out opts);
-                dialog.SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
-                if (!string.IsNullOrEmpty(title)) dialog.SetTitle(title);
-                if (dialog.Show(owner) != 0) return null;
-                IShellItem item; dialog.GetResult(out item);
-                string path; item.GetDisplayName(SIGDN_FILESYSPATH, out path);
-                Marshal.ReleaseComObject(item);
-                return path;
-            } finally { Marshal.ReleaseComObject(dialog); }
+            IFileDialog dialog = (IFileDialog)new FileOpenDialogImpl();
+            uint options;
+            dialog.GetOptions(out options);
+
+            // Apply FOS_PICKFOLDERS (0x20) and FOS_FORCEFILESYSTEM (0x40)
+            dialog.SetOptions(options | 0x00000020 | 0x00000040);
+            if (!string.IsNullOrEmpty(title)) dialog.SetTitle(title);
+
+            // Open the dialog tied directly to the WPF Window
+            int hr = dialog.Show(ownerHandle);
+            if (hr != 0) return null; // Cancelled or error
+
+            IShellItem item;
+            dialog.GetResult(out item);
+
+            // Retrieve the file system path (SIGDN_FILESYSPATH = 0x80058000)
+            string path;
+            item.GetDisplayName(0x80058000, out path);
+
+            Marshal.ReleaseComObject(item);
+            Marshal.ReleaseComObject(dialog);
+
+            return path;
         } catch { return null; }
     }
 }
-'@
+"@
 
 try {
     Add-Type -TypeDefinition @'
@@ -277,10 +308,22 @@ foreach ($f in $foundFiles) {
         </Grid.RowDefinitions>
         <Border Background="#1C1D23" Grid.Row="0">
             <Grid>
-                <TextBlock Name="LblGlobalTitle" Text="Loading files into queue..." Foreground="White" FontSize="18" FontWeight="Bold" VerticalAlignment="Center" Margin="15,0,0,0"/>
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,15,0">
-                    <Button Name="BtnCombineData" Content="Combine TSV Data" Background="#E8A135" Foreground="White" FontWeight="Bold" Width="180" Height="40" Margin="0,0,15,0" BorderThickness="0" Cursor="Hand"/>
-                    <Button Name="BtnProcessAll" Content="Add All To Queue" Background="#4CAF72" Foreground="White" FontWeight="Bold" Width="220" Height="40" IsEnabled="False" BorderThickness="0" Cursor="Hand"/>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Column="0" Name="LblGlobalTitle" Text="Loading files into queue..." Foreground="White" FontSize="18" FontWeight="Bold" VerticalAlignment="Center" Margin="15,0,0,0"/>
+
+                <StackPanel Grid.Column="1" HorizontalAlignment="Center" VerticalAlignment="Center" Orientation="Vertical">
+                    <Button Name="BtnBrowse" Content="Browse Files" Background="#5A78C4" Foreground="White" FontWeight="Bold" Width="140" Height="30" BorderThickness="0" Cursor="Hand"/>
+                    <TextBlock Text="Browse or drop files to add" Foreground="#888888" FontSize="10" HorizontalAlignment="Center" Margin="0,4,0,0"/>
+                </StackPanel>
+
+                <StackPanel Grid.Column="2" HorizontalAlignment="Right" VerticalAlignment="Center" Orientation="Horizontal" Margin="0,0,15,0">
+                    <Button Name="BtnCombineData" Content="Combine Data TSVs" Background="#2A2C35" Foreground="White" FontWeight="Bold" Width="140" Height="30" BorderThickness="0" Margin="0,0,10,0" Cursor="Hand" Visibility="Collapsed"/>
+                    <Button Name="BtnProcessAll" Content="Process All Queued" Background="#4CAF72" Foreground="White" FontWeight="Bold" Width="150" Height="30" BorderThickness="0" Cursor="Hand"/>
                 </StackPanel>
             </Grid>
         </Border>
@@ -296,6 +339,7 @@ $window = [System.Windows.Markup.XamlReader]::Load($reader)
 $lblGlobalTitle = $window.FindName("LblGlobalTitle")
 $btnProcessAll  = $window.FindName("BtnProcessAll")
 $btnCombineData = $window.FindName("BtnCombineData")
+$btnBrowse      = $window.FindName("BtnBrowse") # <--- ADD THIS LINE BACK
 $mainStack      = $window.FindName("MainStack")
 
 function Update-GlobalProcessAllStatus {
@@ -1715,61 +1759,63 @@ $script:queueTimer.Add_Tick({
 })
 
 # --- 9. TOP BUTTON HANDLERS ---
-$btnCombineData.Add_Click({
-    $targetDirs = @()
-    foreach ($gpJob in $script:jobs) {
-        if ($gpJob.GpPath -like "ROOT_*") {
-            foreach ($p in $gpJob.Parents) { if (-not $targetDirs.Contains($p.FolderPath)) { $targetDirs += $p.FolderPath } }
+$btnBrowse.Add_Click({
+    # 1. Grab the native Window Handle directly from the global $window object
+    $interop = New-Object System.Windows.Interop.WindowInteropHelper($window)
+    $hwnd = $interop.Handle
+
+    # 2. Call the new NativeFolderBrowser
+    $selectedPath = [NativeFolderBrowser]::ShowDialog($hwnd, "Select a folder containing Full.3mf files")
+
+    # 3. Stop if the user closed the window or clicked Cancel
+    if ([string]::IsNullOrWhiteSpace($selectedPath)) { return }
+
+    $lblGlobalTitle.Text = "Scanning selected folder..."
+    [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
+
+    # 4. Standard scanning & queueing logic
+    $newFound = @(Get-ChildItem -Path $selectedPath -Filter "*Full.3mf" -Recurse -File)
+    if ($newFound.Count -eq 0) {
+        [System.Windows.MessageBox]::Show("No Full.3mf files found in that folder.", "Nothing Found") | Out-Null
+        $lblGlobalTitle.Text = "Queue Dashboard ($($script:jobs.Count) Theme(s) found)"
+        return
+    }
+
+    $newGpQueue = [ordered]@{}
+    foreach ($f in $newFound) {
+        $parentPath = $f.DirectoryName
+        $gp = $f.Directory.Parent
+        $gpPath = if ($gp) { $gp.FullName } else { "ROOT_" + $parentPath }
+
+        # Prevent duplicates
+        $exists = $false
+        foreach ($j in $script:jobs) {
+            foreach ($parentJob in $j.Parents) {
+                if ($parentJob.FolderPath -eq $parentPath) { $exists = $true; break }
+            }
+        }
+        if ($exists) { continue }
+
+        if (-not $newGpQueue.Contains($gpPath)) { $newGpQueue[$gpPath] = [ordered]@{} }
+        if (-not $newGpQueue[$gpPath].Contains($parentPath)) { $newGpQueue[$gpPath][$parentPath] = $f }
+    }
+
+    foreach ($gpPath in $newGpQueue.Keys) {
+        $existingGp = $null
+        foreach ($j in $script:jobs) { if ($j.GpPath -eq $gpPath) { $existingGp = $j; break } }
+
+        if ($existingGp) {
+            foreach ($pKey in $newGpQueue[$gpPath].Keys) {
+                $pJob = Build-PJob $pKey $newGpQueue[$gpPath][$pKey] $existingGp
+                $existingGp.Parents.Add($pJob) | Out-Null
+            }
         } else {
-            if (-not $targetDirs.Contains($gpJob.GpPath)) { $targetDirs += $gpJob.GpPath }
-        }
-    }
-    if ($targetDirs.Count -eq 0) { return }
-
-    $combinedCount = 0
-    $clipboardArray = New-Object System.Collections.ArrayList
-
-    foreach ($targetDir in $targetDirs) {
-        if (-not (Test-Path $targetDir)) { continue }
-        $tsvFiles = Get-ChildItem -Path $targetDir -Filter "*_Data.tsv" -Recurse -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -notmatch "(?i)^.*_Design_Data\.tsv$" }
-        if ($tsvFiles.Count -eq 0) { continue }
-
-        $folderName = Split-Path $targetDir -Leaf
-        $outTsvPath = Join-Path $targetDir "${folderName}_Data.tsv"
-
-        $combined = [ordered]@{}
-        foreach ($tsv in $tsvFiles) {
-            if ($tsv.FullName -eq $outTsvPath) { continue }
-            $line = Get-Content $tsv.FullName -ErrorAction SilentlyContinue | Select-Object -Last 1
-            if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            $key = ($line -split "`t")[0]
-            $combined[$key] = $line
-        }
-        if ($combined.Count -gt 0) {
-            $combined.Values | Set-Content -Path $outTsvPath -Encoding UTF8
-            $combinedCount++
-            foreach ($val in $combined.Values) { [void]$clipboardArray.Add($val) }
+            Build-GpJob $gpPath $newGpQueue[$gpPath]
         }
     }
 
-    if ($clipboardArray.Count -gt 0) {
-        try {
-            $clipboardText = $clipboardArray.ToArray() -join "`r`n"
-            [System.Windows.Clipboard]::SetText($clipboardText)
-            [System.Windows.MessageBox]::Show("Combined TSV data for $combinedCount group(s).`n`n$($clipboardArray.Count) rows copied to clipboard!", "Combine Data Complete", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-        } catch {
-            [System.Windows.MessageBox]::Show("Combined $combinedCount group(s), but clipboard copy failed.", "Partial Success", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
-        }
-    } else {
-        [System.Windows.MessageBox]::Show("No new data found to combine.", "Nothing to Combine", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-    }
-})
-
-$btnProcessAll.Add_Click({
-    foreach ($gpJob in $script:jobs) {
-        foreach ($pJob in $gpJob.Parents) { Enqueue-PJob $pJob $gpJob }
-    }
+    $lblGlobalTitle.Text = "Queue Dashboard ($($script:jobs.Count) Theme(s) found)"
+    if ($script:jobs.Count -gt 0) { Update-GlobalProcessAllStatus }
 })
 
 # --- MAIN WINDOW DRAG & DROP HANDLER ---
