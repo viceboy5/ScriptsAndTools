@@ -1603,16 +1603,20 @@ function Build-GpJob($gpPath, $parentDict) {
     $lblPrefix = Create-TextBlock "Printer: " "#E8A135" 14 "Bold"
     $lblPrefix.Margin = New-Object System.Windows.Thickness(15,0,0,0); $headerStack.Children.Add($lblPrefix) | Out-Null
     $cbPrefix = New-Object System.Windows.Controls.ComboBox; $cbPrefix.Width = 85
-    $cbPrefix.Background = Get-WpfColor "#1E2028"; $cbPrefix.Foreground = Get-WpfColor "#E8A135"
+    $cbPrefix.Background = Get-WpfColor "#2A2C35"; $cbPrefix.Foreground = Get-WpfColor "#FFFFFF"
     $cbPrefix.BorderBrush = Get-WpfColor "#5A78C4"; $cbPrefix.BorderThickness = New-Object System.Windows.Thickness(1)
     $cbPrefix.VerticalAlignment = "Center"; $cbPrefix.Margin = New-Object System.Windows.Thickness(5,0,20,0)
-    $cbPrefix.Resources[[System.Windows.SystemColors]::WindowBrushKey]          = Get-WpfColor "#1E2028"
-    $cbPrefix.Resources[[System.Windows.SystemColors]::WindowTextBrushKey]      = Get-WpfColor "#E8A135"
-    $cbPrefix.Resources[[System.Windows.SystemColors]::HighlightBrushKey]       = Get-WpfColor "#3A3C45"
+
+    # Strip the Windows Light-Grey gradient and force it to use our Background color!
+    $cbPrefix.SetResourceReference([System.Windows.FrameworkElement]::StyleProperty, [System.Windows.Controls.ToolBar]::ComboBoxStyleKey)
+
+    $cbPrefix.Resources[[System.Windows.SystemColors]::WindowBrushKey]          = Get-WpfColor "#2A2C35"
+    $cbPrefix.Resources[[System.Windows.SystemColors]::WindowTextBrushKey]      = Get-WpfColor "#FFFFFF"
+    $cbPrefix.Resources[[System.Windows.SystemColors]::HighlightBrushKey]       = Get-WpfColor "#5A78C4"
     $cbPrefix.Resources[[System.Windows.SystemColors]::HighlightTextBrushKey]   = Get-WpfColor "#FFFFFF"
     $cbItemStyle = New-Object System.Windows.Style([System.Windows.Controls.ComboBoxItem])
-    $cbItemStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::BackgroundProperty, (Get-WpfColor "#1E2028"))))
-    $cbItemStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::ForegroundProperty, (Get-WpfColor "#E8A135"))))
+    $cbItemStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::BackgroundProperty, (Get-WpfColor "#2A2C35"))))
+    $cbItemStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::ForegroundProperty, (Get-WpfColor "#FFFFFF"))))
     $cbPrefix.ItemContainerStyle = $cbItemStyle
     [void]$cbPrefix.Items.Add("(none)")
     foreach ($pfx in $script:PrinterPrefixes) { [void]$cbPrefix.Items.Add($pfx) }
