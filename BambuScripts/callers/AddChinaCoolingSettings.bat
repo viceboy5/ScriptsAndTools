@@ -9,6 +9,6 @@
 :: Both this .bat and patch_3mf.ps1 must stay in the same folder.
 :: ============================================================
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0AddChinaCoolingSettings.ps1" %*
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\AddChinaCoolingSettings.ps1" %*
 
 pause

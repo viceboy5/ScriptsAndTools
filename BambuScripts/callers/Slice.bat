@@ -7,8 +7,7 @@ if "%~1"=="" (
     exit /b 1
 )
 
-set "SCRIPT_DIR=%~dp0"
-set "WORKER=%SCRIPT_DIR%slicer_automation_worker.ps1"
+set "WORKER=%~dp0..\workers\slicer_automation_worker.ps1"
 
 echo --------------------------------------------------
 echo BAMBU STUDIO BATCH SLICER

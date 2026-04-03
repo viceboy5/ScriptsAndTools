@@ -55,7 +55,7 @@ powershell -NoProfile -Command "Add-Type -AssemblyName 'System.IO.Compression.Fi
 
 :: --- Step 2: Isolate Center Object ---
 echo   [2/2] Isolating center object and generating Final.3mf...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0isolate_final_worker.ps1" -WorkDir "!WORK_DIR!" -OutputPath "!FINAL_PATH!"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\isolate_final_worker.ps1" -WorkDir "!WORK_DIR!" -OutputPath "!FINAL_PATH!"
 
 if not exist "!FINAL_PATH!" (
     echo   [!] ERROR: Failed to generate Final.3mf.

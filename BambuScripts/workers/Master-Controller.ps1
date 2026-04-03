@@ -352,7 +352,7 @@ $btnStart.Add_Click({
             Write-Log "`n=== Reverting: $($file.Name) ===" "Orange"
 
             try {
-                $batPath = Join-Path $scriptDir "RevertMerge.bat"
+                $batPath = Join-Path $scriptDir "..\callers\RevertMerge.bat"
                 $command = "& `"$batPath`" `"$($file.FullName)`" *>&1"
 
                 Invoke-Expression $command | ForEach-Object {
@@ -804,7 +804,7 @@ $btnStart.Add_Click({
                 }
             }
 
-            $batchPath = Join-Path $scriptDir "ReplaceImageNew.bat"
+            $batchPath = Join-Path $scriptDir "..\callers\ReplaceImageNew.bat"
             if (Test-Path $batchPath) {
                 Write-Log "-> Found $($generatedPreviews.Count) image(s) to inject across $($targetDirs.Count) folder(s)..." "Cyan"
 
@@ -1218,7 +1218,7 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
             $myBtn.Text = "Reverting..."
             [System.Windows.Forms.Application]::DoEvents()
             try {
-                $batPath = Join-Path $data.ScriptDir "RevertMerge.bat"
+                $batPath = Join-Path $data.ScriptDir "..\callers\RevertMerge.bat"
                 if (Test-Path $batPath) {
                     $env:WORKER_MODE = "1"
                     $proc = Start-Process -FilePath $batPath `
@@ -1280,7 +1280,7 @@ function Show-ResultsWindow($queue, $previews, $scriptDir) {
             $btn.Text = "Reverting..."
             [System.Windows.Forms.Application]::DoEvents()
             try {
-                $batPath = Join-Path $data.ScriptDir "RevertMerge.bat"
+                $batPath = Join-Path $data.ScriptDir "..\callers\RevertMerge.bat"
                 if (Test-Path $batPath) {
                     $env:WORKER_MODE = "1"
                     $proc = Start-Process -FilePath $batPath `

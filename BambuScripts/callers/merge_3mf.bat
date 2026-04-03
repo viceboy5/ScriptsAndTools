@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableDelayedExpansion
 
-set "SCRIPT=%~dp0merge_3mf_worker.ps1"
+set "SCRIPT=%~dp0..\workers\merge_3mf_worker.ps1"
 set "PREP_ERRORS=0"
 set "PREP_PROCESSED=0"
 set "PREP_SKIPPED=0"
@@ -24,7 +24,7 @@ set "SLICELIST=%TEMP%\slice_3mf_list_%RANDOM%.txt"
 :: --- PRE-FLIGHT CLEANUP WORKER ---
 :: We strip the trailing backslash so it doesn't accidentally escape the quote mark!
 set "CLEAN_DIR=!REPORT_DIR:~0,-1!"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0cleanup_old_worker.ps1" -TargetDir "!CLEAN_DIR!"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\cleanup_old_worker.ps1" -TargetDir "!CLEAN_DIR!"
 
 :: Silent Cleanup
 for /d /r "%~dp1" %%d in (temp_3mf_extract) do ( if exist "%%d" rmdir /s /q "%%d" 2>nul )
@@ -184,7 +184,7 @@ if errorlevel 1 ( echo   ERROR: Extract failed. & set /a PREP_ERRORS+=1 & goto c
 
 if "!DO_COLORS!"=="1" (
     echo   Checking/Updating Colors...
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0update_colors_worker.ps1" -WorkDir "!WORK!" -FileName "!INPUTNAME!" -OriginalZip "!INPUT!"
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\update_colors_worker.ps1" -WorkDir "!WORK!" -FileName "!INPUTNAME!" -OriginalZip "!INPUT!"
 )
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" -WorkDir "!WORK!" -InputPath "!INPUT!" -OutputPath "!TEMPOUT!" -ReportPath "nul"
@@ -198,7 +198,7 @@ set "WORK_SINGLE=%TEMP%\single_work_%RANDOM%"
 mkdir "!WORK_SINGLE!" 2>nul
 
 powershell -NoProfile -Command "Add-Type -AssemblyName 'System.IO.Compression.FileSystem'; [System.IO.Compression.ZipFile]::ExtractToDirectory('!INPUTDIR!!NESTNAME!', '!WORK_SINGLE!')" >nul 2>&1
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0isolate_final_worker.ps1" -WorkDir "!WORK_SINGLE!" -OutputPath "!FINAL_PATH!"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\isolate_final_worker.ps1" -WorkDir "!WORK_SINGLE!" -OutputPath "!FINAL_PATH!"
 rmdir /s /q "!WORK_SINGLE!" 2>nul
 
 if not exist "!FINAL_PATH!" echo   [!] WARNING: Final.3mf failed to generate.
@@ -229,7 +229,7 @@ echo [!_SIDX!/!PREP_PROCESSED!] Processing Phase 2: !INPUTNAME!
 
 :: 1. CONDITIONAL SLICING
 if "!DO_SLICE!"=="1" (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0slicer_automation_worker.ps1" -InputPath "!INPUT!" -IsolatedPath "!FINAL_PATH!"
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\slicer_automation_worker.ps1" -InputPath "!INPUT!" -IsolatedPath "!FINAL_PATH!"
     if errorlevel 1 (
         set /a SLICE_ERRORS+=1
         goto :eof
@@ -249,10 +249,10 @@ set "EXTRACT_FLAGS="
 if "!DO_EXTRACT!"=="0" set "EXTRACT_FLAGS=-SkipExtraction"
 
 if exist "!SLICED_FINAL_TEMP!" (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Extract-3MFData.ps1" -InputFile "!SLICED_OUT!" -SingleFile "!SLICED_FINAL_TEMP!" -MasterTsvPath "!MASTER_DATA!" -IndividualTsvPath "!INPUTDIR!!INPUTBASE!_Data.tsv" !GEN_IMAGE_SWITCH! !EXTRACT_FLAGS!
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\Extract-3MFData.ps1" -InputFile "!SLICED_OUT!" -SingleFile "!SLICED_FINAL_TEMP!" -MasterTsvPath "!MASTER_DATA!" -IndividualTsvPath "!INPUTDIR!!INPUTBASE!_Data.tsv" !GEN_IMAGE_SWITCH! !EXTRACT_FLAGS!
     del "!SLICED_FINAL_TEMP!" /q
 ) else (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Extract-3MFData.ps1" -InputFile "!SLICED_OUT!" -MasterTsvPath "!MASTER_DATA!" -IndividualTsvPath "!INPUTDIR!!INPUTBASE!_Data.tsv" !GEN_IMAGE_SWITCH! !EXTRACT_FLAGS!
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\workers\Extract-3MFData.ps1" -InputFile "!SLICED_OUT!" -MasterTsvPath "!MASTER_DATA!" -IndividualTsvPath "!INPUTDIR!!INPUTBASE!_Data.tsv" !GEN_IMAGE_SWITCH! !EXTRACT_FLAGS!
 )
 
 echo   OK --^> Success.
