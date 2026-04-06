@@ -1299,10 +1299,13 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
                     $data.LblNum.Foreground = Get-WpfColor $numColor
                 } catch {}
             }
-            if ($s.Text -eq $data.OrigName) {
-                if ($data.OrigName) { $data.StatusLbl.Text = "[MATCHED]"; $data.StatusLbl.Foreground = Get-WpfColor "#4CAF72" }
-                else { $data.StatusLbl.Text = "[UNMATCHED]"; $data.StatusLbl.Foreground = Get-WpfColor "#D95F5F" }
-            } else { $data.StatusLbl.Text = "[CHANGED]"; $data.StatusLbl.Foreground = Get-WpfColor "#E8A135" }
+            if ($s.Text -eq $data.OrigName -and $data.OrigName) {
+                $data.StatusLbl.Text = "[MATCHED]"; $data.StatusLbl.Foreground = Get-WpfColor "#4CAF72"
+            } elseif ($LibraryColors.Contains($s.Text)) {
+                $data.StatusLbl.Text = "[CHANGED]"; $data.StatusLbl.Foreground = Get-WpfColor "#E8A135"
+            } else {
+                $data.StatusLbl.Text = "[UNMATCHED]"; $data.StatusLbl.Foreground = Get-WpfColor "#D95F5F"
+            }
             Validate-PJob $data.P
         })
         $slotIdx++
