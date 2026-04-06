@@ -426,7 +426,6 @@ foreach ($f in $foundFiles) {
                 </StackPanel>
 
                 <StackPanel Grid.Column="2" HorizontalAlignment="Right" VerticalAlignment="Center" Orientation="Horizontal" Margin="0,0,15,0">
-                    <Button Name="BtnCombineData" Content="Combine Data TSVs" Background="#2A2C35" Foreground="White" FontWeight="Bold" Width="140" Height="30" BorderThickness="0" Margin="0,0,10,0" Cursor="Hand" Visibility="Collapsed"/>
                     <Button Name="BtnProcessAll" Content="Process All Queued" Background="#4CAF72" Foreground="White" FontWeight="Bold" Width="150" Height="30" BorderThickness="0" Cursor="Hand"/>
                 </StackPanel>
             </Grid>
@@ -442,7 +441,6 @@ $window = [System.Windows.Markup.XamlReader]::Load($reader)
 
 $lblGlobalTitle = $window.FindName("LblGlobalTitle")
 $btnProcessAll  = $window.FindName("BtnProcessAll")
-$btnCombineData = $window.FindName("BtnCombineData")
 $btnBrowse      = $window.FindName("BtnBrowse") # <--- ADD THIS LINE BACK
 $mainStack      = $window.FindName("MainStack")
 
@@ -1521,6 +1519,8 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         if ($t.G.Parents.Count -eq 0) {
             $mainStack.Children.Remove($t.G.Container) | Out-Null
             $script:jobs.Remove($t.G) | Out-Null
+        } else {
+            Update-GpFileCount $t.G
         }
     })
     $btnHdrStack.Children.Add($btnRemoveP) | Out-Null
@@ -1762,6 +1762,13 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     return $pJob
 }
 
+function Update-GpFileCount($gpJob) {
+    if ($null -ne $gpJob.LblFileCount) {
+        $c = $gpJob.Parents.Count
+        $gpJob.LblFileCount.Text = "($c plate$(if ($c -ne 1) { 's' }))"
+    }
+}
+
 function Build-GpJob($gpPath, $parentDict) {
     $diGrand = if ($gpPath -notlike "ROOT_*") { [System.IO.DirectoryInfo]::new($gpPath) } else { $null }
     $gpName = if ($diGrand) { $diGrand.Name } else { "(No Parent Folder)" }
@@ -1849,19 +1856,71 @@ function Build-GpJob($gpPath, $parentDict) {
     $lblGpPreview.Text = if ($initGpPreview) { [char]0x2192 + " $initGpPreview" } else { "" }
     $headerStack.Children.Add($lblGpPreview) | Out-Null; $gpJob.LblGpPreview = $lblGpPreview
 
+    $lblFileCount = Create-TextBlock "" "#888888" 11 "Normal"
+    $lblFileCount.VerticalAlignment = "Center"; $lblFileCount.Margin = New-Object System.Windows.Thickness(15,0,0,0)
+    $headerStack.Children.Add($lblFileCount) | Out-Null; $gpJob.LblFileCount = $lblFileCount
+
     $headerGrid.Children.Add($headerStack) | Out-Null
+
+    $gpRightBtnStack = New-Object System.Windows.Controls.StackPanel
+    $gpRightBtnStack.Orientation = "Horizontal"; $gpRightBtnStack.HorizontalAlignment = "Right"
+    $gpRightBtnStack.VerticalAlignment = "Center"; $gpRightBtnStack.Margin = New-Object System.Windows.Thickness(0,0,15,0)
+
+    $btnCombineGp = New-Object System.Windows.Controls.Button
+    $btnCombineGp.Content = "Combine TSV Data"; $btnCombineGp.Background = Get-WpfColor "#7B4FBF"; $btnCombineGp.Foreground = Get-WpfColor "#FFFFFF"
+    $btnCombineGp.FontWeight = [System.Windows.FontWeights]::Bold; $btnCombineGp.Width = 140; $btnCombineGp.Height = 30; $btnCombineGp.BorderThickness = 0
+    $btnCombineGp.Margin = New-Object System.Windows.Thickness(0,0,10,0); $btnCombineGp.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnCombineGp.Tag = $gpJob
+    $btnCombineGp.Add_Click({
+        $gp = $this.Tag
+        $targetDir = $gp.GpPath
+        if ([string]::IsNullOrWhiteSpace($targetDir) -or -not (Test-Path $targetDir)) {
+            [System.Windows.MessageBox]::Show("Grandparent folder path is not valid.", "Combine TSV Data", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            return
+        }
+        $folderName = Split-Path $targetDir -Leaf
+        $outTsvPath = Join-Path $targetDir "${folderName}_Data.tsv"
+        $tsvFiles = Get-ChildItem -Path $targetDir -Filter "*_Data.tsv" -Recurse -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -notmatch "(?i)^.*_Design_Data\.tsv$" }
+        if ($tsvFiles.Count -eq 0) {
+            [System.Windows.MessageBox]::Show("No TSV data files found in:`n$targetDir", "Nothing to Combine", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            return
+        }
+        $combined = [ordered]@{}
+        foreach ($tsv in $tsvFiles) {
+            if ($tsv.FullName -eq $outTsvPath) { continue }
+            $line = Get-Content $tsv.FullName -ErrorAction SilentlyContinue | Select-Object -Last 1
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $key = ($line -split "`t")[0]
+            $combined[$key] = $line
+        }
+        if ($combined.Count -eq 0) {
+            [System.Windows.MessageBox]::Show("No TSV data rows found to combine.", "Nothing to Combine", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            return
+        }
+        $combined.Values | Set-Content -Path $outTsvPath -Encoding UTF8
+        [System.Windows.Clipboard]::SetText($combined.Values -join "`r`n")
+        [System.Windows.MessageBox]::Show(
+            "Combined $($combined.Count) rows into:`n${folderName}_Data.tsv`n`nAll $($combined.Count) rows have been copied to your clipboard.",
+            "Combine Complete",
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Information
+        ) | Out-Null
+    })
+    $gpRightBtnStack.Children.Add($btnCombineGp) | Out-Null
 
     $btnRemoveGp = New-Object System.Windows.Controls.Button
     $btnRemoveGp.Content = "Remove Group"; $btnRemoveGp.Background = Get-WpfColor "#D95F5F"; $btnRemoveGp.Foreground = Get-WpfColor "#FFFFFF"
     $btnRemoveGp.Width = 140; $btnRemoveGp.Height = 30; $btnRemoveGp.BorderThickness = 0
-    $btnRemoveGp.HorizontalAlignment = "Right"; $btnRemoveGp.Margin = New-Object System.Windows.Thickness(0,0,15,0); $btnRemoveGp.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnRemoveGp.Cursor = [System.Windows.Input.Cursors]::Hand
     $btnRemoveGp.Tag = @{ Container = $container; GpJob = $gpJob }
     $btnRemoveGp.Add_Click({
         $t = $this.Tag
         $mainStack.Children.Remove($t.Container) | Out-Null
         $script:jobs.Remove($t.GpJob) | Out-Null
     })
-    $headerGrid.Children.Add($btnRemoveGp) | Out-Null
+    $gpRightBtnStack.Children.Add($btnRemoveGp) | Out-Null
+    $headerGrid.Children.Add($gpRightBtnStack) | Out-Null
     $gpStack.Children.Add($headerGrid) | Out-Null
 
     $parentListStack = New-Object System.Windows.Controls.StackPanel
@@ -1873,6 +1932,7 @@ function Build-GpJob($gpPath, $parentDict) {
         $pJob = Build-PJob $pKey $parentDict[$pKey] $gpJob
         $gpJob.Parents.Add($pJob) | Out-Null
     }
+    Update-GpFileCount $gpJob
 
     $tbTheme.Tag = $gpJob
     $tbTheme.Add_TextChanged({ foreach ($p in $this.Tag.Parents) { Update-ParentPreview $p $this.Tag } })
@@ -2036,6 +2096,7 @@ $btnBrowse.Add_Click({
                 $pJob = Build-PJob $pKey $newGpQueue[$gpPath][$pKey] $existingGp
                 $existingGp.Parents.Add($pJob) | Out-Null
             }
+            Update-GpFileCount $existingGp
         } else {
             Build-GpJob $gpPath $newGpQueue[$gpPath]
         }
@@ -2044,6 +2105,7 @@ $btnBrowse.Add_Click({
     $lblGlobalTitle.Text = "Queue Dashboard ($($script:jobs.Count) Theme(s) found)"
     if ($script:jobs.Count -gt 0) { Update-GlobalProcessAllStatus }
 })
+
 
 # --- MAIN WINDOW DRAG & DROP HANDLER ---
 $window.Add_DragEnter({
