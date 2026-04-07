@@ -1,12 +1,6 @@
 @echo off
 setlocal EnableDelayedExpansion
 
-:: ============================================================
-::  FlattenDesignFolder.bat
-::  Drag one or more Design Folders onto this script.
-::  All files inside sub-folders are moved up to the
-::  Design Folder root.  Empty sub-folders are removed after.
-:: ============================================================
 
 if "%~1"=="" (
     echo.
@@ -18,7 +12,7 @@ if "%~1"=="" (
 )
 
 set "TMPLIST=%TEMP%\flatten_%RANDOM%.txt"
-del "%TMPLIST%" 2>nul
+type nul > "!TMPLIST!"
 
 set /a TOTAL_FILES=0
 set /a TOTAL_CONFLICTS=0
@@ -29,9 +23,6 @@ echo ============================================================
 echo  Scanning folders...
 echo ============================================================
 
-:: ============================================================
-::  PASS 1 - Scan, count files, list conflicts
-:: ============================================================
 :scan_next
 if "%~1"=="" goto scan_done
 
@@ -45,8 +36,7 @@ if not exist "!D!\" (
 )
 
 set /a FOLDER_COUNT+=1
-echo !D!>> "!TMPLIST!"
-
+echo !D!>>"!TMPLIST!"
 echo.
 echo  [!FOLDER_COUNT!] !D!
 
@@ -54,7 +44,7 @@ set /a F=0
 set /a C=0
 
 for /d %%S in ("!D!\*") do (
-    for /r "%%S" %%X in (*) do (
+    for /f "delims=" %%X in ('dir /a-d /s /b "%%S" 2^>nul') do (
         set /a F+=1
         set /a TOTAL_FILES+=1
         if exist "!D!\%%~nxX" (
@@ -68,7 +58,8 @@ for /d %%S in ("!D!\*") do (
 if !F!==0 (
     echo      Nothing to do - no files found in sub-folders.
 ) else (
-    echo      !F! file(s) to move, !C! conflict(s)
+    rem FIXED: Escaped the parentheses so they don't break the else block
+    echo      !F! file^(s^) to move, !C! conflict^(s^)
 )
 
 goto scan_next
@@ -82,7 +73,6 @@ echo ============================================================
 echo  Summary: !FOLDER_COUNT! folder(s)  ^|  !TOTAL_FILES! file(s) to move  ^|  !TOTAL_CONFLICTS! conflict(s) ^(will be skipped^)
 echo ============================================================
 echo.
-
 if !TOTAL_FILES!==0 (
     echo  Nothing to move. Exiting.
     del "!TMPLIST!" 2>nul
@@ -101,9 +91,6 @@ if /i not "!YN!"=="Y" (
     exit /b
 )
 
-:: ============================================================
-::  PASS 2 - Move files and remove empty sub-folders
-:: ============================================================
 echo.
 echo ============================================================
 echo  Moving files...
@@ -123,7 +110,7 @@ for /f "usebackq delims=" %%L in ("!TMPLIST!") do (
     set /a SKIPPED=0
 
     for /d %%S in ("!D!\*") do (
-        for /r "%%S" %%X in (*) do (
+        for /f "delims=" %%X in ('dir /a-d /s /b "%%S" 2^>nul') do (
             if exist "!D!\%%~nxX" (
                 echo      SKIPPED: %%~nxX
                 set /a SKIPPED+=1
@@ -137,7 +124,9 @@ for /f "usebackq delims=" %%L in ("!TMPLIST!") do (
         )
     )
 
-    for /d /r "!D!" %%E in (*) do rd "%%E" 2>nul && echo      Removed folder: %%~nxE
+    for /f "delims=" %%E in ('dir /ad /s /b "!D!" 2^>nul ^| sort /r') do (
+        rd "%%E" 2>nul && echo      Removed empty folder: %%~nxE
+    )
 
     echo      Done - !MOVED! moved, !SKIPPED! skipped.
 )
