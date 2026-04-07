@@ -380,6 +380,8 @@ $script:activeProcess = $null
 $script:activeProcessJob = $null
 $gpQueue = [ordered]@{}
 $script:PrinterPrefixes = @('P2S', 'X1C', 'H2S')
+$script:GpThemes   = @('Fantasy','Puppies','Original','Ocean','Farm','Foodz','StarsAndStripes','Spring','Prehistoric','Halloween 2025','Christmas 2025')
+$script:AdjPresets = @('Common','RARE','EPIC','LEGENDARY','Default')
 
 # Check for files passed by the VBScript, otherwise launch empty
 $foundFiles = @()
@@ -481,7 +483,7 @@ function Validate-PJob($pJob) {
 function Update-ParentPreview($pJob, $gpJob) {
     $ch = $pJob.TBChar.Text -replace '[^a-zA-Z0-9]', ''
     $ad = $pJob.TBAdj.Text -replace '[^a-zA-Z0-9]', ''
-    $th = $gpJob.TBTheme.Text -replace '[^a-zA-Z0-9]', ''
+    $th = ("$($gpJob.TBTheme.SelectedItem)" -replace '[^a-zA-Z0-9]', '')
     $pf = ""
     if ($null -ne $gpJob.CbPrefix -and $null -ne $gpJob.CbPrefix.SelectedItem) {
         $pf = $gpJob.CbPrefix.SelectedItem.ToString()
@@ -736,6 +738,40 @@ function Enqueue-PJob($pJob, $gpJob) {
     if ($pJob.IsQueued -or $pJob.IsDone -or $pJob.HasCollision) { return }
     foreach ($slot in $pJob.UISlots) { if ($slot.StatusLbl.Text -eq "[UNMATCHED]") { return } }
 
+    # First plate queued for this grandparent: confirm rename if needed, then lock UI
+    if (-not $gpJob.GpRenameConfirmed) {
+        if (-not $gpJob.ChkSkip.IsChecked) {
+            $th = ("$($gpJob.TBTheme.SelectedItem)" -replace '[^a-zA-Z0-9]', '')
+            $pf = if ($null -ne $gpJob.CbPrefix -and "$($gpJob.CbPrefix.SelectedItem)" -ne "(none)") { "$($gpJob.CbPrefix.SelectedItem)" } else { "" }
+            $newGpFolderName = if ($pf) { "${pf}_${th}" } else { $th }
+            $currentLeaf = if ($gpJob.DiGrand) { Split-Path $gpJob.GpPath -Leaf } else { "" }
+
+            if ($newGpFolderName -ne '' -and $currentLeaf -ne '' -and $newGpFolderName -ne $currentLeaf) {
+                # Strip printer prefix to get the bare theme part of the current folder name
+                $currentThemePart = $currentLeaf
+                foreach ($pfx in $script:PrinterPrefixes) {
+                    if ($currentLeaf -imatch "^${pfx}_") { $currentThemePart = $currentLeaf.Substring($pfx.Length + 1); break }
+                }
+                $currentThemeClean = $currentThemePart -replace '[^a-zA-Z0-9]', ''
+                $alreadyKnown = [bool]($script:GpThemes | Where-Object { ($_ -replace '[^a-zA-Z0-9]','') -ieq $currentThemeClean })
+
+                if (-not $alreadyKnown) {
+                    $res = [System.Windows.MessageBox]::Show(
+                        "Are you sure you want to rename:`n`n    $currentLeaf`n    -> $newGpFolderName",
+                        "Confirm Folder Rename",
+                        [System.Windows.MessageBoxButton]::YesNo,
+                        [System.Windows.MessageBoxImage]::Question
+                    )
+                    if ($res -ne 'Yes') { return }
+                }
+            }
+        }
+        $gpJob.GpRenameConfirmed = $true
+        if ($null -ne $gpJob.TBTheme)  { $gpJob.TBTheme.IsEnabled  = $false }
+        if ($null -ne $gpJob.CbPrefix) { $gpJob.CbPrefix.IsEnabled = $false }
+        if ($null -ne $gpJob.ChkSkip)  { $gpJob.ChkSkip.IsEnabled  = $false }
+    }
+
     $pJob.IsQueued = $true
     $pJob.BtnApply.Content = "Queued..."; $pJob.BtnApply.Background = Get-WpfColor "#E8A135"
     $pJob.RowPanel.IsEnabled = $false
@@ -753,7 +789,7 @@ function Start-NextProcess {
     $script:activeProcessJob = $jobWrapper
     $pJob.BtnApply.Content = "Processing..."; $pJob.IsQueued = $false
 
-    $th = $gpJob.TBTheme.Text -replace '[^a-zA-Z0-9]', ''
+    $th = ("$($gpJob.TBTheme.SelectedItem)" -replace '[^a-zA-Z0-9]', '')
     $pf = ""
     if ($null -ne $gpJob.CbPrefix -and $null -ne $gpJob.CbPrefix.SelectedItem) {
         $pf = $gpJob.CbPrefix.SelectedItem.ToString()
@@ -1651,9 +1687,23 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
     $adjStack = New-Object System.Windows.Controls.StackPanel
     $adjStack.Children.Add((Create-TextBlock "Adjective (Optional)" "#A0A0A0" 12 "Normal")) | Out-Null
-    $tbAdj = New-Object System.Windows.Controls.TextBox; $tbAdj.Text = $fills.Adj; $tbAdj.Width = 200; $tbAdj.Background = Get-WpfColor "#1E2028"; $tbAdj.Foreground = Get-WpfColor "#FFFFFF"
-    $adjStack.Children.Add($tbAdj) | Out-Null; $editStack.Children.Add($adjStack) | Out-Null
-    $pJob.TBAdj = $tbAdj
+    $cbAdj = New-Object System.Windows.Controls.ComboBox; $cbAdj.IsEditable = $true; $cbAdj.Width = 200
+    $cbAdj.Background = Get-WpfColor "#1E2028"; $cbAdj.Foreground = Get-WpfColor "#FFFFFF"
+    $cbAdj.BorderBrush = Get-WpfColor "#5A78C4"; $cbAdj.BorderThickness = New-Object System.Windows.Thickness(1)
+    $cbAdj.SetResourceReference([System.Windows.FrameworkElement]::StyleProperty, [System.Windows.Controls.ToolBar]::ComboBoxStyleKey)
+    $cbAdj.Resources[[System.Windows.SystemColors]::WindowBrushKey]        = Get-WpfColor "#1E2028"
+    $cbAdj.Resources[[System.Windows.SystemColors]::WindowTextBrushKey]    = Get-WpfColor "#FFFFFF"
+    $cbAdj.Resources[[System.Windows.SystemColors]::HighlightBrushKey]     = Get-WpfColor "#5A78C4"
+    $cbAdj.Resources[[System.Windows.SystemColors]::HighlightTextBrushKey] = Get-WpfColor "#FFFFFF"
+    $cbAdjItemStyle = New-Object System.Windows.Style([System.Windows.Controls.ComboBoxItem])
+    $cbAdjItemStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::BackgroundProperty, (Get-WpfColor "#1E2028"))))
+    $cbAdjItemStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::ForegroundProperty, (Get-WpfColor "#FFFFFF"))))
+    $cbAdj.ItemContainerStyle = $cbAdjItemStyle
+    [void]$cbAdj.Items.Add("")
+    foreach ($adj in $script:AdjPresets) { [void]$cbAdj.Items.Add($adj) }
+    $cbAdj.Text = $fills.Adj
+    $adjStack.Children.Add($cbAdj) | Out-Null; $editStack.Children.Add($adjStack) | Out-Null
+    $pJob.TBAdj = $cbAdj
     $editBox.Child = $editStack; $rightStack.Children.Add($editBox) | Out-Null
 
     # Files list
@@ -1758,7 +1808,8 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     })
 
     $tbChar.Tag = @{ P = $pJob; G = $gpJob }; $tbChar.Add_TextChanged({ $t = $this.Tag; Update-ParentPreview $t.P $t.G })
-    $tbAdj.Tag = @{ P = $pJob; G = $gpJob };  $tbAdj.Add_TextChanged({ $t = $this.Tag; Update-ParentPreview $t.P $t.G })
+    $cbAdj.Tag = @{ P = $pJob; G = $gpJob }
+    $cbAdj.AddHandler([System.Windows.Controls.Primitives.TextBoxBase]::TextChangedEvent, [System.Windows.Controls.TextChangedEventHandler]{ param($s,$e); $t = $s.Tag; Update-ParentPreview $t.P $t.G })
 
     Update-ParentPreview $pJob $gpJob
     $gpJob.ParentListStack.Children.Add($pBorder) | Out-Null
@@ -1796,7 +1847,7 @@ function Build-GpJob($gpPath, $parentDict) {
         }
     }
 
-    $gpJob = @{ GpPath = $gpPath; DiGrand = $diGrand; Parents = New-Object System.Collections.ArrayList; CbPrefix = $null }
+    $gpJob = @{ GpPath = $gpPath; DiGrand = $diGrand; Parents = New-Object System.Collections.ArrayList; CbPrefix = $null; GpRenameConfirmed = $false }
     $script:jobs.Add($gpJob) | Out-Null
 
     $container = New-Object System.Windows.Controls.Border
@@ -1812,9 +1863,14 @@ function Build-GpJob($gpPath, $parentDict) {
 
     $headerStack = New-Object System.Windows.Controls.StackPanel; $headerStack.Orientation = "Horizontal"
 
+    # Current folder name (far left)
+    $lblCurrentName = Create-TextBlock $gpName "#CCCCCC" 13 "Bold"
+    $lblCurrentName.VerticalAlignment = "Center"; $lblCurrentName.Margin = New-Object System.Windows.Thickness(15,0,20,0)
+    $headerStack.Children.Add($lblCurrentName) | Out-Null
+
     # Printer prefix dropdown
     $lblPrefix = Create-TextBlock "Printer: " "#E8A135" 14 "Bold"
-    $lblPrefix.Margin = New-Object System.Windows.Thickness(15,0,0,0); $headerStack.Children.Add($lblPrefix) | Out-Null
+    $lblPrefix.Margin = New-Object System.Windows.Thickness(0,0,0,0); $headerStack.Children.Add($lblPrefix) | Out-Null
     $cbPrefix = New-Object System.Windows.Controls.ComboBox; $cbPrefix.Width = 85
     $cbPrefix.Background = Get-WpfColor "#2A2C35"; $cbPrefix.Foreground = Get-WpfColor "#FFFFFF"
     $cbPrefix.BorderBrush = Get-WpfColor "#5A78C4"; $cbPrefix.BorderThickness = New-Object System.Windows.Thickness(1)
@@ -1838,14 +1894,27 @@ function Build-GpJob($gpPath, $parentDict) {
     } else { $cbPrefix.SelectedIndex = 0 }
     $headerStack.Children.Add($cbPrefix) | Out-Null; $gpJob.CbPrefix = $cbPrefix
 
-    # Grandparent theme label + textbox
-    $lblGP = Create-TextBlock "Grandparent Theme: " "#E8A135" 14 "Bold"
+    # Grandparent theme label + dropdown
+    $lblGP = Create-TextBlock "Theme: " "#E8A135" 14 "Bold"
     $lblGP.Margin = New-Object System.Windows.Thickness(0,0,0,0); $headerStack.Children.Add($lblGP) | Out-Null
 
-    $tbTheme = New-Object System.Windows.Controls.TextBox; $tbTheme.Text = $gpNameForTheme; $tbTheme.Width = 250
-    $tbTheme.Background = Get-WpfColor "#1E2028"; $tbTheme.Foreground = Get-WpfColor "#FFFFFF"
-    $tbTheme.VerticalAlignment = "Center"; $tbTheme.Margin = New-Object System.Windows.Thickness(10,0,0,0)
-    $headerStack.Children.Add($tbTheme) | Out-Null; $gpJob.TBTheme = $tbTheme
+    $cbTheme = New-Object System.Windows.Controls.ComboBox; $cbTheme.Width = 175
+    $cbTheme.Background = Get-WpfColor "#1E2028"; $cbTheme.Foreground = Get-WpfColor "#FFFFFF"
+    $cbTheme.BorderBrush = Get-WpfColor "#5A78C4"; $cbTheme.BorderThickness = New-Object System.Windows.Thickness(1)
+    $cbTheme.VerticalAlignment = "Center"; $cbTheme.Margin = New-Object System.Windows.Thickness(10,0,0,0)
+    $cbTheme.SetResourceReference([System.Windows.FrameworkElement]::StyleProperty, [System.Windows.Controls.ToolBar]::ComboBoxStyleKey)
+    $cbTheme.Resources[[System.Windows.SystemColors]::WindowBrushKey]        = Get-WpfColor "#1E2028"
+    $cbTheme.Resources[[System.Windows.SystemColors]::WindowTextBrushKey]    = Get-WpfColor "#FFFFFF"
+    $cbTheme.Resources[[System.Windows.SystemColors]::HighlightBrushKey]     = Get-WpfColor "#5A78C4"
+    $cbTheme.Resources[[System.Windows.SystemColors]::HighlightTextBrushKey] = Get-WpfColor "#FFFFFF"
+    $cbThemeItemStyle = New-Object System.Windows.Style([System.Windows.Controls.ComboBoxItem])
+    $cbThemeItemStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::BackgroundProperty, (Get-WpfColor "#1E2028"))))
+    $cbThemeItemStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::ForegroundProperty, (Get-WpfColor "#FFFFFF"))))
+    $cbTheme.ItemContainerStyle = $cbThemeItemStyle
+    foreach ($theme in $script:GpThemes) { [void]$cbTheme.Items.Add($theme) }
+    $matchedTheme = $script:GpThemes | Where-Object { ($_ -replace '[^a-zA-Z0-9]','') -ieq ($gpNameForTheme -replace '[^a-zA-Z0-9]','') } | Select-Object -First 1
+    if ($matchedTheme) { $cbTheme.SelectedItem = $matchedTheme } else { $cbTheme.SelectedIndex = -1 }
+    $headerStack.Children.Add($cbTheme) | Out-Null; $gpJob.TBTheme = $cbTheme
 
     $chkSkip = New-Object System.Windows.Controls.CheckBox; $chkSkip.Content = "Don't rename folder"
     $chkSkip.Foreground = Get-WpfColor "#FFFFFF"; $chkSkip.VerticalAlignment = "Center"
@@ -1937,8 +2006,8 @@ function Build-GpJob($gpPath, $parentDict) {
     }
     Update-GpFileCount $gpJob
 
-    $tbTheme.Tag = $gpJob
-    $tbTheme.Add_TextChanged({ foreach ($p in $this.Tag.Parents) { Update-ParentPreview $p $this.Tag } })
+    $cbTheme.Tag = $gpJob
+    $cbTheme.Add_SelectionChanged({ foreach ($p in $this.Tag.Parents) { Update-ParentPreview $p $this.Tag } })
     $cbPrefix.Tag = $gpJob
     $cbPrefix.Add_SelectionChanged({ foreach ($p in $this.Tag.Parents) { Update-ParentPreview $p $this.Tag } })
     $mainStack.Children.Add($container) | Out-Null
