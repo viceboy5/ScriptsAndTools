@@ -631,107 +631,38 @@ function Add-FileRow($pJob, $gpJob, $fi) {
 }
 
 function Refresh-PJob($pJob, $gpJob) {
-    # Reset state
-    $pJob.ProcessedAnchorPath = ""
-    $newAnchor = Get-ChildItem -Path $pJob.FolderPath -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '(?i)Full\.3mf$' -and $_.Name -notmatch '(?i)\.gcode\.3mf$' } | Select-Object -First 1
-    if ($newAnchor) { $pJob.AnchorFile = $newAnchor }
+    $folderPath = $pJob.FolderPath
 
-    # Re-extract temp work
+    # Record position so we can reinsert at the same slot
+    $idx = $gpJob.ParentListStack.Children.IndexOf($pJob.RowPanel)
+
+    # Clean up old temp work
     if (Test-Path $pJob.TempWork) { Remove-Item $pJob.TempWork -Recurse -Force -ErrorAction SilentlyContinue }
-    try { [System.IO.Compression.ZipFile]::ExtractToDirectory($pJob.AnchorFile.FullName, $pJob.TempWork) } catch {}
 
-    # Update folder label
-    if ($pJob.LblFolder) { $pJob.LblFolder.Text = "Folder: $(Split-Path $pJob.FolderPath -Leaf)" }
+    # Tear down old UI row and data entry
+    $gpJob.ParentListStack.Children.Remove($pJob.RowPanel) | Out-Null
+    $gpJob.Parents.Remove($pJob) | Out-Null
 
-    $gcodeFile = Get-ChildItem -Path $pJob.FolderPath -Filter "*Full.gcode.3mf" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    # Find the current Full.3mf in the folder
+    $newAnchor = Get-ChildItem -Path $folderPath -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '(?i)Full\.3mf$' -and $_.Name -notmatch '(?i)\.gcode\.3mf$' } |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $newAnchor) { Update-GpFileCount $gpJob; return }
 
-    $gcodeFile = Get-ChildItem -Path $pJob.FolderPath -Filter "*Full.gcode.3mf" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    # Rebuild from scratch — re-parses slots, SmartFill, full card UI
+    $newPJob = Build-PJob $folderPath $newAnchor $gpJob
 
-    # Reload CURRENT thumbnail (Strictly from gcode)
-    if ($gcodeFile) {
-        try {
-            $zip = [System.IO.Compression.ZipFile]::OpenRead($gcodeFile.FullName)
-            $entry = $zip.Entries | Where-Object { ($_.FullName -replace "\\","/") -match "(?i)Metadata/(plate_1|thumbnail)\.png$" } | Select-Object -First 1
-            if ($entry) {
-                $extractedGcodePlate = Join-Path $pJob.TempWork "plate_1_gcode.png"
-                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $extractedGcodePlate, $true)
-                $pJob.PbCurrent.Source = Load-WpfImage $extractedGcodePlate
-                if ($pJob.CurrentThumb) { $pJob.CurrentThumb.Visibility = "Visible" }
-            } else { if ($pJob.CurrentThumb) { $pJob.CurrentThumb.Visibility = "Collapsed" } }
-        } catch { if ($pJob.CurrentThumb) { $pJob.CurrentThumb.Visibility = "Collapsed" } }
-        finally { if ($null -ne $zip) { $zip.Dispose() } }
-    } else { if ($pJob.CurrentThumb) { $pJob.CurrentThumb.Visibility = "Collapsed" } }
-
-    # Reload Main Image (Custom PNG or Anchor 3MF)
-    $diParent = [System.IO.DirectoryInfo]::new($pJob.FolderPath)
-    $gpName = if ($gpJob.DiGrand) { $gpJob.DiGrand.Name } else { "" }
-    $customPng = Get-ChildItem -Path $pJob.FolderPath -Filter "*.png" -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -notmatch "(?i)_slicePreview\.png" } | Select-Object -First 1
-
-    if ($customPng) {
-        $pJob.CustomImagePath = $customPng.FullName
-        $pJob.PbPlate.Source = Load-WpfImage $customPng.FullName
-        if ($pJob.BtnBrowseImg) { $pJob.BtnBrowseImg.Background = Get-WpfColor "#4CAF72" }
+    # Reinsert at the original position
+    $lastIdx = $gpJob.ParentListStack.Children.Count - 1
+    if ($idx -ge 0 -and $idx -lt $lastIdx) {
+        $gpJob.ParentListStack.Children.Remove($newPJob.RowPanel) | Out-Null
+        $gpJob.ParentListStack.Children.Insert($idx, $newPJob.RowPanel) | Out-Null
+        $gpJob.Parents.Insert($idx, $newPJob) | Out-Null
     } else {
-        $pJob.CustomImagePath = $null
-        $baseImgPath = Join-Path $pJob.TempWork "Metadata\plate_1.png"
-        if (-not (Test-Path $baseImgPath)) { $baseImgPath = Join-Path $pJob.TempWork "Metadata\thumbnail.png" }
-        $pJob.PbPlate.Source = Load-WpfImage $baseImgPath
-        if ($pJob.BtnBrowseImg) { $pJob.BtnBrowseImg.Background = Get-WpfColor "#E8A135" }
-    }
-    $pickPath = $null
-    if ($gcodeFile) {
-        try {
-            $zip = [System.IO.Compression.ZipFile]::OpenRead($gcodeFile.FullName)
-            $pickEntry = $zip.Entries | Where-Object { ($_.FullName -replace "\\","/") -match "(?i)(^|/)pick_1\.png$" } | Select-Object -First 1
-            if ($pickEntry) {
-                $rawPickPath = Join-Path $pJob.TempWork "pick_1_raw.png"
-                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($pickEntry, $rawPickPath, $true)
-                $pickPath = Join-Path $pJob.TempWork "pick_1.png"
-                Invoke-RandomizePickColors $rawPickPath $pickPath | Out-Null
-                if (-not (Test-Path $pickPath)) { $pickPath = $rawPickPath }
-            }
-        } catch {} finally { if ($null -ne $zip) { $zip.Dispose() } }
-    }
-    if ($pickPath) { $pJob.PbPick.Source = Load-WpfImage $pickPath }
-
-    # Reset overlays
-    $nestExists = Get-ChildItem -Path $pJob.FolderPath -Filter "*Nest.3mf" -File -ErrorAction SilentlyContinue | Select-Object -First 1
-    $amberBrush = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220,232,161,53))
-    $pJob.ProcessingOverlay.BorderBrush = $amberBrush
-    $pJob.ProcessingOverlay.Background  = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(30,232,161,53))
-    $pJob.CardStatusLabel.Text          = "[ PROCESSING ]"
-    $pJob.CardStatusLabel.Foreground    = $amberBrush
-    $pJob.ProcessingOverlay.Visibility  = "Collapsed"
-    $pJob.PickProcessingOverlay.Visibility = "Collapsed"
-    if ($pJob.FinishedOverlay) { $pJob.FinishedOverlay.Visibility = "Collapsed" }
-    if ($pJob.MergeBanner) { $pJob.MergeBanner.Visibility = if ($nestExists) { "Visible" } else { "Collapsed" } }
-    if ($pJob.ChkMerge) {
-        if ($nestExists) {
-            $pJob.ChkMerge.IsChecked = $false; $pJob.ChkMerge.IsEnabled = $false; $pJob.ChkMerge.Foreground = Get-WpfColor "#555555"
-            $pJob.ChkMerge.ToolTip = "Remove Nest.3mf or Revert Merge before merging again"
-        } else {
-            $pJob.ChkMerge.IsEnabled = $true; $pJob.ChkMerge.Foreground = Get-WpfColor "#FFFFFF"; $pJob.ChkMerge.ToolTip = $null
-        }
+        $gpJob.Parents.Add($newPJob) | Out-Null
     }
 
-    # Reload file rows
-    $pJob.PnlFiles.Children.Clear(); $pJob.FileRows.Clear()
-    $files = Get-ChildItem -Path $pJob.FolderPath -File -ErrorAction SilentlyContinue | Sort-Object { switch -Regex ($_.Name) { 'Final\.3mf$' {0} 'Nest\.3mf$' {1} 'Full\.3mf$' {2} 'Full\.gcode\.3mf$' {3} default {4} } }, Name
-    foreach ($fi in $files) { Add-FileRow $pJob $gpJob $fi }
-    Update-ParentPreview $pJob $gpJob
-
-    # Reset UI state
-    $pJob.BtnApply.Content = "Add to Queue"; $pJob.BtnApply.Background = Get-WpfColor "#4CAF72"; $pJob.BtnApply.IsEnabled = $true; $pJob.BtnApply.Width = 150
-    if ($pJob.BtnRevertDone) { $pJob.BtnRevertDone.Visibility = "Collapsed" }
-    $pJob.RowPanel.IsEnabled = $true
-    $pJob.IsDone = $false; $pJob.IsQueued = $false
-
-    $pJob.ChkMerge.IsEnabled = $true; $pJob.ChkSlice.IsEnabled = $true
-    $pJob.ChkExtract.IsEnabled = $true; $pJob.ChkImage.IsEnabled = $true; $pJob.ChkLogs.IsEnabled = $true
-    $pJob.ChkMerge.IsChecked = $true; $pJob.ChkSlice.IsChecked = $true
-    $pJob.ChkExtract.IsChecked = $true; $pJob.ChkImage.IsChecked = $true
+    Update-GpFileCount $gpJob
 }
 
 function Enqueue-PJob($pJob, $gpJob) {
@@ -824,6 +755,24 @@ function Start-NextProcess {
         if ($modified) {
             [System.IO.File]::WriteAllText($file.FullName, $content, (New-Object System.Text.UTF8Encoding($false)))
             $modifiedFiles.Add($file) | Out-Null
+        }
+    }
+
+    # Patch color changes into the source Full.3mf before any renaming or merging
+    if ($modifiedFiles.Count -gt 0) {
+        $srcPath = $pJob.AnchorFile.FullName
+        if (Test-Path -LiteralPath $srcPath) {
+            try {
+                $srcZip = [System.IO.Compression.ZipFile]::Open($srcPath, 'Update')
+                foreach ($mf in $modifiedFiles) {
+                    $rel = $mf.FullName.Substring($pJob.TempWork.Length).TrimStart('\','/').Replace('\','/')
+                    $e = $srcZip.GetEntry($rel)
+                    if ($e) { $e.Delete() }
+                    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($srcZip, $mf.FullName, $rel) | Out-Null
+                }
+                $srcZip.Dispose()
+            } catch {}
+            [System.GC]::Collect(); [System.GC]::WaitForPendingFinalizers()
         }
     }
 
