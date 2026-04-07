@@ -1539,7 +1539,14 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $tasksRow2.Orientation = "Horizontal"; $tasksRow2.Margin = New-Object System.Windows.Thickness(0,8,0,0)
     $btnSelAll = New-Object System.Windows.Controls.Button; $btnSelAll.Content = "Select All"; $btnSelAll.Background = Get-WpfColor "#2A2C35"; $btnSelAll.Foreground = Get-WpfColor "#FFFFFF"; $btnSelAll.Width = 100; $btnSelAll.Height = 25; $btnSelAll.BorderThickness = 0; $btnSelAll.Margin = New-Object System.Windows.Thickness(0,0,10,0); $btnSelAll.Cursor = [System.Windows.Input.Cursors]::Hand
     $btnDeselAll = New-Object System.Windows.Controls.Button; $btnDeselAll.Content = "Deselect All"; $btnDeselAll.Background = Get-WpfColor "#2A2C35"; $btnDeselAll.Foreground = Get-WpfColor "#FFFFFF"; $btnDeselAll.Width = 100; $btnDeselAll.Height = 25; $btnDeselAll.BorderThickness = 0; $btnDeselAll.Margin = New-Object System.Windows.Thickness(0,0,10,0); $btnDeselAll.Cursor = [System.Windows.Input.Cursors]::Hand
-    $btnRevertMerge = New-Object System.Windows.Controls.Button; $btnRevertMerge.Content = "Revert Merge"; $btnRevertMerge.Background = Get-WpfColor "#D95F5F"; $btnRevertMerge.Foreground = Get-WpfColor "#FFFFFF"; $btnRevertMerge.Width = 110; $btnRevertMerge.Height = 25; $btnRevertMerge.BorderThickness = 0; $btnRevertMerge.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnRevertMerge = New-Object System.Windows.Controls.Button; $btnRevertMerge.Content = "Revert Merge"; $btnRevertMerge.Width = 110; $btnRevertMerge.Height = 25; $btnRevertMerge.BorderThickness = 0; $btnRevertMerge.Cursor = [System.Windows.Input.Cursors]::Hand
+    if ($nestExists) {
+        $btnRevertMerge.Background = Get-WpfColor "#D95F5F"; $btnRevertMerge.Foreground = Get-WpfColor "#FFFFFF"; $btnRevertMerge.IsEnabled = $true
+    } else {
+        $btnRevertMerge.Background = Get-WpfColor "#3A3A3A"; $btnRevertMerge.Foreground = Get-WpfColor "#666666"; $btnRevertMerge.IsEnabled = $false
+        $btnRevertMerge.ToolTip = "No merged file detected"
+    }
+    $pJob.BtnRevertMerge = $btnRevertMerge
     $tasksRow2.Children.Add($btnSelAll) | Out-Null; $tasksRow2.Children.Add($btnDeselAll) | Out-Null; $tasksRow2.Children.Add($btnRevertMerge) | Out-Null
     $tasksOuter.Children.Add($tasksRow2) | Out-Null
 
