@@ -284,8 +284,8 @@ function ParseFile([string]$filename) {
 }
 
 function SmartFill([string]$anchorName, [string]$gpName) {
-    $stem = $anchorName -replace '(?i)\.gcode\.3mf$|\.3mf$', ''
-    $stem = $stem -replace '(?i)_Full$', ''
+    $stem = $anchorName -replace '(?i)\.gcode\.3mf$|\.3mf$|\.stl$|\.png$', ''
+    $stem = $stem -replace '(?i)_(Full|Final|Nest)$', ''
 
     # Strip printer prefix from gpName so we match against the bare theme token
     # e.g. gpName "P2S_Puppies" -> cleanGpName "Puppies"
@@ -378,26 +378,51 @@ $script:jobs = New-Object System.Collections.ArrayList
 $script:processQueue = New-Object System.Collections.Queue
 $script:activeProcess = $null
 $script:activeProcessJob = $null
-$gpQueue = [ordered]@{}
 $script:PrinterPrefixes = @('P2S', 'X1C', 'H2S')
 $script:GpThemes   = @('Fantasy','Puppies','Original','Ocean','Farm','Foodz','StarsAndStripes','Spring','Prehistoric','Halloween 2025','Christmas 2025')
 $script:AdjPresets = @('Common','RARE','EPIC','LEGENDARY','Default')
 
-# Check for files passed by the VBScript, otherwise launch empty
-$foundFiles = @()
-if ($args.Count -gt 0) {
-    foreach ($p in $args) {
-        if (Test-Path $p -PathType Container) { $foundFiles += Get-ChildItem -Path $p -Filter "*Full.3mf" -Recurse -File }
-        elseif ($p -match '(?i)Full\.3mf$') { $foundFiles += Get-Item $p }
-    }
+function Find-AnchorFile($folderPath) {
+    $files = Get-ChildItem -Path $folderPath -File -ErrorAction SilentlyContinue
+    $f = $files | Where-Object { $_.Name -match '(?i)Full\.3mf$'  -and $_.Name -notmatch '(?i)\.gcode\.3mf$' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($f) { return $f }
+    $f = $files | Where-Object { $_.Name -match '(?i)Final\.3mf$' -and $_.Name -notmatch '(?i)\.gcode\.3mf$' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($f) { return $f }
+    $f = $files | Where-Object { $_.Extension -imatch '\.3mf$'    -and $_.Name -notmatch '(?i)\.gcode\.3mf$' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($f) { return $f }
+    $f = $files | Where-Object { $_.Extension -imatch '\.stl$' }                                               | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($f) { return $f }
+    $f = $files | Where-Object { $_.Extension -imatch '\.png$'    -and $_.Name -notmatch '(?i)_slicePreview\.png$' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    return $f
 }
 
-foreach ($f in $foundFiles) {
-    $parentPath = $f.DirectoryName
-    $gp = $f.Directory.Parent
-    $gpPath = if ($gp) { $gp.FullName } else { "ROOT_" + $parentPath }
-    if (-not $gpQueue.Contains($gpPath)) { $gpQueue[$gpPath] = [ordered]@{} }
-    if (-not $gpQueue[$gpPath].Contains($parentPath)) { $gpQueue[$gpPath][$parentPath] = $f }
+function Get-AnchorQueue($paths) {
+    $queue = [ordered]@{}
+    foreach ($p in $paths) {
+        if (Test-Path $p -PathType Container) {
+            $relevantDirs = @($p) + @(Get-ChildItem -Path $p -Directory -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+            foreach ($dir in $relevantDirs) {
+                $anchor = Find-AnchorFile $dir
+                if ($anchor) {
+                    $gp = [System.IO.DirectoryInfo]::new($dir).Parent
+                    $gpPath = if ($gp) { $gp.FullName } else { "ROOT_" + $dir }
+                    if (-not $queue.Contains($gpPath)) { $queue[$gpPath] = [ordered]@{} }
+                    if (-not $queue[$gpPath].Contains($dir)) { $queue[$gpPath][$dir] = $anchor }
+                }
+            }
+        } elseif ($p -match '(?i)\.(3mf|stl|png)$' -and $p -notmatch '(?i)\.gcode\.3mf$' -and $p -notmatch '(?i)_slicePreview\.png$') {
+            $f = Get-Item $p -ErrorAction SilentlyContinue
+            if ($f) {
+                $gp = $f.Directory.Parent
+                $gpPath = if ($gp) { $gp.FullName } else { "ROOT_" + $f.DirectoryName }
+                if (-not $queue.Contains($gpPath)) { $queue[$gpPath] = [ordered]@{} }
+                if (-not $queue[$gpPath].Contains($f.DirectoryName)) { $queue[$gpPath][$f.DirectoryName] = $f }
+            }
+        }
+    }
+    return $queue
+}
+
+# Check for files passed by the VBScript, otherwise launch empty
+$gpQueue = [ordered]@{}
+if ($args.Count -gt 0) {
+    $gpQueue = Get-AnchorQueue $args
 }
 
 # --- 5. THE XAML LAYOUT ---
@@ -428,7 +453,7 @@ foreach ($f in $foundFiles) {
                 </StackPanel>
 
                 <StackPanel Grid.Column="2" HorizontalAlignment="Right" VerticalAlignment="Center" Orientation="Horizontal" Margin="0,0,15,0">
-                    <Button Name="BtnProcessAll" Content="Process All Queued" Background="#4CAF72" Foreground="White" FontWeight="Bold" Width="150" Height="30" BorderThickness="0" Cursor="Hand"/>
+                    <Button Name="BtnProcessAll" Content="Process All Tasks" Background="#4CAF72" Foreground="White" FontWeight="Bold" Width="150" Height="30" BorderThickness="0" Cursor="Hand"/>
                 </StackPanel>
             </Grid>
         </Border>
@@ -643,10 +668,7 @@ function Refresh-PJob($pJob, $gpJob) {
     $gpJob.ParentListStack.Children.Remove($pJob.RowPanel) | Out-Null
     $gpJob.Parents.Remove($pJob) | Out-Null
 
-    # Find the current Full.3mf in the folder
-    $newAnchor = Get-ChildItem -Path $folderPath -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '(?i)Full\.3mf$' -and $_.Name -notmatch '(?i)\.gcode\.3mf$' } |
-        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    $newAnchor = Find-AnchorFile $folderPath
     if (-not $newAnchor) { Update-GpFileCount $gpJob; return }
 
     # Rebuild from scratch — re-parses slots, SmartFill, full card UI
@@ -758,8 +780,17 @@ function Start-NextProcess {
         }
     }
 
-    # Patch color changes into the source Full.3mf before any renaming or merging
-    if ($modifiedFiles.Count -gt 0) {
+    $doRename  = [bool]$pJob.ChkRename.IsChecked
+    $doMerge   = [bool]$pJob.ChkMerge.IsChecked
+    $doSlice   = [bool]$pJob.ChkSlice.IsChecked
+    $doExtract = [bool]$pJob.ChkExtract.IsChecked
+    $doImage   = [bool]$pJob.ChkImage.IsChecked
+    $doLogs    = [bool]$pJob.ChkLogs.IsChecked
+
+    $anchorIsZip3mf = $pJob.AnchorFile.Extension -imatch '\.3mf$' -and $pJob.AnchorFile.Name -notmatch '(?i)\.gcode\.3mf$'
+
+    # Patch color changes into the source 3MF before any renaming or merging
+    if ($modifiedFiles.Count -gt 0 -and $anchorIsZip3mf) {
         $srcPath = $pJob.AnchorFile.FullName
         if (Test-Path -LiteralPath $srcPath) {
             try {
@@ -776,25 +807,29 @@ function Start-NextProcess {
         }
     }
 
-    # Rename anchor file
-    $anchorTargetName = ""; $anchorFileRow = $null
-    $currentAnchorLocation = $pJob.AnchorFile.FullName
-    foreach ($r in $pJob.FileRows) {
-        if ((Split-Path $r.OldPath -Leaf) -eq $pJob.AnchorFile.Name) {
-            $anchorTargetName = $r.TargetName; $anchorFileRow = $r; $currentAnchorLocation = $r.OldPath; break
+    $newFilePath = $pJob.AnchorFile.FullName
+
+    if ($doRename) {
+        # Rename anchor file
+        $anchorTargetName = ""; $anchorFileRow = $null
+        $currentAnchorLocation = $pJob.AnchorFile.FullName
+        foreach ($r in $pJob.FileRows) {
+            if ((Split-Path $r.OldPath -Leaf) -eq $pJob.AnchorFile.Name) {
+                $anchorTargetName = $r.TargetName; $anchorFileRow = $r; $currentAnchorLocation = $r.OldPath; break
+            }
         }
-    }
-    if ($anchorTargetName -eq "") { $anchorTargetName = $pJob.AnchorFile.Name }
-    $newFilePath = Join-Path $pJob.FolderPath $anchorTargetName
+        if ($anchorTargetName -eq "") { $anchorTargetName = $pJob.AnchorFile.Name }
+        $newFilePath = Join-Path $pJob.FolderPath $anchorTargetName
 
-    if ($currentAnchorLocation -ne $newFilePath) {
-        if (Test-Path $newFilePath) { Remove-Item $newFilePath -Force -ErrorAction SilentlyContinue }
-        try { Rename-Item $currentAnchorLocation $anchorTargetName -Force } catch {}
+        if ($currentAnchorLocation -ne $newFilePath) {
+            if (Test-Path $newFilePath) { Remove-Item $newFilePath -Force -ErrorAction SilentlyContinue }
+            try { Rename-Item $currentAnchorLocation $anchorTargetName -Force } catch {}
+        }
+        if ($null -ne $anchorFileRow) { $anchorFileRow.OldPath = $newFilePath }
     }
-    if ($null -ne $anchorFileRow) { $anchorFileRow.OldPath = $newFilePath }
 
-    # Inject color changes back into the zip
-    if ($modifiedFiles.Count -gt 0) {
+    # Inject color changes back into the zip (after rename so path is correct)
+    if ($modifiedFiles.Count -gt 0 -and $anchorIsZip3mf) {
         $zip = [System.IO.Compression.ZipFile]::Open($newFilePath, 'Update')
         foreach ($file in $modifiedFiles) {
             $rel = $file.FullName.Substring($pJob.TempWork.Length).TrimStart('\','/').Replace('\','/')
@@ -808,73 +843,89 @@ function Start-NextProcess {
 
     $pJob.ProcessedAnchorPath = $newFilePath
     [System.GC]::Collect()
-    Start-Sleep -Milliseconds 100
 
-    # Rename all other files
-    foreach ($r in $pJob.FileRows) {
-        if ($r.OldPath -eq $pJob.ProcessedAnchorPath) { continue }
-        $targetName = $r.TargetName
-        $newPath = Join-Path $pJob.FolderPath $targetName
-        if ($r.OldPath -ne $newPath -and (Test-Path $r.OldPath)) {
-            Rename-Item $r.OldPath $targetName -Force; $r.OldPath = $newPath
+    if ($doRename) {
+        Start-Sleep -Milliseconds 100
+
+        # Rename all other files
+        foreach ($r in $pJob.FileRows) {
+            if ($r.OldPath -eq $pJob.ProcessedAnchorPath) { continue }
+            $targetName = $r.TargetName
+            $newPath = Join-Path $pJob.FolderPath $targetName
+            if ($r.OldPath -ne $newPath -and (Test-Path $r.OldPath)) {
+                Rename-Item $r.OldPath $targetName -Force; $r.OldPath = $newPath
+            }
+        }
+
+        # Rename parent folder
+        $cleanChar = $pJob.TBChar.Text -replace '[^a-zA-Z0-9]', ''
+        $cleanAdj  = $pJob.TBAdj.Text  -replace '[^a-zA-Z0-9]', ''
+        $pParts = New-Object System.Collections.ArrayList
+        if ($pf)        { $pParts.Add($pf)         | Out-Null }
+        if ($cleanChar) { $pParts.Add($cleanChar)  | Out-Null }
+        if ($cleanAdj)  { $pParts.Add($cleanAdj)   | Out-Null }
+        if ($th)        { $pParts.Add($th)          | Out-Null }
+        $newParentName = $pParts.ToArray() -join '_'
+
+        $oldFolder = $pJob.FolderPath
+        if ($newParentName -ne '' -and $newParentName -ne (Split-Path $oldFolder -Leaf)) {
+            $newFolder = Join-Path (Split-Path $oldFolder -Parent) $newParentName
+            try {
+                Rename-Item $oldFolder $newParentName -Force -ErrorAction Stop
+                $pJob.FolderPath = $newFolder
+                $pJob.ProcessedAnchorPath = $pJob.ProcessedAnchorPath.Replace($oldFolder, $newFolder)
+                if ($pJob.CustomImagePath) { $pJob.CustomImagePath = $pJob.CustomImagePath.Replace($oldFolder, $newFolder) }
+                foreach ($r in $pJob.FileRows) { $r.OldPath = $r.OldPath.Replace($oldFolder, $newFolder) }
+            } catch {}
+        }
+
+        # Rename grandparent folder and propagate to ALL jobs
+        $newGpFolderName = if ($pf) { "${pf}_${th}" } else { $th }
+        if (-not $gpJob.ChkSkip.IsChecked -and $newGpFolderName -ne '' -and $oldGrand -ne '' -and $newGpFolderName -ne (Split-Path $oldGrand -Leaf)) {
+            $newGrand = Join-Path (Split-Path $oldGrand -Parent) $newGpFolderName
+            try {
+                Rename-Item $oldGrand $newGpFolderName -Force -ErrorAction Stop
+                $gpJob.GpPath = $newGrand; $gpJob.DiGrand = [System.IO.DirectoryInfo]::new($newGrand)
+                foreach ($p in $gpJob.Parents) {
+                    $p.FolderPath = $p.FolderPath.Replace($oldGrand, $newGrand)
+                    if ($p.ProcessedAnchorPath) { $p.ProcessedAnchorPath = $p.ProcessedAnchorPath.Replace($oldGrand, $newGrand) }
+                    if ($p.CustomImagePath) { $p.CustomImagePath = $p.CustomImagePath.Replace($oldGrand, $newGrand) }
+                    foreach ($fr in $p.FileRows) { $fr.OldPath = $fr.OldPath.Replace($oldGrand, $newGrand) }
+                }
+                foreach ($otherGp in $script:jobs) {
+                    if ($otherGp -ne $gpJob -and $otherGp.GpPath.StartsWith($oldGrand)) {
+                        $otherGp.GpPath = $otherGp.GpPath.Replace($oldGrand, $newGrand)
+                        $otherGp.DiGrand = [System.IO.DirectoryInfo]::new($otherGp.GpPath)
+                        foreach ($otherP in $otherGp.Parents) {
+                            $otherP.FolderPath = $otherP.FolderPath.Replace($oldGrand, $newGrand)
+                            if ($otherP.ProcessedAnchorPath) { $otherP.ProcessedAnchorPath = $otherP.ProcessedAnchorPath.Replace($oldGrand, $newGrand) }
+                            foreach ($fr in $otherP.FileRows) { $fr.OldPath = $fr.OldPath.Replace($oldGrand, $newGrand) }
+                        }
+                    }
+                }
+            } catch {}
         }
     }
 
-    # Rename parent folder
-    $cleanChar = $pJob.TBChar.Text -replace '[^a-zA-Z0-9]', ''
-    $cleanAdj  = $pJob.TBAdj.Text  -replace '[^a-zA-Z0-9]', ''
-    $pParts = New-Object System.Collections.ArrayList
-    if ($pf)        { $pParts.Add($pf)         | Out-Null }
-    if ($cleanChar) { $pParts.Add($cleanChar)  | Out-Null }
-    if ($cleanAdj)  { $pParts.Add($cleanAdj)   | Out-Null }
-    if ($th)        { $pParts.Add($th)          | Out-Null }
-    $newParentName = $pParts.ToArray() -join '_'
-
-    $oldFolder = $pJob.FolderPath
-    if ($newParentName -ne '' -and $newParentName -ne (Split-Path $oldFolder -Leaf)) {
-        $newFolder = Join-Path (Split-Path $oldFolder -Parent) $newParentName
-        try {
-            Rename-Item $oldFolder $newParentName -Force -ErrorAction Stop
-            $pJob.FolderPath = $newFolder
-            $pJob.ProcessedAnchorPath = $pJob.ProcessedAnchorPath.Replace($oldFolder, $newFolder)
-            if ($pJob.CustomImagePath) { $pJob.CustomImagePath = $pJob.CustomImagePath.Replace($oldFolder, $newFolder) }
-            foreach ($r in $pJob.FileRows) { $r.OldPath = $r.OldPath.Replace($oldFolder, $newFolder) }
-        } catch {}
+    # If rename-only (no heavy tasks), complete immediately without launching worker
+    if (-not ($doMerge -or $doSlice -or $doExtract -or $doImage)) {
+        $pJob.ProcessingOverlay.Visibility = "Collapsed"; $pJob.PickProcessingOverlay.Visibility = "Collapsed"
+        $pJob.RowPanel.IsEnabled = $true; $pJob.IsDone = $true
+        $pJob.BtnApply.Content = "Done"; $pJob.BtnApply.Background = Get-WpfColor "#4CAF72"
+        $pJob.BtnApply.IsEnabled = $true; $pJob.BtnApply.Width = 100
+        $pJob.PnlFiles.Children.Clear(); $pJob.FileRows.Clear()
+        $files = Get-ChildItem -Path $pJob.FolderPath -File -ErrorAction SilentlyContinue | Sort-Object { switch -Regex ($_.Name) { 'Final\.3mf$' {0} 'Nest\.3mf$' {1} 'Full\.3mf$' {2} 'Full\.gcode\.3mf$' {3} default {4} } }, Name
+        foreach ($fi in $files) { Add-FileRow $pJob $gpJob $fi }
+        Update-ParentPreview $pJob $gpJob
+        if (Test-Path $pJob.TempWork) { Remove-Item $pJob.TempWork -Recurse -Force -ErrorAction SilentlyContinue }
+        $script:activeProcessJob = $null
+        if ($script:processQueue.Count -gt 0) { Start-NextProcess }
+        return
     }
 
-    # Rename grandparent folder and propagate to ALL jobs
-    $newGpFolderName = if ($pf) { "${pf}_${th}" } else { $th }
-    if (-not $gpJob.ChkSkip.IsChecked -and $newGpFolderName -ne '' -and $oldGrand -ne '' -and $newGpFolderName -ne (Split-Path $oldGrand -Leaf)) {
-        $newGrand = Join-Path (Split-Path $oldGrand -Parent) $newGpFolderName
-        try {
-            Rename-Item $oldGrand $newGpFolderName -Force -ErrorAction Stop
-            $gpJob.GpPath = $newGrand; $gpJob.DiGrand = [System.IO.DirectoryInfo]::new($newGrand)
-            foreach ($p in $gpJob.Parents) {
-                $p.FolderPath = $p.FolderPath.Replace($oldGrand, $newGrand)
-                if ($p.ProcessedAnchorPath) { $p.ProcessedAnchorPath = $p.ProcessedAnchorPath.Replace($oldGrand, $newGrand) }
-                if ($p.CustomImagePath) { $p.CustomImagePath = $p.CustomImagePath.Replace($oldGrand, $newGrand) }
-                foreach ($fr in $p.FileRows) { $fr.OldPath = $fr.OldPath.Replace($oldGrand, $newGrand) }
-            }
-            # Propagate to all OTHER grandparent jobs that share this root path
-            foreach ($otherGp in $script:jobs) {
-                if ($otherGp -ne $gpJob -and $otherGp.GpPath.StartsWith($oldGrand)) {
-                    $otherGp.GpPath = $otherGp.GpPath.Replace($oldGrand, $newGrand)
-                    $otherGp.DiGrand = [System.IO.DirectoryInfo]::new($otherGp.GpPath)
-                    foreach ($otherP in $otherGp.Parents) {
-                        $otherP.FolderPath = $otherP.FolderPath.Replace($oldGrand, $newGrand)
-                        if ($otherP.ProcessedAnchorPath) { $otherP.ProcessedAnchorPath = $otherP.ProcessedAnchorPath.Replace($oldGrand, $newGrand) }
-                        foreach ($fr in $otherP.FileRows) { $fr.OldPath = $fr.OldPath.Replace($oldGrand, $newGrand) }
-                    }
-                }
-            }
-        } catch {}
-    }
-
-    # Anchor recovery scan
+    # Anchor recovery scan (only needed when launching the worker)
     if (-not (Test-Path -LiteralPath $pJob.ProcessedAnchorPath)) {
-        $recoveredAnchor = Get-ChildItem -Path $pJob.FolderPath -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '(?i)Full\.3mf$' -and $_.Name -notmatch '(?i)\.gcode\.3mf$' } |
-            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        $recoveredAnchor = Find-AnchorFile $pJob.FolderPath
         if ($null -ne $recoveredAnchor) {
             $pJob.ProcessedAnchorPath = $recoveredAnchor.FullName
         } else {
@@ -896,12 +947,6 @@ function Start-NextProcess {
     $dir        = $pJob.FolderPath
     $statusFile = Join-Path $dir "AsyncWorker_Status.txt"
     $basePrefix = if ($baseName.ToLower().EndsWith("full")) { $baseName.Substring(0, $baseName.Length - 4) } else { $baseName + "_" }
-
-    $doMerge   = $pJob.ChkMerge.IsChecked
-    $doSlice   = $pJob.ChkSlice.IsChecked
-    $doExtract = $pJob.ChkExtract.IsChecked
-    $doImage   = $pJob.ChkImage.IsChecked
-    $doLogs    = $pJob.ChkLogs.IsChecked
 
     $anchorPath = $pJob.ProcessedAnchorPath
     $nestPath   = Join-Path $dir "$($basePrefix)Nest.3mf"
@@ -995,57 +1040,63 @@ function Start-NextProcess {
 function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $tempWork = Join-Path $env:TEMP ("LiveCard_" + [guid]::NewGuid().ToString().Substring(0,8))
     New-Item -ItemType Directory -Path $tempWork | Out-Null
-    [System.IO.Compression.ZipFile]::ExtractToDirectory($anchorFile.FullName, $tempWork)
+
+    $isZip3mf = $anchorFile.Extension -imatch '\.3mf$' -and $anchorFile.Name -notmatch '(?i)\.gcode\.3mf$'
+    if ($isZip3mf) {
+        try { [System.IO.Compression.ZipFile]::ExtractToDirectory($anchorFile.FullName, $tempWork) } catch {}
+    }
 
     $activeSlots = New-Object System.Collections.ArrayList
-    $projPath   = Join-Path $tempWork "Metadata\project_settings.config"
-    $modSetPath = Join-Path $tempWork "Metadata\model_settings.config"
 
-    $SlotMap = [ordered]@{}; $UsedSlots = New-Object System.Collections.Generic.HashSet[string]
-    $UsedSlots.Add("1") | Out-Null
+    if ($isZip3mf) {
+        $projPath   = Join-Path $tempWork "Metadata\project_settings.config"
+        $modSetPath = Join-Path $tempWork "Metadata\model_settings.config"
 
-    if (Test-Path $projPath) {
-        $projContent = [System.IO.File]::ReadAllText($projPath, [System.Text.Encoding]::UTF8)
-        if ($projContent -match '(?is)"filament_colou?r"\s*:\s*\[(.*?)\]') {
-            $hexMatches = [regex]::Matches($matches[1], '#[0-9a-fA-F]{6,8}')
-            $si = 1
-            foreach ($m in $hexMatches) {
-                $hk = $m.Value.ToUpper()
-                if (-not $SlotMap.Contains($hk)) { $SlotMap[$hk] = $si.ToString() }
-                $si++
+        $SlotMap = [ordered]@{}; $UsedSlots = New-Object System.Collections.Generic.HashSet[string]
+        $UsedSlots.Add("1") | Out-Null
+
+        if (Test-Path $projPath) {
+            $projContent = [System.IO.File]::ReadAllText($projPath, [System.Text.Encoding]::UTF8)
+            if ($projContent -match '(?is)"filament_colou?r"\s*:\s*\[(.*?)\]') {
+                $hexMatches = [regex]::Matches($matches[1], '#[0-9a-fA-F]{6,8}')
+                $si = 1
+                foreach ($m in $hexMatches) {
+                    $hk = $m.Value.ToUpper()
+                    if (-not $SlotMap.Contains($hk)) { $SlotMap[$hk] = $si.ToString() }
+                    $si++
+                }
             }
         }
-    }
 
-    if (Test-Path $modSetPath) {
-        try {
-            [xml]$modXml = [System.IO.File]::ReadAllText($modSetPath, [System.Text.Encoding]::UTF8)
-            foreach ($node in $modXml.SelectNodes('//metadata[contains(@key, "extruder")]')) {
-                $val = $node.GetAttribute('value')
-                if (-not [string]::IsNullOrWhiteSpace($val)) { $UsedSlots.Add($val) | Out-Null }
-            }
-        } catch {}
-    }
-
-    # Also check 3dmodel.model for materialid assignments
-    $modelFile = Get-ChildItem -Path $tempWork -Filter '3dmodel.model' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($modelFile -and (Test-Path $modelFile.FullName)) {
-        try {
-            $modelContent = [System.IO.File]::ReadAllText($modelFile.FullName, [System.Text.Encoding]::UTF8)
-            $matMatches = [regex]::Matches($modelContent, '(?i)materialid="(\d+)"')
-            foreach ($m in $matMatches) { $UsedSlots.Add($m.Groups[1].Value) | Out-Null }
-        } catch {}
-    }
-
-    foreach ($hex in $SlotMap.Keys) {
-        $slotId = $SlotMap[$hex]
-        if ($UsedSlots.Contains($slotId)) {
-            $checkHex = if ($hex.Length -eq 7) { $hex + "FF" } else { $hex }
-            $matchedName = if ($HexToName.Contains($checkHex)) { $HexToName[$checkHex] } else { "" }
-            $activeSlots.Add([PSCustomObject]@{ OldHex = $checkHex; Name = $matchedName }) | Out-Null
+        if (Test-Path $modSetPath) {
+            try {
+                [xml]$modXml = [System.IO.File]::ReadAllText($modSetPath, [System.Text.Encoding]::UTF8)
+                foreach ($node in $modXml.SelectNodes('//metadata[contains(@key, "extruder")]')) {
+                    $val = $node.GetAttribute('value')
+                    if (-not [string]::IsNullOrWhiteSpace($val)) { $UsedSlots.Add($val) | Out-Null }
+                }
+            } catch {}
         }
+
+        $modelFile = Get-ChildItem -Path $tempWork -Filter '3dmodel.model' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($modelFile -and (Test-Path $modelFile.FullName)) {
+            try {
+                $modelContent = [System.IO.File]::ReadAllText($modelFile.FullName, [System.Text.Encoding]::UTF8)
+                $matMatches = [regex]::Matches($modelContent, '(?i)materialid="(\d+)"')
+                foreach ($m in $matMatches) { $UsedSlots.Add($m.Groups[1].Value) | Out-Null }
+            } catch {}
+        }
+
+        foreach ($hex in $SlotMap.Keys) {
+            $slotId = $SlotMap[$hex]
+            if ($UsedSlots.Contains($slotId)) {
+                $checkHex = if ($hex.Length -eq 7) { $hex + "FF" } else { $hex }
+                $matchedName = if ($HexToName.Contains($checkHex)) { $HexToName[$checkHex] } else { "" }
+                $activeSlots.Add([PSCustomObject]@{ OldHex = $checkHex; Name = $matchedName }) | Out-Null
+            }
+        }
+        if ($activeSlots.Count -gt 4) { $activeSlots = $activeSlots[0..3] }
     }
-    if ($activeSlots.Count -gt 4) { $activeSlots = $activeSlots[0..3] }
 
     $pJob = @{
         FolderPath = $parentPath; AnchorFile = $anchorFile; TempWork = $tempWork
@@ -1122,12 +1173,17 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     if ($customPng) {
         $pJob.CustomImagePath = $customPng.FullName
         $pbModel.Source = Load-WpfImage $customPng.FullName
-    } else {
+    } elseif ($isZip3mf) {
         # Fallback to the Anchor 3MF extracted images (Checks both plate_1 and thumbnail!)
         $pJob.CustomImagePath = $null
         $baseImgPath = Join-Path $tempWork "Metadata\plate_1.png"
         if (-not (Test-Path $baseImgPath)) { $baseImgPath = Join-Path $tempWork "Metadata\thumbnail.png" }
         $pbModel.Source = Load-WpfImage $baseImgPath
+    } elseif ($anchorFile.Extension -imatch '\.png$') {
+        $pJob.CustomImagePath = $anchorFile.FullName
+        $pbModel.Source = Load-WpfImage $anchorFile.FullName
+    } else {
+        $pJob.CustomImagePath = $null  # STL or unknown — no preview available
     }
 
     # (PbPlateFinished defined below as a full-width overlay on leftGrid)
@@ -1525,12 +1581,13 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $tasksOuter = New-Object System.Windows.Controls.StackPanel
 
     $tasksRow1 = New-Object System.Windows.Controls.WrapPanel; $tasksRow1.Orientation = "Horizontal"
-    $chkMerge   = New-Object System.Windows.Controls.CheckBox; $chkMerge.Content   = "Merge";                $chkMerge.IsChecked   = $true; $chkMerge.Foreground   = Get-WpfColor "#FFFFFF"; $chkMerge.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
-    $chkSlice   = New-Object System.Windows.Controls.CheckBox; $chkSlice.Content   = "Slice / Export Gcode"; $chkSlice.IsChecked   = $true; $chkSlice.Foreground   = Get-WpfColor "#FFFFFF"; $chkSlice.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
-    $chkExtract = New-Object System.Windows.Controls.CheckBox; $chkExtract.Content = "Extract Data";         $chkExtract.IsChecked = $true; $chkExtract.Foreground = Get-WpfColor "#FFFFFF"; $chkExtract.Margin = New-Object System.Windows.Thickness(0,0,15,0)
-    $chkImage   = New-Object System.Windows.Controls.CheckBox; $chkImage.Content   = "Generate Image Card";  $chkImage.IsChecked   = $true; $chkImage.Foreground   = Get-WpfColor "#FFFFFF"; $chkImage.Margin = New-Object System.Windows.Thickness(0,0,15,0)
-    $chkLogs    = New-Object System.Windows.Controls.CheckBox; $chkLogs.Content    = "Create Logs";          $chkLogs.IsChecked    = $false; $chkLogs.Foreground   = Get-WpfColor "#FFFFFF"
-    $tasksRow1.Children.Add($chkMerge) | Out-Null; $tasksRow1.Children.Add($chkSlice) | Out-Null
+    $chkRename  = New-Object System.Windows.Controls.CheckBox; $chkRename.Content  = "Rename Files/Folders"; $chkRename.IsChecked  = $false; $chkRename.Foreground  = Get-WpfColor "#FFFFFF"; $chkRename.Margin  = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkMerge   = New-Object System.Windows.Controls.CheckBox; $chkMerge.Content   = "Merge";                $chkMerge.IsChecked   = $false; $chkMerge.Foreground   = Get-WpfColor "#FFFFFF"; $chkMerge.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkSlice   = New-Object System.Windows.Controls.CheckBox; $chkSlice.Content   = "Slice / Export Gcode"; $chkSlice.IsChecked   = $false; $chkSlice.Foreground   = Get-WpfColor "#FFFFFF"; $chkSlice.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkExtract = New-Object System.Windows.Controls.CheckBox; $chkExtract.Content = "Extract Data";         $chkExtract.IsChecked = $false; $chkExtract.Foreground = Get-WpfColor "#FFFFFF"; $chkExtract.Margin = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkImage   = New-Object System.Windows.Controls.CheckBox; $chkImage.Content   = "Generate Image Card";  $chkImage.IsChecked   = $false; $chkImage.Foreground   = Get-WpfColor "#FFFFFF"; $chkImage.Margin = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkLogs    = New-Object System.Windows.Controls.CheckBox; $chkLogs.Content    = "Create Logs";          $chkLogs.IsChecked    = $false; $chkLogs.Foreground    = Get-WpfColor "#FFFFFF"
+    $tasksRow1.Children.Add($chkRename) | Out-Null; $tasksRow1.Children.Add($chkMerge) | Out-Null; $tasksRow1.Children.Add($chkSlice) | Out-Null
     $tasksRow1.Children.Add($chkExtract) | Out-Null; $tasksRow1.Children.Add($chkImage) | Out-Null
     $tasksRow1.Children.Add($chkLogs) | Out-Null
     $tasksOuter.Children.Add($tasksRow1) | Out-Null
@@ -1553,14 +1610,14 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $tasksBox.Child = $tasksOuter
     $rightStack.Children.Add($tasksBox) | Out-Null
 
-    $pJob.ChkMerge = $chkMerge; $pJob.ChkSlice = $chkSlice; $pJob.ChkExtract = $chkExtract; $pJob.ChkImage = $chkImage; $pJob.ChkLogs = $chkLogs
+    $pJob.ChkRename = $chkRename; $pJob.ChkMerge = $chkMerge; $pJob.ChkSlice = $chkSlice; $pJob.ChkExtract = $chkExtract; $pJob.ChkImage = $chkImage; $pJob.ChkLogs = $chkLogs
     if ($nestExists) {
         $chkMerge.IsChecked = $false; $chkMerge.IsEnabled = $false; $chkMerge.Foreground = Get-WpfColor "#555555"
         $chkMerge.ToolTip = "Remove Nest.3mf or Revert Merge before merging again"
     }
 
     # Checkbox interdependencies
-    $tasksData = @{ Merge = $chkMerge; Slice = $chkSlice; Extract = $chkExtract; Image = $chkImage; Logs = $chkLogs; PJob = $pJob; GpJob = $gpJob }
+    $tasksData = @{ Rename = $chkRename; Merge = $chkMerge; Slice = $chkSlice; Extract = $chkExtract; Image = $chkImage; Logs = $chkLogs; PJob = $pJob; GpJob = $gpJob }
 
     $chkSlice.Tag = $tasksData
     $chkSlice.Add_Checked({ if ($this.IsChecked) { $this.Tag.Extract.IsChecked = $true } })
@@ -1585,14 +1642,14 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnSelAll.Tag = $tasksData
     $btnSelAll.Add_Click({
         $t = $this.Tag
-        $t.Slice.IsChecked = $true; $t.Extract.IsChecked = $true; $t.Image.IsChecked = $true; $t.Logs.IsChecked = $true
+        $t.Rename.IsChecked = $true; $t.Slice.IsChecked = $true; $t.Extract.IsChecked = $true; $t.Image.IsChecked = $true
         if ($t.Merge.IsEnabled) { $t.Merge.IsChecked = $true }
     })
 
     $btnDeselAll.Tag = $tasksData
     $btnDeselAll.Add_Click({
         $t = $this.Tag
-        $t.Slice.IsChecked = $false; $t.Extract.IsChecked = $false; $t.Image.IsChecked = $false; $t.Logs.IsChecked = $false
+        $t.Rename.IsChecked = $false; $t.Slice.IsChecked = $false; $t.Extract.IsChecked = $false; $t.Image.IsChecked = $false; $t.Logs.IsChecked = $false
         if ($t.Merge.IsEnabled) { $t.Merge.IsChecked = $false }
     })
 
@@ -1707,7 +1764,9 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnApply.Tag = @{ P = $pJob; G = $gpJob }
     $btnApply.Add_Click({
         $t = $this.Tag
-        if ($this.Content -eq "KEEP") {
+        if ($this.Content -eq "Done") {
+            Refresh-PJob $t.P $t.G
+        } elseif ($this.Content -eq "KEEP") {
             # Move the finished plate image to the [CURRENT] thumbnail
             if ($t.P.PbPlateFinished.Source -ne $null) {
                 $t.P.PbCurrent.Source = $t.P.PbPlateFinished.Source
@@ -1951,6 +2010,41 @@ function Build-GpJob($gpPath, $parentDict) {
     $headerGrid.Children.Add($gpRightBtnStack) | Out-Null
     $gpStack.Children.Add($headerGrid) | Out-Null
 
+    # --- THEME TASK BAR ---
+    $themeBar = New-Object System.Windows.Controls.Border
+    $themeBar.Background = Get-WpfColor "#21222B"
+    $themeBar.BorderBrush = Get-WpfColor "#2A2C35"
+    $themeBar.BorderThickness = New-Object System.Windows.Thickness(0,0,0,1)
+    $themeBar.Padding = New-Object System.Windows.Thickness(15,10,15,10)
+
+    $themeBarStack = New-Object System.Windows.Controls.StackPanel
+    $themeBarStack.Orientation = "Horizontal"
+
+    $chkThRename  = New-Object System.Windows.Controls.CheckBox; $chkThRename.Content  = "Rename";  $chkThRename.IsChecked  = $false; $chkThRename.Foreground  = Get-WpfColor "#CCCCCC"; $chkThRename.VerticalAlignment  = "Center"; $chkThRename.Margin  = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkThMerge   = New-Object System.Windows.Controls.CheckBox; $chkThMerge.Content   = "Merge";   $chkThMerge.IsChecked   = $false; $chkThMerge.Foreground   = Get-WpfColor "#CCCCCC"; $chkThMerge.VerticalAlignment   = "Center"; $chkThMerge.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkThSlice   = New-Object System.Windows.Controls.CheckBox; $chkThSlice.Content   = "Slice";   $chkThSlice.IsChecked   = $false; $chkThSlice.Foreground   = Get-WpfColor "#CCCCCC"; $chkThSlice.VerticalAlignment   = "Center"; $chkThSlice.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkThExtract = New-Object System.Windows.Controls.CheckBox; $chkThExtract.Content = "Extract"; $chkThExtract.IsChecked = $false; $chkThExtract.Foreground = Get-WpfColor "#CCCCCC"; $chkThExtract.VerticalAlignment = "Center"; $chkThExtract.Margin = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkThImage   = New-Object System.Windows.Controls.CheckBox; $chkThImage.Content   = "Image";   $chkThImage.IsChecked   = $false; $chkThImage.Foreground   = Get-WpfColor "#CCCCCC"; $chkThImage.VerticalAlignment   = "Center"; $chkThImage.Margin   = New-Object System.Windows.Thickness(0,0,20,0)
+
+    $btnThSelAll   = New-Object System.Windows.Controls.Button; $btnThSelAll.Content   = "Select All";   $btnThSelAll.Background   = Get-WpfColor "#2A2C35"; $btnThSelAll.Foreground   = Get-WpfColor "#FFFFFF"; $btnThSelAll.Width   = 85;  $btnThSelAll.Height   = 25; $btnThSelAll.BorderThickness   = 0; $btnThSelAll.Cursor   = [System.Windows.Input.Cursors]::Hand; $btnThSelAll.Margin   = New-Object System.Windows.Thickness(0,0,8,0)
+    $btnThDeselAll = New-Object System.Windows.Controls.Button; $btnThDeselAll.Content = "Deselect All"; $btnThDeselAll.Background = Get-WpfColor "#2A2C35"; $btnThDeselAll.Foreground = Get-WpfColor "#FFFFFF"; $btnThDeselAll.Width = 85;  $btnThDeselAll.Height = 25; $btnThDeselAll.BorderThickness = 0; $btnThDeselAll.Cursor = [System.Windows.Input.Cursors]::Hand; $btnThDeselAll.Margin = New-Object System.Windows.Thickness(0,0,20,0)
+    $btnThRevert   = New-Object System.Windows.Controls.Button; $btnThRevert.Content   = "Revert Merge"; $btnThRevert.Background   = Get-WpfColor "#D95F5F"; $btnThRevert.Foreground   = Get-WpfColor "#FFFFFF"; $btnThRevert.Width   = 110; $btnThRevert.Height   = 25; $btnThRevert.BorderThickness   = 0; $btnThRevert.Cursor   = [System.Windows.Input.Cursors]::Hand; $btnThRevert.Margin   = New-Object System.Windows.Thickness(0,0,8,0)
+    $btnThProcess  = New-Object System.Windows.Controls.Button; $btnThProcess.Content  = "Process Theme"; $btnThProcess.Background  = Get-WpfColor "#4CAF72"; $btnThProcess.Foreground  = Get-WpfColor "#FFFFFF"; $btnThProcess.Width  = 115; $btnThProcess.Height  = 25; $btnThProcess.BorderThickness  = 0; $btnThProcess.Cursor  = [System.Windows.Input.Cursors]::Hand; $btnThProcess.Margin  = New-Object System.Windows.Thickness(0,0,8,0)
+    $btnThRefresh  = New-Object System.Windows.Controls.Button; $btnThRefresh.Content  = "Refresh Theme"; $btnThRefresh.Background  = Get-WpfColor "#5A78C4"; $btnThRefresh.Foreground  = Get-WpfColor "#FFFFFF"; $btnThRefresh.Width  = 115; $btnThRefresh.Height  = 25; $btnThRefresh.BorderThickness  = 0; $btnThRefresh.Cursor  = [System.Windows.Input.Cursors]::Hand
+
+    $themeBarStack.Children.Add($chkThRename)  | Out-Null
+    $themeBarStack.Children.Add($chkThMerge)   | Out-Null
+    $themeBarStack.Children.Add($chkThSlice)   | Out-Null
+    $themeBarStack.Children.Add($chkThExtract) | Out-Null
+    $themeBarStack.Children.Add($chkThImage)   | Out-Null
+    $themeBarStack.Children.Add($btnThSelAll)   | Out-Null
+    $themeBarStack.Children.Add($btnThDeselAll) | Out-Null
+    $themeBarStack.Children.Add($btnThRevert)   | Out-Null
+    $themeBarStack.Children.Add($btnThProcess)  | Out-Null
+    $themeBarStack.Children.Add($btnThRefresh)  | Out-Null
+    $themeBar.Child = $themeBarStack
+    $gpStack.Children.Add($themeBar) | Out-Null
+
     $parentListStack = New-Object System.Windows.Controls.StackPanel
     $parentListStack.Margin = New-Object System.Windows.Thickness(15)
     $gpStack.Children.Add($parentListStack) | Out-Null
@@ -1961,6 +2055,84 @@ function Build-GpJob($gpPath, $parentDict) {
         $gpJob.Parents.Add($pJob) | Out-Null
     }
     Update-GpFileCount $gpJob
+
+    # --- THEME TASK BAR HANDLERS (wired after Parents are populated) ---
+    $chkThRename.Tag = $gpJob
+    $chkThRename.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { $p.ChkRename.IsChecked = $s } })
+
+    $chkThMerge.Tag = $gpJob
+    $chkThMerge.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { if ($p.ChkMerge.IsEnabled) { $p.ChkMerge.IsChecked = $s } } })
+
+    $chkThSlice.Tag = $gpJob
+    $chkThSlice.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { $p.ChkSlice.IsChecked = $s } })
+
+    $chkThExtract.Tag = $gpJob
+    $chkThExtract.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { $p.ChkExtract.IsChecked = $s } })
+
+    $chkThImage.Tag = $gpJob
+    $chkThImage.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { $p.ChkImage.IsChecked = $s } })
+
+    $btnThSelAll.Tag = @{ GpJob = $gpJob; Chks = @{ Rename = $chkThRename; Merge = $chkThMerge; Slice = $chkThSlice; Extract = $chkThExtract; Image = $chkThImage } }
+    $btnThSelAll.Add_Click({
+        $t = $this.Tag
+        foreach ($p in $t.GpJob.Parents) {
+            $p.ChkRename.IsChecked = $true; $p.ChkSlice.IsChecked = $true
+            $p.ChkExtract.IsChecked = $true; $p.ChkImage.IsChecked = $true
+            if ($p.ChkMerge.IsEnabled) { $p.ChkMerge.IsChecked = $true }
+        }
+        $t.Chks.Rename.IsChecked = $true; $t.Chks.Merge.IsChecked = $true
+        $t.Chks.Slice.IsChecked = $true; $t.Chks.Extract.IsChecked = $true; $t.Chks.Image.IsChecked = $true
+    })
+
+    $btnThDeselAll.Tag = @{ GpJob = $gpJob; Chks = @{ Rename = $chkThRename; Merge = $chkThMerge; Slice = $chkThSlice; Extract = $chkThExtract; Image = $chkThImage } }
+    $btnThDeselAll.Add_Click({
+        $t = $this.Tag
+        foreach ($p in $t.GpJob.Parents) {
+            $p.ChkRename.IsChecked = $false; $p.ChkMerge.IsChecked = $false; $p.ChkSlice.IsChecked = $false
+            $p.ChkExtract.IsChecked = $false; $p.ChkImage.IsChecked = $false; $p.ChkLogs.IsChecked = $false
+        }
+        $t.Chks.Rename.IsChecked = $false; $t.Chks.Merge.IsChecked = $false
+        $t.Chks.Slice.IsChecked = $false; $t.Chks.Extract.IsChecked = $false; $t.Chks.Image.IsChecked = $false
+    })
+
+    $btnThRevert.Tag = $gpJob
+    $btnThRevert.Add_Click({
+        $gp = $this.Tag
+        $batPath = Join-Path $scriptDir "..\callers\RevertMerge.bat"
+        if (-not (Test-Path $batPath)) { [System.Windows.MessageBox]::Show("RevertMerge.bat not found.", "Error") | Out-Null; return }
+        $targets = @()
+        foreach ($p in $gp.Parents) {
+            if ($p.BtnRevertMerge -and $p.BtnRevertMerge.IsEnabled) {
+                $tp = if ($p.ProcessedAnchorPath -ne "") { $p.ProcessedAnchorPath } else { $p.AnchorFile.FullName }
+                if ($tp) { $targets += $tp }
+            }
+        }
+        if ($targets.Count -eq 0) { return }
+        foreach ($tp in $targets) {
+            $argList = '/c ""' + $batPath + '" "' + $tp + '""'
+            $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $argList -WindowStyle Hidden -PassThru
+            $timeout = 100
+            while (-not $proc.HasExited -and $timeout -gt 0) {
+                [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
+                Start-Sleep -Milliseconds 100; $timeout--
+            }
+            if (-not $proc.HasExited) { try { $proc.Kill() } catch {} }
+        }
+        foreach ($p in @($gp.Parents)) { Refresh-PJob $p $gp }
+    })
+
+    $btnThProcess.Tag = $gpJob
+    $btnThProcess.Add_Click({
+        $gp = $this.Tag
+        foreach ($p in $gp.Parents) { Enqueue-PJob $p $gp }
+        if ($script:activeProcess -eq $null -and $script:processQueue.Count -gt 0) { Start-NextProcess }
+    })
+
+    $btnThRefresh.Tag = $gpJob
+    $btnThRefresh.Add_Click({
+        $gp = $this.Tag
+        foreach ($p in @($gp.Parents)) { Refresh-PJob $p $gp }
+    })
 
     $cbTheme.Tag = $gpJob
     $cbTheme.Add_SelectionChanged({ foreach ($p in $this.Tag.Parents) { Update-ParentPreview $p $this.Tag } })
@@ -2058,7 +2230,7 @@ $script:queueTimer.Add_Tick({
             $pJob.PickProcessingOverlay.Visibility = "Collapsed"
             $pJob.RowPanel.IsEnabled = $true
             $pJob.IsDone = $true
-            $pJob.ChkMerge.IsEnabled = $true; $pJob.ChkSlice.IsEnabled = $true
+            $pJob.ChkRename.IsEnabled = $true; $pJob.ChkMerge.IsEnabled = $true; $pJob.ChkSlice.IsEnabled = $true
             $pJob.ChkExtract.IsEnabled = $true; $pJob.ChkImage.IsEnabled = $true
 
             $pJob.BtnApply.Content = "KEEP"; $pJob.BtnApply.Background = Get-WpfColor "#4CAF72"
@@ -2151,26 +2323,17 @@ $window.Add_Drop({
     $lblGlobalTitle.Text = "Scanning dropped folders..."
     [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
 
-    $newFound = @()
-    foreach ($p in $dropped) {
-        if (Test-Path $p -PathType Container) { $newFound += Get-ChildItem -Path $p -Filter "*Full.3mf" -Recurse -File }
-        elseif ($p -match '(?i)Full\.3mf$') { $newFound += Get-Item $p }
-    }
+    $newGpQueue = Get-AnchorQueue $dropped
 
-    if ($newFound.Count -gt 0) {
-        $newGpQueue = [ordered]@{}
-        foreach ($f in $newFound) {
-            $parentPath = $f.DirectoryName
-            $gp = $f.Directory.Parent
-            $gpPath = if ($gp) { $gp.FullName } else { "ROOT_" + $parentPath }
-
-            # Skip if this folder is already in the UI
-            $exists = $false
-            foreach ($j in $script:jobs) { foreach ($parentJob in $j.Parents) { if ($parentJob.FolderPath -eq $parentPath) { $exists = $true; break } } }
-            if ($exists) { continue }
-
-            if (-not $newGpQueue.Contains($gpPath)) { $newGpQueue[$gpPath] = [ordered]@{} }
-            if (-not $newGpQueue[$gpPath].Contains($parentPath)) { $newGpQueue[$gpPath][$parentPath] = $f }
+    if ($newGpQueue.Count -gt 0) {
+        # Remove folders already loaded in the UI
+        foreach ($gpPath in @($newGpQueue.Keys)) {
+            foreach ($parentPath in @($newGpQueue[$gpPath].Keys)) {
+                $exists = $false
+                foreach ($j in $script:jobs) { foreach ($parentJob in $j.Parents) { if ($parentJob.FolderPath -eq $parentPath) { $exists = $true; break } } }
+                if ($exists) { $newGpQueue[$gpPath].Remove($parentPath) }
+            }
+            if ($newGpQueue[$gpPath].Count -eq 0) { $newGpQueue.Remove($gpPath) }
         }
 
         foreach ($gpPath in $newGpQueue.Keys) {
@@ -2193,6 +2356,18 @@ $window.Add_Drop({
     $lblGlobalTitle.Text = "Queue Dashboard ($($script:jobs.Count) Theme(s) found)"
     if ($script:jobs.Count -gt 0) { Update-GlobalProcessAllStatus }
 })
+
+$btnProcessAll.Add_Click({
+    foreach ($gpJob in $script:jobs) {
+        foreach ($pJob in $gpJob.Parents) {
+            Enqueue-PJob $pJob $gpJob
+        }
+    }
+    if ($script:activeProcess -eq $null -and $script:processQueue.Count -gt 0) {
+        Start-NextProcess
+    }
+})
+
 # --- 10. STARTUP ---
 $window.Add_Loaded({
     $idx = 1
