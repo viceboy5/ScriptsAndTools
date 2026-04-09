@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(ls -lah /d/GitRepos/ScriptsAndTools/BambuScripts/.claude/worktrees/heuristic-dubinsky/BambuScripts/*.ps1)",
-      "Bash(find /c/GitRepos/ScriptsAndTools/BambuScripts/.claude/worktrees/romantic-cray -type f \\\\\\(-name *.cs -o -name *.xaml -o -name *.csproj -o -name *.sln \\\\\\))"
+      "Bash(find /c/GitRepos/ScriptsAndTools/BambuScripts/.claude/worktrees/romantic-cray -type f \\\\\\(-name *.cs -o -name *.xaml -o -name *.csproj -o -name *.sln \\\\\\))",
+      "Bash(ls -1 /d/GitRepos/ScriptsAndTools/BambuScripts/.claude/worktrees/upbeat-grothendieck/BambuScripts/workers/*.ps1)"
     ]
   }
 }
