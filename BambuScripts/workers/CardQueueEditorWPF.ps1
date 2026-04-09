@@ -780,6 +780,13 @@ function Start-NextProcess {
         }
     }
 
+    $doRename  = [bool]$pJob.ChkRename.IsChecked
+    $doMerge   = [bool]$pJob.ChkMerge.IsChecked
+    $doSlice   = [bool]$pJob.ChkSlice.IsChecked
+    $doExtract = [bool]$pJob.ChkExtract.IsChecked
+    $doImage   = [bool]$pJob.ChkImage.IsChecked
+    $doLogs    = [bool]$pJob.ChkLogs.IsChecked
+
     $anchorIsZip3mf = $pJob.AnchorFile.Extension -imatch '\.3mf$' -and $pJob.AnchorFile.Name -notmatch '(?i)\.gcode\.3mf$'
 
     # Patch color changes into the source 3MF before any renaming or merging
@@ -940,13 +947,6 @@ function Start-NextProcess {
     $dir        = $pJob.FolderPath
     $statusFile = Join-Path $dir "AsyncWorker_Status.txt"
     $basePrefix = if ($baseName.ToLower().EndsWith("full")) { $baseName.Substring(0, $baseName.Length - 4) } else { $baseName + "_" }
-
-    $doRename  = $pJob.ChkRename.IsChecked
-    $doMerge   = $pJob.ChkMerge.IsChecked
-    $doSlice   = $pJob.ChkSlice.IsChecked
-    $doExtract = $pJob.ChkExtract.IsChecked
-    $doImage   = $pJob.ChkImage.IsChecked
-    $doLogs    = $pJob.ChkLogs.IsChecked
 
     $anchorPath = $pJob.ProcessedAnchorPath
     $nestPath   = Join-Path $dir "$($basePrefix)Nest.3mf"
