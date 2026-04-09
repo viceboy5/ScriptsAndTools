@@ -453,7 +453,7 @@ if ($args.Count -gt 0) {
                 </StackPanel>
 
                 <StackPanel Grid.Column="2" HorizontalAlignment="Right" VerticalAlignment="Center" Orientation="Horizontal" Margin="0,0,15,0">
-                    <Button Name="BtnProcessAll" Content="Process All Queued" Background="#4CAF72" Foreground="White" FontWeight="Bold" Width="150" Height="30" BorderThickness="0" Cursor="Hand"/>
+                    <Button Name="BtnProcessAll" Content="Process All Tasks" Background="#4CAF72" Foreground="White" FontWeight="Bold" Width="150" Height="30" BorderThickness="0" Cursor="Hand"/>
                 </StackPanel>
             </Grid>
         </Border>
@@ -1581,11 +1581,11 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $tasksOuter = New-Object System.Windows.Controls.StackPanel
 
     $tasksRow1 = New-Object System.Windows.Controls.WrapPanel; $tasksRow1.Orientation = "Horizontal"
-    $chkRename  = New-Object System.Windows.Controls.CheckBox; $chkRename.Content  = "Rename Files/Folders"; $chkRename.IsChecked  = $true;  $chkRename.Foreground  = Get-WpfColor "#FFFFFF"; $chkRename.Margin  = New-Object System.Windows.Thickness(0,0,15,0)
-    $chkMerge   = New-Object System.Windows.Controls.CheckBox; $chkMerge.Content   = "Merge";                $chkMerge.IsChecked   = $true;  $chkMerge.Foreground   = Get-WpfColor "#FFFFFF"; $chkMerge.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
-    $chkSlice   = New-Object System.Windows.Controls.CheckBox; $chkSlice.Content   = "Slice / Export Gcode"; $chkSlice.IsChecked   = $true;  $chkSlice.Foreground   = Get-WpfColor "#FFFFFF"; $chkSlice.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
-    $chkExtract = New-Object System.Windows.Controls.CheckBox; $chkExtract.Content = "Extract Data";         $chkExtract.IsChecked = $true;  $chkExtract.Foreground = Get-WpfColor "#FFFFFF"; $chkExtract.Margin = New-Object System.Windows.Thickness(0,0,15,0)
-    $chkImage   = New-Object System.Windows.Controls.CheckBox; $chkImage.Content   = "Generate Image Card";  $chkImage.IsChecked   = $true;  $chkImage.Foreground   = Get-WpfColor "#FFFFFF"; $chkImage.Margin = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkRename  = New-Object System.Windows.Controls.CheckBox; $chkRename.Content  = "Rename Files/Folders"; $chkRename.IsChecked  = $false; $chkRename.Foreground  = Get-WpfColor "#FFFFFF"; $chkRename.Margin  = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkMerge   = New-Object System.Windows.Controls.CheckBox; $chkMerge.Content   = "Merge";                $chkMerge.IsChecked   = $false; $chkMerge.Foreground   = Get-WpfColor "#FFFFFF"; $chkMerge.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkSlice   = New-Object System.Windows.Controls.CheckBox; $chkSlice.Content   = "Slice / Export Gcode"; $chkSlice.IsChecked   = $false; $chkSlice.Foreground   = Get-WpfColor "#FFFFFF"; $chkSlice.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkExtract = New-Object System.Windows.Controls.CheckBox; $chkExtract.Content = "Extract Data";         $chkExtract.IsChecked = $false; $chkExtract.Foreground = Get-WpfColor "#FFFFFF"; $chkExtract.Margin = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkImage   = New-Object System.Windows.Controls.CheckBox; $chkImage.Content   = "Generate Image Card";  $chkImage.IsChecked   = $false; $chkImage.Foreground   = Get-WpfColor "#FFFFFF"; $chkImage.Margin = New-Object System.Windows.Thickness(0,0,15,0)
     $chkLogs    = New-Object System.Windows.Controls.CheckBox; $chkLogs.Content    = "Create Logs";          $chkLogs.IsChecked    = $false; $chkLogs.Foreground    = Get-WpfColor "#FFFFFF"
     $tasksRow1.Children.Add($chkRename) | Out-Null; $tasksRow1.Children.Add($chkMerge) | Out-Null; $tasksRow1.Children.Add($chkSlice) | Out-Null
     $tasksRow1.Children.Add($chkExtract) | Out-Null; $tasksRow1.Children.Add($chkImage) | Out-Null
@@ -1642,7 +1642,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnSelAll.Tag = $tasksData
     $btnSelAll.Add_Click({
         $t = $this.Tag
-        $t.Rename.IsChecked = $true; $t.Slice.IsChecked = $true; $t.Extract.IsChecked = $true; $t.Image.IsChecked = $true; $t.Logs.IsChecked = $true
+        $t.Rename.IsChecked = $true; $t.Slice.IsChecked = $true; $t.Extract.IsChecked = $true; $t.Image.IsChecked = $true
         if ($t.Merge.IsEnabled) { $t.Merge.IsChecked = $true }
     })
 
@@ -1764,7 +1764,9 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnApply.Tag = @{ P = $pJob; G = $gpJob }
     $btnApply.Add_Click({
         $t = $this.Tag
-        if ($this.Content -eq "KEEP") {
+        if ($this.Content -eq "Done") {
+            Refresh-PJob $t.P $t.G
+        } elseif ($this.Content -eq "KEEP") {
             # Move the finished plate image to the [CURRENT] thumbnail
             if ($t.P.PbPlateFinished.Source -ne $null) {
                 $t.P.PbCurrent.Source = $t.P.PbPlateFinished.Source
@@ -2241,6 +2243,18 @@ $window.Add_Drop({
     $lblGlobalTitle.Text = "Queue Dashboard ($($script:jobs.Count) Theme(s) found)"
     if ($script:jobs.Count -gt 0) { Update-GlobalProcessAllStatus }
 })
+
+$btnProcessAll.Add_Click({
+    foreach ($gpJob in $script:jobs) {
+        foreach ($pJob in $gpJob.Parents) {
+            Enqueue-PJob $pJob $gpJob
+        }
+    }
+    if ($script:activeProcess -eq $null -and $script:processQueue.Count -gt 0) {
+        Start-NextProcess
+    }
+})
+
 # --- 10. STARTUP ---
 $window.Add_Loaded({
     $idx = 1
