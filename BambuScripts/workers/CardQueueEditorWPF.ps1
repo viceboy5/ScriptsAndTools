@@ -2010,6 +2010,41 @@ function Build-GpJob($gpPath, $parentDict) {
     $headerGrid.Children.Add($gpRightBtnStack) | Out-Null
     $gpStack.Children.Add($headerGrid) | Out-Null
 
+    # --- THEME TASK BAR ---
+    $themeBar = New-Object System.Windows.Controls.Border
+    $themeBar.Background = Get-WpfColor "#21222B"
+    $themeBar.BorderBrush = Get-WpfColor "#2A2C35"
+    $themeBar.BorderThickness = New-Object System.Windows.Thickness(0,0,0,1)
+    $themeBar.Padding = New-Object System.Windows.Thickness(15,10,15,10)
+
+    $themeBarStack = New-Object System.Windows.Controls.StackPanel
+    $themeBarStack.Orientation = "Horizontal"
+
+    $chkThRename  = New-Object System.Windows.Controls.CheckBox; $chkThRename.Content  = "Rename";  $chkThRename.IsChecked  = $false; $chkThRename.Foreground  = Get-WpfColor "#CCCCCC"; $chkThRename.VerticalAlignment  = "Center"; $chkThRename.Margin  = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkThMerge   = New-Object System.Windows.Controls.CheckBox; $chkThMerge.Content   = "Merge";   $chkThMerge.IsChecked   = $false; $chkThMerge.Foreground   = Get-WpfColor "#CCCCCC"; $chkThMerge.VerticalAlignment   = "Center"; $chkThMerge.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkThSlice   = New-Object System.Windows.Controls.CheckBox; $chkThSlice.Content   = "Slice";   $chkThSlice.IsChecked   = $false; $chkThSlice.Foreground   = Get-WpfColor "#CCCCCC"; $chkThSlice.VerticalAlignment   = "Center"; $chkThSlice.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkThExtract = New-Object System.Windows.Controls.CheckBox; $chkThExtract.Content = "Extract"; $chkThExtract.IsChecked = $false; $chkThExtract.Foreground = Get-WpfColor "#CCCCCC"; $chkThExtract.VerticalAlignment = "Center"; $chkThExtract.Margin = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkThImage   = New-Object System.Windows.Controls.CheckBox; $chkThImage.Content   = "Image";   $chkThImage.IsChecked   = $false; $chkThImage.Foreground   = Get-WpfColor "#CCCCCC"; $chkThImage.VerticalAlignment   = "Center"; $chkThImage.Margin   = New-Object System.Windows.Thickness(0,0,20,0)
+
+    $btnThSelAll   = New-Object System.Windows.Controls.Button; $btnThSelAll.Content   = "Select All";   $btnThSelAll.Background   = Get-WpfColor "#2A2C35"; $btnThSelAll.Foreground   = Get-WpfColor "#FFFFFF"; $btnThSelAll.Width   = 85;  $btnThSelAll.Height   = 25; $btnThSelAll.BorderThickness   = 0; $btnThSelAll.Cursor   = [System.Windows.Input.Cursors]::Hand; $btnThSelAll.Margin   = New-Object System.Windows.Thickness(0,0,8,0)
+    $btnThDeselAll = New-Object System.Windows.Controls.Button; $btnThDeselAll.Content = "Deselect All"; $btnThDeselAll.Background = Get-WpfColor "#2A2C35"; $btnThDeselAll.Foreground = Get-WpfColor "#FFFFFF"; $btnThDeselAll.Width = 85;  $btnThDeselAll.Height = 25; $btnThDeselAll.BorderThickness = 0; $btnThDeselAll.Cursor = [System.Windows.Input.Cursors]::Hand; $btnThDeselAll.Margin = New-Object System.Windows.Thickness(0,0,20,0)
+    $btnThRevert   = New-Object System.Windows.Controls.Button; $btnThRevert.Content   = "Revert Merge"; $btnThRevert.Background   = Get-WpfColor "#D95F5F"; $btnThRevert.Foreground   = Get-WpfColor "#FFFFFF"; $btnThRevert.Width   = 110; $btnThRevert.Height   = 25; $btnThRevert.BorderThickness   = 0; $btnThRevert.Cursor   = [System.Windows.Input.Cursors]::Hand; $btnThRevert.Margin   = New-Object System.Windows.Thickness(0,0,8,0)
+    $btnThProcess  = New-Object System.Windows.Controls.Button; $btnThProcess.Content  = "Process Theme"; $btnThProcess.Background  = Get-WpfColor "#4CAF72"; $btnThProcess.Foreground  = Get-WpfColor "#FFFFFF"; $btnThProcess.Width  = 115; $btnThProcess.Height  = 25; $btnThProcess.BorderThickness  = 0; $btnThProcess.Cursor  = [System.Windows.Input.Cursors]::Hand; $btnThProcess.Margin  = New-Object System.Windows.Thickness(0,0,8,0)
+    $btnThRefresh  = New-Object System.Windows.Controls.Button; $btnThRefresh.Content  = "Refresh Theme"; $btnThRefresh.Background  = Get-WpfColor "#5A78C4"; $btnThRefresh.Foreground  = Get-WpfColor "#FFFFFF"; $btnThRefresh.Width  = 115; $btnThRefresh.Height  = 25; $btnThRefresh.BorderThickness  = 0; $btnThRefresh.Cursor  = [System.Windows.Input.Cursors]::Hand
+
+    $themeBarStack.Children.Add($chkThRename)  | Out-Null
+    $themeBarStack.Children.Add($chkThMerge)   | Out-Null
+    $themeBarStack.Children.Add($chkThSlice)   | Out-Null
+    $themeBarStack.Children.Add($chkThExtract) | Out-Null
+    $themeBarStack.Children.Add($chkThImage)   | Out-Null
+    $themeBarStack.Children.Add($btnThSelAll)   | Out-Null
+    $themeBarStack.Children.Add($btnThDeselAll) | Out-Null
+    $themeBarStack.Children.Add($btnThRevert)   | Out-Null
+    $themeBarStack.Children.Add($btnThProcess)  | Out-Null
+    $themeBarStack.Children.Add($btnThRefresh)  | Out-Null
+    $themeBar.Child = $themeBarStack
+    $gpStack.Children.Add($themeBar) | Out-Null
+
     $parentListStack = New-Object System.Windows.Controls.StackPanel
     $parentListStack.Margin = New-Object System.Windows.Thickness(15)
     $gpStack.Children.Add($parentListStack) | Out-Null
@@ -2020,6 +2055,84 @@ function Build-GpJob($gpPath, $parentDict) {
         $gpJob.Parents.Add($pJob) | Out-Null
     }
     Update-GpFileCount $gpJob
+
+    # --- THEME TASK BAR HANDLERS (wired after Parents are populated) ---
+    $chkThRename.Tag = $gpJob
+    $chkThRename.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { $p.ChkRename.IsChecked = $s } })
+
+    $chkThMerge.Tag = $gpJob
+    $chkThMerge.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { if ($p.ChkMerge.IsEnabled) { $p.ChkMerge.IsChecked = $s } } })
+
+    $chkThSlice.Tag = $gpJob
+    $chkThSlice.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { $p.ChkSlice.IsChecked = $s } })
+
+    $chkThExtract.Tag = $gpJob
+    $chkThExtract.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { $p.ChkExtract.IsChecked = $s } })
+
+    $chkThImage.Tag = $gpJob
+    $chkThImage.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { $p.ChkImage.IsChecked = $s } })
+
+    $btnThSelAll.Tag = @{ GpJob = $gpJob; Chks = @{ Rename = $chkThRename; Merge = $chkThMerge; Slice = $chkThSlice; Extract = $chkThExtract; Image = $chkThImage } }
+    $btnThSelAll.Add_Click({
+        $t = $this.Tag
+        foreach ($p in $t.GpJob.Parents) {
+            $p.ChkRename.IsChecked = $true; $p.ChkSlice.IsChecked = $true
+            $p.ChkExtract.IsChecked = $true; $p.ChkImage.IsChecked = $true
+            if ($p.ChkMerge.IsEnabled) { $p.ChkMerge.IsChecked = $true }
+        }
+        $t.Chks.Rename.IsChecked = $true; $t.Chks.Merge.IsChecked = $true
+        $t.Chks.Slice.IsChecked = $true; $t.Chks.Extract.IsChecked = $true; $t.Chks.Image.IsChecked = $true
+    })
+
+    $btnThDeselAll.Tag = @{ GpJob = $gpJob; Chks = @{ Rename = $chkThRename; Merge = $chkThMerge; Slice = $chkThSlice; Extract = $chkThExtract; Image = $chkThImage } }
+    $btnThDeselAll.Add_Click({
+        $t = $this.Tag
+        foreach ($p in $t.GpJob.Parents) {
+            $p.ChkRename.IsChecked = $false; $p.ChkMerge.IsChecked = $false; $p.ChkSlice.IsChecked = $false
+            $p.ChkExtract.IsChecked = $false; $p.ChkImage.IsChecked = $false; $p.ChkLogs.IsChecked = $false
+        }
+        $t.Chks.Rename.IsChecked = $false; $t.Chks.Merge.IsChecked = $false
+        $t.Chks.Slice.IsChecked = $false; $t.Chks.Extract.IsChecked = $false; $t.Chks.Image.IsChecked = $false
+    })
+
+    $btnThRevert.Tag = $gpJob
+    $btnThRevert.Add_Click({
+        $gp = $this.Tag
+        $batPath = Join-Path $scriptDir "..\callers\RevertMerge.bat"
+        if (-not (Test-Path $batPath)) { [System.Windows.MessageBox]::Show("RevertMerge.bat not found.", "Error") | Out-Null; return }
+        $targets = @()
+        foreach ($p in $gp.Parents) {
+            if ($p.BtnRevertMerge -and $p.BtnRevertMerge.IsEnabled) {
+                $tp = if ($p.ProcessedAnchorPath -ne "") { $p.ProcessedAnchorPath } else { $p.AnchorFile.FullName }
+                if ($tp) { $targets += $tp }
+            }
+        }
+        if ($targets.Count -eq 0) { return }
+        foreach ($tp in $targets) {
+            $argList = '/c ""' + $batPath + '" "' + $tp + '""'
+            $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $argList -WindowStyle Hidden -PassThru
+            $timeout = 100
+            while (-not $proc.HasExited -and $timeout -gt 0) {
+                [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
+                Start-Sleep -Milliseconds 100; $timeout--
+            }
+            if (-not $proc.HasExited) { try { $proc.Kill() } catch {} }
+        }
+        foreach ($p in @($gp.Parents)) { Refresh-PJob $p $gp }
+    })
+
+    $btnThProcess.Tag = $gpJob
+    $btnThProcess.Add_Click({
+        $gp = $this.Tag
+        foreach ($p in $gp.Parents) { Enqueue-PJob $p $gp }
+        if ($script:activeProcess -eq $null -and $script:processQueue.Count -gt 0) { Start-NextProcess }
+    })
+
+    $btnThRefresh.Tag = $gpJob
+    $btnThRefresh.Add_Click({
+        $gp = $this.Tag
+        foreach ($p in @($gp.Parents)) { Refresh-PJob $p $gp }
+    })
 
     $cbTheme.Tag = $gpJob
     $cbTheme.Add_SelectionChanged({ foreach ($p in $this.Tag.Parents) { Update-ParentPreview $p $this.Tag } })
