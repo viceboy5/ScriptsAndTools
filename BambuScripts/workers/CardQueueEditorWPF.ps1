@@ -379,7 +379,7 @@ $script:processQueue = New-Object System.Collections.Queue
 $script:activeProcess = $null
 $script:activeProcessJob = $null
 $script:PrinterPrefixes = @('P2S', 'X1C', 'H2S')
-$script:GpThemes   = @('Fantasy','Puppies','Original','Ocean','Farm','Foodz','StarsAndStripes','Spring','Prehistoric','Halloween 2025','Christmas 2025')
+$script:GpThemes   = @('Fantasy','Puppies','Original','Ocean','Farm','Foodz','StarsAndStripes','Spring','Prehistoric','Halloween 2025','Christmas 2025','RTC','Summer','Licensing','Jungle','Halloween26','SciFi','Sports','KidsCreations','Careers')
 $script:AdjPresets = @('Common','RARE','EPIC','LEGENDARY','Default')
 
 function Find-AnchorFile($folderPath) {
