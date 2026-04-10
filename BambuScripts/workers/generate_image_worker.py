@@ -216,10 +216,78 @@ def main():
     ui_layer = Image.new("RGBA", (CANVAS_SIZE, CANVAS_SIZE), (0, 0, 0, 0))
     ui_draw = ImageDraw.Draw(ui_layer)
 
+    # --- PARSE COLORS ---
+    active_colors = []
+    for c in args.colors:
+        pcs = c.split('|')
+        if len(pcs) == 3 and float(pcs[2]) > 0:
+            active_colors.append(pcs)
+
+    # --- PRELIMINARY SWATCH GEOMETRY ---
+    # Use a conservative title-height estimate so effective_box is stable across both passes.
+    # FONT_TITLE_RATIO * 1.3 + padding gives ~13% of canvas (~67px), safely above actual title height.
+    font_num  = load_font(int(CANVAS_SIZE * FONT_NUM_RATIO))
+    font_text = load_font(int(CANVAS_SIZE * FONT_TEXT_RATIO))
+
+    n = len(active_colors)
+    swatch_top_prelim = int(CANVAS_SIZE * 0.13)   # conservative top offset for effective_box sizing
+    if n > 0:
+        row_h_prelim  = (CANVAS_SIZE - MARGIN - swatch_top_prelim) / n
+        effective_box = min(int(CANVAS_SIZE * 0.40),
+                            max(int(CANVAS_SIZE * 0.07), int(row_h_prelim) - 4))
+    else:
+        effective_box = COLOR_BOX_SIZE
+    box_x      = CANVAS_SIZE - MARGIN - effective_box
+    right_edge = box_x - int(CANVAS_SIZE * 0.02)
+
+    # --- FIRST PASS: measure filament labels → establish left-column boundary ---
+    BRAND_PREFIXES = ["Sunlu Silk", "Voxel", "Esun", "Sunlu", "Eryone"]
+    slot_renders       = []
+    max_fil_text_width = 0
+
+    for cname, chex, cmass in active_colors:
+        rounded_mass = int(math.ceil(float(cmass) / 10.0)) * 10
+        mass_txt   = f"{rounded_mass} g"
+        brand_line = cname
+        rest_line  = ""
+        for prefix in BRAND_PREFIXES:
+            if cname.lower().startswith(prefix.lower()):
+                brand_line = cname[:len(prefix)]
+                rest_line  = cname[len(prefix):].strip()
+                break
+        num_lines = 3 if rest_line else 2
+        slot_h    = effective_box // num_lines
+
+        fit_size = int(CANVAS_SIZE * FONT_TEXT_RATIO)
+        fit_font = font_text
+        while True:
+            _, _, _, test_h = ui_draw.textbbox((0, 0), brand_line, font=fit_font)
+            if test_h > (slot_h - 2) and fit_size > 8:
+                fit_size -= 1
+                fit_font  = load_font(fit_size)
+            else:
+                break
+
+        _, _, brand_w, line_h = ui_draw.textbbox((0, 0), brand_line, font=fit_font)
+        rest_w = 0
+        if rest_line:
+            _, _, rest_w, _ = ui_draw.textbbox((0, 0), rest_line, font=fit_font)
+        _, _, mass_w, mass_h = ui_draw.textbbox((0, 0), mass_txt, font=fit_font)
+
+        max_fil_text_width = max(max_fil_text_width, brand_w, rest_w, mass_w)
+        slot_renders.append((cname, chex, cmass, brand_line, rest_line, mass_txt,
+                             fit_font, slot_h, line_h, brand_w, rest_w, mass_w, mass_h))
+
+    fil_gap        = int(CANVAS_SIZE * 0.01)
+    left_col_right = right_edge - max_fil_text_width - fil_gap
+    max_left_width = max(MARGIN * 4, left_col_right - MARGIN)
+
+    # --- TITLE: centered on the full canvas, shrinks if needed ---
+    # The title sits above the swatch zone so it can use the full canvas width.
+    max_title_width    = CANVAS_SIZE - 2 * MARGIN
     display_for_sizing = char_display + (f" ({adj_display})" if adj_display else "")
-    current_font_size = int(CANVAS_SIZE * FONT_TITLE_RATIO)
+    current_font_size  = int(CANVAS_SIZE * FONT_TITLE_RATIO)
     font_title = load_font(current_font_size)
-    max_title_width = CANVAS_SIZE - (MARGIN * 2)
 
     while True:
         _, _, w, _ = ui_draw.textbbox((0, 0), display_for_sizing, font=font_title)
@@ -230,24 +298,22 @@ def main():
             break
 
     bbox_title = ui_draw.textbbox((0, 0), display_for_sizing, font=font_title)
-    _, title_top, title_right, title_bottom = bbox_title
+    title_l, title_top, title_r, title_bottom = bbox_title
+    title_w = title_r - title_l
+    x_name  = (CANVAS_SIZE - title_w) // 2   # centered on full canvas width
+    y_name  = MARGIN - title_top
 
-    x_name = CANVAS_SIZE - MARGIN - title_right
-    y_name = MARGIN - title_top
-
-    RARE_GRADIENT = ["#60B4FF", "#1A6FD4", "#0A3FA8", "#1A6FD4", "#60B4FF"]
-    EPIC_GRADIENT = ["#FFD700", "#C0C0C0", "#FFD700", "#C0C0C0", "#FFD700"]
+    RARE_GRADIENT      = ["#60B4FF", "#1A6FD4", "#0A3FA8", "#1A6FD4", "#60B4FF"]
+    EPIC_GRADIENT      = ["#FFD700", "#C0C0C0", "#FFD700", "#C0C0C0", "#FFD700"]
     LEGENDARY_GRADIENT = ["#ff66c4", "#5170ff", "#4b9941", "#ffb717", "#4b9941", "#5170ff", "#ff66c4"]
-    SPECIAL_WORDS = {"RARE": RARE_GRADIENT, "EPIC": EPIC_GRADIENT, "LEGENDARY": LEGENDARY_GRADIENT}
+    SPECIAL_WORDS      = {"RARE": RARE_GRADIENT, "EPIC": EPIC_GRADIENT, "LEGENDARY": LEGENDARY_GRADIENT}
 
     _, _, space_w, _ = ui_draw.textbbox((0, 0), " ", font=font_title)
     cursor_x = x_name
-
     for word in char_display.split(" "):
         _, _, word_w, _ = ui_draw.textbbox((0, 0), word, font=font_title)
         draw_text_with_outline(ui_draw, (cursor_x, y_name), word, font_title, (255, 255, 255))
         cursor_x += word_w + space_w
-
     if adj_display:
         adj_token = f"({adj_display})"
         if adj_display in SPECIAL_WORDS:
@@ -255,107 +321,81 @@ def main():
         else:
             draw_text_with_outline(ui_draw, (cursor_x, y_name), adj_token, font_title, (255, 255, 255))
 
-    lowest_title_y = y_name + title_bottom
+    # --- FINAL SWATCH GEOMETRY: first row starts just below the title ---
+    title_bottom_y = y_name + title_bottom
+    swatch_top_y   = title_bottom_y + int(CANVAS_SIZE * 0.015)
+    if n > 0:
+        row_h = (CANVAS_SIZE - MARGIN - swatch_top_y) / n
+        # Clamp effective_box to actual row height (in case title was taller than estimate)
+        effective_box = min(effective_box, max(int(CANVAS_SIZE * 0.07), int(row_h) - 4))
+        box_x      = CANVAS_SIZE - MARGIN - effective_box
+        right_edge = box_x - int(CANVAS_SIZE * 0.02)
+    else:
+        row_h = 0
 
-    time_text = f"Skip Time: {round(float(args.time))} min"
-    font_time = load_font(int(CANVAS_SIZE * FONT_TIME_RATIO))
+    # --- SKIP TIME: bottom-left, unchanged position, red border box for visual separation ---
+    time_text      = f"Skip Time: {round(float(args.time))} min"
+    time_font_size = int(CANVAS_SIZE * FONT_TIME_RATIO)
+    font_time      = load_font(time_font_size)
+
+    while True:
+        _, _, tw, _ = ui_draw.textbbox((0, 0), time_text, font=font_time)
+        if tw > max_left_width and time_font_size > int(CANVAS_SIZE * 0.03):
+            time_font_size -= 2
+            font_time = load_font(time_font_size)
+        else:
+            break
+
     bbox_time = ui_draw.textbbox((0, 0), time_text, font_time)
-    time_left, time_top, _, time_bottom = bbox_time
-
-    x_time = MARGIN - time_left
+    time_l, time_top, time_r, time_bottom = bbox_time
+    x_time = MARGIN - time_l
     y_time = CANVAS_SIZE - int(CANVAS_SIZE * 0.08) - time_bottom
-
     draw_text_with_outline(ui_draw, (x_time, y_time), time_text, font_time, (255, 255, 255))
-    highest_time_y = y_time + time_top
 
-    font_num = load_font(int(CANVAS_SIZE * FONT_NUM_RATIO))
-    font_text = load_font(int(CANVAS_SIZE * FONT_TEXT_RATIO))
-    font_mass = load_font(int(CANVAS_SIZE * FONT_MASS_RATIO))
+    # Red border box around Skip Time
+    box_pad = max(4, int(CANVAS_SIZE * 0.008))
+    ui_draw.rectangle(
+        [MARGIN             - box_pad,
+         y_time + time_top  - box_pad,
+         x_time + time_r    + box_pad,
+         y_time + time_bottom + box_pad],
+        outline=(210, 40, 40), width=2)
 
-    active_colors = []
-    for c in args.colors:
-        pcs = c.split('|')
-        if len(pcs) == 3 and float(pcs[2]) > 0:
-            active_colors.append(pcs)
+    # --- SECOND PASS: draw swatches ---
+    for idx, (cname, chex, cmass, brand_line, rest_line, mass_txt,
+              fit_font, slot_h, line_h, brand_w, rest_w, mass_w, mass_h) in enumerate(slot_renders):
+        y   = int(swatch_top_y + idx * row_h + (row_h - effective_box) / 2)
+        rgb = parse_hex_to_rgb(chex)
+        is_silk = "silk" in cname.lower()
 
-    if active_colors:
-        start_y = lowest_title_y + int(CANVAS_SIZE * 0.03)
-        available_height = highest_time_y - start_y - int(CANVAS_SIZE * 0.02)
-        row_spacing = min(COLOR_BOX_SIZE + int(CANVAS_SIZE * 0.02), available_height // len(active_colors))
-
-        for idx, (cname, chex, cmass) in enumerate(active_colors):
-            y = start_y + (idx * row_spacing)
-            box_x = CANVAS_SIZE - MARGIN - COLOR_BOX_SIZE
-            rgb = parse_hex_to_rgb(chex)
-            rounded_mass = int(math.ceil(float(cmass) / 10.0)) * 10
-
-            is_silk = "silk" in cname.lower()
-
-            if rgb in gradient_library:
-                grad_img = create_gradient_swatch(COLOR_BOX_SIZE, COLOR_BOX_SIZE, gradient_library[rgb])
-                background.paste(grad_img, (box_x, y))
-                if is_silk:
-                    draw_metallic_border(ui_draw, box_x, y, COLOR_BOX_SIZE, rgb)
-                else:
-                    ui_draw.rectangle([box_x, y, box_x + COLOR_BOX_SIZE, y + COLOR_BOX_SIZE], outline="gray", width=2)
-            elif is_silk:
-                silk_img = create_silk_swatch(COLOR_BOX_SIZE, COLOR_BOX_SIZE, rgb)
-                background.paste(silk_img, (box_x, y))
-                draw_metallic_border(ui_draw, box_x, y, COLOR_BOX_SIZE, rgb)
+        if rgb in gradient_library:
+            grad_img = create_gradient_swatch(effective_box, effective_box, gradient_library[rgb])
+            background.paste(grad_img, (box_x, y))
+            if is_silk:
+                draw_metallic_border(ui_draw, box_x, y, effective_box, rgb)
             else:
-                ui_draw.rectangle([box_x, y, box_x + COLOR_BOX_SIZE, y + COLOR_BOX_SIZE], fill=rgb)
+                ui_draw.rectangle([box_x, y, box_x + effective_box, y + effective_box], outline="gray", width=2)
+        elif is_silk:
+            silk_img = create_silk_swatch(effective_box, effective_box, rgb)
+            background.paste(silk_img, (box_x, y))
+            draw_metallic_border(ui_draw, box_x, y, effective_box, rgb)
+        else:
+            ui_draw.rectangle([box_x, y, box_x + effective_box, y + effective_box], fill=rgb)
 
-            num_txt = str(idx + 1)
-            _, _, num_w, num_h = ui_draw.textbbox((0, 0), num_txt, font=font_num)
-            num_color = (0, 0, 0) if is_color_light(rgb) else (255, 255, 255)
-            ui_draw.text(
-                (box_x + (COLOR_BOX_SIZE - num_w) // 2, y + (COLOR_BOX_SIZE - num_h) // 2 - int(CANVAS_SIZE * 0.008)),
-                num_txt, font=font_num, fill=num_color)
+        num_txt = str(idx + 1)
+        _, _, num_w, num_h = ui_draw.textbbox((0, 0), num_txt, font=font_num)
+        num_color = (0, 0, 0) if is_color_light(rgb) else (255, 255, 255)
+        ui_draw.text(
+            (box_x + (effective_box - num_w) // 2, y + (effective_box - num_h) // 2 - int(CANVAS_SIZE * 0.008)),
+            num_txt, font=font_num, fill=num_color)
 
-            mass_txt = f"{rounded_mass} g"
-
-            BRAND_PREFIXES = ["Sunlu Silk", "Voxel", "Esun", "Sunlu", "Eryone"]
-            brand_line = cname
-            rest_line = ""
-            for prefix in BRAND_PREFIXES:
-                if cname.lower().startswith(prefix.lower()):
-                    brand_line = cname[:len(prefix)]
-                    rest_line = cname[len(prefix):].strip()
-                    break
-
-            num_lines = 3 if rest_line else 2
-            slot_h = COLOR_BOX_SIZE // num_lines
-
-            fit_font = font_text
-            fit_size = int(CANVAS_SIZE * FONT_TEXT_RATIO)
-            while True:
-                _, _, _, test_h = ui_draw.textbbox((0, 0), brand_line, font=fit_font)
-                if test_h > (slot_h - 2) and fit_size > 8:
-                    fit_size -= 1
-                    fit_font = load_font(fit_size)
-                else:
-                    break
-
-            right_edge = box_x - int(CANVAS_SIZE * 0.02)
-            _, _, brand_w, line_h = ui_draw.textbbox((0, 0), brand_line, font=fit_font)
-            rest_w = 0
-            if rest_line:
-                _, _, rest_w, _ = ui_draw.textbbox((0, 0), rest_line, font=fit_font)
-            _, _, mass_w, mass_h = ui_draw.textbbox((0, 0), mass_txt, font=fit_font)
-
-            brand_x = right_edge - brand_w
-            rest_x = right_edge - rest_w
-            mass_x = right_edge - mass_w
-
-            brand_y = y + (slot_h - line_h) // 2
-            draw_text_with_outline(ui_draw, (brand_x, brand_y), brand_line, font=fit_font, fill=(255, 255, 255))
-
-            if rest_line:
-                rest_y = y + slot_h + (slot_h - line_h) // 2
-                draw_text_with_outline(ui_draw, (rest_x, rest_y), rest_line, font=fit_font, fill=(255, 255, 255))
-
-            mass_y = y + slot_h * (num_lines - 1) + (slot_h - mass_h) // 2
-            draw_text_with_outline(ui_draw, (mass_x, mass_y), mass_txt, font=fit_font, fill=(180, 180, 180))
+        brand_y = y + (slot_h - line_h) // 2
+        draw_text_with_outline(ui_draw, (right_edge - brand_w, brand_y), brand_line, font=fit_font, fill=(255, 255, 255))
+        if rest_line:
+            rest_y = y + slot_h + (slot_h - line_h) // 2
+            draw_text_with_outline(ui_draw, (right_edge - rest_w, rest_y), rest_line, font=fit_font, fill=(255, 255, 255))
+        mass_y = y + slot_h * (2 if rest_line else 1) + (slot_h - mass_h) // 2
+        draw_text_with_outline(ui_draw, (right_edge - mass_w, mass_y), mass_txt, font=fit_font, fill=(180, 180, 180))
 
     if os.path.exists(args.img):
         char_img = Image.open(args.img).convert("RGBA")

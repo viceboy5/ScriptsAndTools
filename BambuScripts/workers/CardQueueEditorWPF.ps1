@@ -1095,7 +1095,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
                 $activeSlots.Add([PSCustomObject]@{ OldHex = $checkHex; Name = $matchedName }) | Out-Null
             }
         }
-        if ($activeSlots.Count -gt 4) { $activeSlots = $activeSlots[0..3] }
+        if ($activeSlots.Count -gt 8) { $activeSlots = $activeSlots[0..7] }
     }
 
     $pJob = @{
@@ -1277,11 +1277,18 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $colorsOverlayStack.VerticalAlignment = "Center"
     $colorsOverlayStack.Margin = New-Object System.Windows.Thickness(0, 0, 10, 0)
 
+    # Scale swatch size and spacing to fit 5–8 color slots inside the 438px card
+    $slotCount    = $activeSlots.Count
+    $swatchSize   = if ($slotCount -le 4) { 52 } elseif ($slotCount -le 5) { 44 } elseif ($slotCount -le 6) { 38 } else { 32 }
+    $rowMarginBtm = if ($slotCount -le 4) { 15 } elseif ($slotCount -le 5) { 10 } elseif ($slotCount -le 6) { 8  } else { 6  }
+    $numFontSize  = if ($slotCount -le 4) { 14 } elseif ($slotCount -le 6) { 12 } else { 10 }
+    $comboMinW    = if ($slotCount -ge 5) { 90 } else { 110 }
+
     $slotIdx = 1
     foreach ($slotData in $activeSlots) {
         $rowStack = New-Object System.Windows.Controls.StackPanel
         $rowStack.Orientation = "Horizontal"; $rowStack.HorizontalAlignment = "Right"
-        $rowStack.Margin = New-Object System.Windows.Thickness(0, 0, 0, 15)
+        $rowStack.Margin = New-Object System.Windows.Thickness(0, 0, 0, $rowMarginBtm)
 
         $textStack = New-Object System.Windows.Controls.StackPanel
         $textStack.Orientation = "Vertical"; $textStack.VerticalAlignment = "Center"
@@ -1293,7 +1300,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         else { $lblStatus.Text = "[UNMATCHED]"; $lblStatus.Foreground = Get-WpfColor "#D95F5F" }
 
         $combo = New-Object System.Windows.Controls.ComboBox; $combo.IsEditable = $true
-        $combo.MinWidth = 110; $combo.MaxWidth = 210 # Safe limits so it doesn't hit the image
+        $combo.MinWidth = $comboMinW; $combo.MaxWidth = 210 # Safe limits so it doesn't hit the image
         $combo.Width = [System.Double]::NaN # Tells WPF to Auto-size dynamically!
         foreach ($k in $LibraryColors.Keys) { [void]$combo.Items.Add($k) }
         if ($slotData.Name) { $combo.Text = $slotData.Name } else { $combo.Text = "Select Color..." }
@@ -1302,7 +1309,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
         $swatchColor = if ([string]::IsNullOrWhiteSpace($slotData.OldHex) -or $slotData.OldHex.Length -lt 7) { "#333333" } else { $slotData.OldHex }
         $swatchBorder = New-Object System.Windows.Controls.Border
-        $swatchBorder.Width = 52; $swatchBorder.Height = 52
+        $swatchBorder.Width = $swatchSize; $swatchBorder.Height = $swatchSize
         $swatchBorder.Background = Get-WpfColor $swatchColor
         $swatchBorder.BorderBrush = Get-WpfColor "#2A2C35"; $swatchBorder.BorderThickness = New-Object System.Windows.Thickness(1)
 
@@ -1316,7 +1323,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         }
         $numColor = if ((0.299*$r + 0.587*$g + 0.114*$b) -gt 128) { "#000000" } else { "#FFFFFF" }
 
-        $lblNum = Create-TextBlock $slotIdx.ToString() $numColor 14 "Bold"
+        $lblNum = Create-TextBlock $slotIdx.ToString() $numColor $numFontSize "Bold"
         $lblNum.HorizontalAlignment = "Center"; $lblNum.VerticalAlignment = "Center"
         $swatchBorder.Child = $lblNum
 
