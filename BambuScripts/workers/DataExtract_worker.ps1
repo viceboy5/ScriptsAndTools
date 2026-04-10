@@ -202,7 +202,9 @@ if ($adjSlot -match '(?i)Rare|Legendary|Epic') {
 $timeAdd = 0
 $filData = @(
     @{ g = 0; color = ""; rawHex = "" }, @{ g = 0; color = ""; rawHex = "" },
-    @{ g = 0; color = ""; rawHex = "" }, @{ g = 0; color = ""; rawHex = "" }, @{ g = 0; color = ""; rawHex = "" }
+    @{ g = 0; color = ""; rawHex = "" }, @{ g = 0; color = ""; rawHex = "" }, @{ g = 0; color = ""; rawHex = "" },
+    @{ g = 0; color = ""; rawHex = "" }, @{ g = 0; color = ""; rawHex = "" },
+    @{ g = 0; color = ""; rawHex = "" }, @{ g = 0; color = ""; rawHex = "" }
 )
 $outputValues = @()
 $h = 0; $m = 0; $modelGrams = 0; $objCount = 0; $actualColorSwaps = 0
@@ -239,8 +241,8 @@ if (-not $SkipExtraction) {
                         $weight = 0.0
                         [double]::TryParse($node.used_g, [System.Globalization.NumberStyles]::Any, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$weight) | Out-Null
 
-                        # Only process if filament is actually used AND we haven't exceeded our 4 slot maximum
-                        if ($weight -gt 0 -and $activeSlotIndex -le 4) {
+                        # Only process if filament is actually used AND we haven't exceeded our 8 slot maximum
+                        if ($weight -gt 0 -and $activeSlotIndex -le 8) {
                             $filData[$activeSlotIndex].g = [math]::Round($weight, 2)
 
                             # Normalize hex code to pure alphanumeric for the dictionary match
@@ -341,15 +343,21 @@ if (-not $SkipExtraction) {
             }
         }
 
-        $outputValues = @(
-            $projectName, $themeOutput, (Get-Date).ToString("M/d/yyyy"),
-            $h, $m,
-            $(if ($filData[1].g -gt 0) { $filData[1].g } else { 0 }), $filData[1].color,
-            $(if ($filData[2].g -gt 0) { $filData[2].g } else { 0 }), $filData[2].color,
-            $(if ($filData[3].g -gt 0) { $filData[3].g } else { 0 }), $filData[3].color,
-            $(if ($filData[4].g -gt 0) { $filData[4].g } else { 0 }), $filData[4].color,
+        # Determine how many slots have data (minimum 4 for schema compatibility)
+        $activeSlotCount = 4
+        for ($i = 5; $i -le 8; $i++) { if ($filData[$i].g -gt 0) { $activeSlotCount = $i } }
+
+        $outputValues = @($projectName, $themeOutput, (Get-Date).ToString("M/d/yyyy"), $h, $m)
+        for ($i = 1; $i -le $activeSlotCount; $i++) {
+            $outputValues += $(if ($filData[$i].g -gt 0) { $filData[$i].g } else { 0 })
+            $outputValues += $filData[$i].color
+        }
+
+        # SUM formula: 4-slot baseline ends at 'N'; shift end column right 2 letters per extra slot
+        $endCol = [char](78 + ($activeSlotCount - 4) * 2)  # 'N'=78 for 4 slots, 'P' for 5, 'R' for 6, etc.
+        $outputValues += @(
             $actualColorSwaps, $objCount, [math]::Round($modelGrams, 2),
-            '=SUM(INDIRECT("G"&ROW()&":N"&ROW()))',
+            "=SUM(INDIRECT(`"G`"&ROW()&`":$endCol`"&ROW()))",
             $timeAdd
         )
     } catch {
@@ -364,23 +372,28 @@ if (-not $SkipExtraction) {
             $existingData = Get-Content $IndividualTsvPath | Select-Object -Last 1
             $cols = $existingData -split "`t"
 
-            if ($cols.Count -ge 19) {
+            if ($cols.Count -ge 18) {
+                # Infer slot count from column count: (total - 5 prefix - 5 trailing) / 2
+                $tsvSlotCount = [math]::Min(8, [math]::Max(4, [math]::Floor(($cols.Count - 10) / 2)))
                 # Rebuild filament array from TSV columns
-                for ($i = 1; $i -le 4; $i++) {
+                for ($i = 1; $i -le $tsvSlotCount; $i++) {
                     $gIdx = 5 + (($i - 1) * 2)
                     $cIdx = $gIdx + 1
-                    if ([double]::TryParse($cols[$gIdx], [ref]$null)) { $filData[$i].g = [double]$cols[$gIdx] }
-
-                    $filData[$i].color = $cols[$cIdx]
-                    if ($filData[$i].color -ne "") {
-                        if ($filData[$i].color.StartsWith("#")) {
-                            $filData[$i].rawHex = $filData[$i].color
-                        } else {
-                            $filData[$i].rawHex = $NameToHex[$filData[$i].color]
+                    if ($gIdx -lt $cols.Count -and [double]::TryParse($cols[$gIdx], [ref]$null)) { $filData[$i].g = [double]$cols[$gIdx] }
+                    if ($cIdx -lt $cols.Count) {
+                        $filData[$i].color = $cols[$cIdx]
+                        if ($filData[$i].color -ne "") {
+                            if ($filData[$i].color.StartsWith("#")) {
+                                $filData[$i].rawHex = $filData[$i].color
+                            } else {
+                                $filData[$i].rawHex = $NameToHex[$filData[$i].color]
+                            }
                         }
                     }
                 }
-                if ([double]::TryParse($cols[18], [ref]$null)) { $timeAdd = [double]$cols[18] }
+                # timeAdd is always the last column
+                $timeAddIdx = $cols.Count - 1
+                if ([double]::TryParse($cols[$timeAddIdx], [ref]$null)) { $timeAdd = [double]$cols[$timeAddIdx] }
             }
         } catch {
             Write-Warning "Failed to read data from TSV."
@@ -439,7 +452,7 @@ if ($GenerateImage) {
             if (Test-Path $sourceImg) {
                 # Build Python arguments as a single strict string to protect spaces in paths!
                 $pyArgsStr = "`"$pyScript`" --name `"$projectName`" --time `"$timeAdd`" --img `"$sourceImg`" --out `"$expectedPng`" --colors"
-                foreach ($i in 1..4) {
+                foreach ($i in 1..8) {
                     if ($filData[$i].g -gt 0) {
                         $pyArgsStr += " `"$($filData[$i].color)|$($filData[$i].rawHex)|$($filData[$i].g)`""
                     }
