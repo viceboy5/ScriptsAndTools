@@ -1552,6 +1552,14 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnRefresh.Add_Click({ $t = $this.Tag; Refresh-PJob $t.P $t.G })
     $btnHdrStack.Children.Add($btnRefresh) | Out-Null
 
+    $btnOpenFolder = New-Object System.Windows.Controls.Button
+    $btnOpenFolder.Content = "Open Folder"; $btnOpenFolder.Background = Get-WpfColor "#2A2C35"; $btnOpenFolder.Foreground = Get-WpfColor "#FFFFFF"
+    $btnOpenFolder.Width = 100; $btnOpenFolder.Height = 25; $btnOpenFolder.BorderThickness = 0
+    $btnOpenFolder.Margin = New-Object System.Windows.Thickness(0,0,10,0); $btnOpenFolder.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnOpenFolder.Tag = $pJob
+    $btnOpenFolder.Add_Click({ Start-Process "explorer.exe" $this.Tag.FolderPath })
+    $btnHdrStack.Children.Add($btnOpenFolder) | Out-Null
+
     $btnRemoveP = New-Object System.Windows.Controls.Button
     $btnRemoveP.Content = "Remove Folder"; $btnRemoveP.Background = Get-WpfColor "#D95F5F"; $btnRemoveP.Foreground = Get-WpfColor "#FFFFFF"
     $btnRemoveP.Width = 120; $btnRemoveP.Height = 25; $btnRemoveP.BorderThickness = 0; $btnRemoveP.Cursor = [System.Windows.Input.Cursors]::Hand
