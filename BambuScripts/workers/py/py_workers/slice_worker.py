@@ -11,6 +11,7 @@ Mirrors PS1 Slice_worker.ps1.
 import argparse
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 BAMBU_DEFAULT = r'C:\Program Files\Bambu Studio\bambu-studio.exe'
@@ -39,20 +40,33 @@ def slice_file(file_path: Path, bambu_exe: Path, label: str = '') -> bool:
         str(file_path),
     ]
 
+    log_out = Path(tempfile.gettempdir()) / f'bbs_out_{base_name}.txt'
+    log_err = Path(tempfile.gettempdir()) / f'bbs_err_{base_name}.txt'
+
     try:
-        proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        import time
+        with open(log_out, 'w') as fout, open(log_err, 'w') as ferr:
+            proc = subprocess.Popen(args, stdout=fout, stderr=ferr)
         while proc.poll() is None:
             print('.', end='', flush=True)
-            import time; time.sleep(3)
-        print(' [DONE]')
+            time.sleep(3)
+        print(f' [DONE] exit={proc.returncode}')
     except Exception as exc:
         print(f'\n  [!] ERROR: Failed to launch Bambu Studio: {exc}')
         return False
 
     if not sliced_out.exists():
         print(f'\n  [!] ERROR: Bambu Studio did not generate {sliced_out}')
+        for lf, tag in ((log_out, 'STDOUT'), (log_err, 'STDERR')):
+            if lf.exists():
+                txt = lf.read_text(encoding='utf-8', errors='replace').strip()
+                if txt:
+                    print(f'  [Bambu {tag} (last 3000 chars)]\n{txt[-3000:]}')
+                lf.unlink(missing_ok=True)
         return False
 
+    for lf in (log_out, log_err):
+        lf.unlink(missing_ok=True)
     return True
 
 
