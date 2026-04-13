@@ -1088,6 +1088,182 @@ function Start-NextProcess {
 }
 
 # --- 7. DYNAMIC UI GENERATION ---
+
+# Count objects with type="model" inside a .3mf ZIP's 3dmodel.model
+function Count-3mfObjects([string]$path) {
+    if (-not (Test-Path $path)) { return 0 }
+    try {
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($path)
+        $modelEntry = $zip.Entries | Where-Object { ($_.FullName -replace "\\","/") -imatch "(?i)3D/3dmodel\.model$" } | Select-Object -First 1
+        if ($null -eq $modelEntry) { $zip.Dispose(); return 0 }
+        $sr = New-Object System.IO.StreamReader($modelEntry.Open())
+        $content = $sr.ReadToEnd(); $sr.Close(); $zip.Dispose()
+        return ([regex]::Matches($content, 'type="model"')).Count
+    } catch { if ($null -ne $zip) { try { $zip.Dispose() } catch {} }; return 0 }
+}
+
+# Build the read-only review content into $pJob.ReviewStack (called lazily on first toggle)
+function Build-ReviewContent($pJob) {
+    $sp = $pJob.ReviewStack
+
+    # --- Print time from *_Data.tsv (col 3 = hours, col 4 = minutes) ---
+    $printTimeStr = "n/a"
+    $tsvFile = Get-ChildItem -Path $pJob.FolderPath -Filter "*_Data.tsv" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($tsvFile) {
+        try {
+            $tsvLine = Get-Content $tsvFile.FullName -ErrorAction SilentlyContinue | Select-Object -Last 1
+            if ($tsvLine) {
+                $cols = $tsvLine -split "`t"
+                if ($cols.Count -ge 5) {
+                    $th = 0; $tm = 0
+                    [int]::TryParse($cols[3], [ref]$th) | Out-Null
+                    [int]::TryParse($cols[4], [ref]$tm) | Out-Null
+                    $printTimeStr = if ($th -gt 0) { "${th}h ${tm}m" } else { "${tm}m" }
+                }
+            }
+        } catch {}
+    }
+
+    # --- Pre / Post merge object counts ---
+    $preCount = "n/a"; $postCount = "n/a"
+    $nestFile = Get-ChildItem -Path $pJob.FolderPath -Filter "*Nest.3mf" -ErrorAction SilentlyContinue | Select-Object -First 1
+    $fullFile = Get-ChildItem -Path $pJob.FolderPath -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -imatch 'Full\.3mf$' -and $_.Name -notmatch '(?i)gcode' } | Select-Object -First 1
+    if ($nestFile) { $preCount  = (Count-3mfObjects $nestFile.FullName).ToString() }
+    if ($fullFile) { $postCount = (Count-3mfObjects $fullFile.FullName).ToString() }
+
+    # --- Files section ---
+    $hdrFiles = Create-TextBlock "Files" "#A0A0A0" 11 "Bold"
+    $hdrFiles.Margin = New-Object System.Windows.Thickness(0,0,0,4)
+    $sp.Children.Add($hdrFiles) | Out-Null
+
+    $reviewFiles = Get-ChildItem -Path $pJob.FolderPath -File -ErrorAction SilentlyContinue |
+        Sort-Object { switch -Regex ($_.Name) { 'Final\.3mf$' {0} 'Nest\.3mf$' {1} 'Full\.3mf$' {2} 'Full\.gcode\.3mf$' {3} default {9} } }, Name
+    foreach ($fi in $reviewFiles) {
+        $fc = if     ($fi.Name -imatch 'Nest\.3mf$')        { "#FF69B4" }
+              elseif ($fi.Name -imatch 'Full\.gcode\.3mf$') { "#4CAF72" }
+              elseif ($fi.Name -imatch 'Full\.3mf$')        { "#B57BFF" }
+              elseif ($fi.Name -imatch 'Final\.3mf$')       { "#FFD700" }
+              else                                           { "#90B8C8" }
+        $lbl = Create-TextBlock $fi.Name $fc 11 "Normal"
+        $lbl.Margin = New-Object System.Windows.Thickness(0,1,0,1); $lbl.TextWrapping = "Wrap"
+        $sp.Children.Add($lbl) | Out-Null
+    }
+
+    # --- Print time ---
+    $sep1 = New-Object System.Windows.Controls.Separator
+    $sep1.Margin = New-Object System.Windows.Thickness(0,6,0,6)
+    $sep1.Background = Get-WpfColor "#2A2C35"; $sp.Children.Add($sep1) | Out-Null
+    $ptRow = New-Object System.Windows.Controls.StackPanel; $ptRow.Orientation = "Horizontal"
+    $ptRow.Children.Add((Create-TextBlock "Print Time:  " "#A0A0A0" 12 "Normal")) | Out-Null
+    $ptRow.Children.Add((Create-TextBlock $printTimeStr "#FFFFFF" 12 "Bold")) | Out-Null
+    $sp.Children.Add($ptRow) | Out-Null
+
+    # --- Filament colors ---
+    $sep2 = New-Object System.Windows.Controls.Separator
+    $sep2.Margin = New-Object System.Windows.Thickness(0,6,0,6)
+    $sep2.Background = Get-WpfColor "#2A2C35"; $sp.Children.Add($sep2) | Out-Null
+    $sp.Children.Add((Create-TextBlock "Filament Colors" "#A0A0A0" 11 "Bold")) | Out-Null
+    foreach ($slot in $pJob.UISlots) {
+        $cRow = New-Object System.Windows.Controls.StackPanel; $cRow.Orientation = "Horizontal"
+        $cRow.Margin = New-Object System.Windows.Thickness(0,2,0,2)
+        $sw = New-Object System.Windows.Controls.Border
+        $sw.Width = 14; $sw.Height = 14; $sw.CornerRadius = New-Object System.Windows.CornerRadius(3)
+        $sw.Margin = New-Object System.Windows.Thickness(0,0,6,0); $sw.VerticalAlignment = "Center"
+        $hexShort = if ($slot.OldHex.Length -ge 7) { $slot.OldHex.Substring(0,7) } else { "#888888" }
+        try { $sw.Background = Get-WpfColor $hexShort } catch { $sw.Background = Get-WpfColor "#888888" }
+        $cRow.Children.Add($sw) | Out-Null
+        $numTxt = if ($null -ne $slot.LblNum) { $slot.LblNum.Text } else { "?" }
+        $cRow.Children.Add((Create-TextBlock "Slot ${numTxt}:  " "#888888" 11 "Normal")) | Out-Null
+        $colorName = if ($null -ne $slot.Combo) { $slot.Combo.Text } else { "n/a" }
+        $cRow.Children.Add((Create-TextBlock $colorName "#DDDDDD" 11 "Normal")) | Out-Null
+        $sp.Children.Add($cRow) | Out-Null
+    }
+
+    # --- Merge counts ---
+    $sep3 = New-Object System.Windows.Controls.Separator
+    $sep3.Margin = New-Object System.Windows.Thickness(0,6,0,6)
+    $sep3.Background = Get-WpfColor "#2A2C35"; $sp.Children.Add($sep3) | Out-Null
+    $mRow = New-Object System.Windows.Controls.StackPanel; $mRow.Orientation = "Horizontal"
+    $mRow.Children.Add((Create-TextBlock "Pre-merge:  "  "#A0A0A0" 11 "Normal")) | Out-Null
+    $mRow.Children.Add((Create-TextBlock "$preCount   "  "#FFD700" 11 "Bold"))   | Out-Null
+    $mRow.Children.Add((Create-TextBlock "Post-merge:  " "#A0A0A0" 11 "Normal")) | Out-Null
+    $mRow.Children.Add((Create-TextBlock $postCount      "#4CAF72" 11 "Bold"))   | Out-Null
+    $sp.Children.Add($mRow) | Out-Null
+}
+
+# Put a single parent into Review mode (called by Toggle-GpMode)
+function Set-PJobReviewMode($pJob) {
+    if (-not $pJob.ReviewBuilt) {
+        Build-ReviewContent $pJob
+        $pJob.ReviewBuilt = $true
+    }
+    if ($null -eq $pJob.ReviewCardOverlay.Source -and
+        $pJob.GcodeImgPath -ne "" -and (Test-Path $pJob.GcodeImgPath)) {
+        $pJob.ReviewCardOverlay.Source = Load-WpfImage $pJob.GcodeImgPath
+    }
+    $pJob.ReviewCardOverlay.Visibility = "Visible"
+    $pJob.ReviewPanel.Visibility       = "Visible"
+    $pJob.TasksBox.Visibility          = "Collapsed"
+    $pJob.EditBox.Visibility           = "Collapsed"
+    $pJob.PnlFiles.Visibility          = "Collapsed"
+    $pJob.ApplyRow.Visibility          = "Collapsed"
+    $pJob.BtnRefresh.Visibility        = "Collapsed"
+    $pJob.BtnRemoveP.Visibility        = "Collapsed"
+    $pJob.BtnKeepReview.Visibility     = "Visible"
+    $pJob.BtnRevertReview.Visibility   = "Visible"
+}
+
+# Put a single parent back into Edit mode (called by Toggle-GpMode)
+function Set-PJobEditMode($pJob) {
+    $pJob.ReviewCardOverlay.Visibility = "Collapsed"
+    $pJob.ReviewPanel.Visibility       = "Collapsed"
+    $pJob.TasksBox.Visibility          = "Visible"
+    $pJob.EditBox.Visibility           = "Visible"
+    $pJob.PnlFiles.Visibility          = "Visible"
+    $pJob.ApplyRow.Visibility          = "Visible"
+    $pJob.BtnRefresh.Visibility        = "Visible"
+    $pJob.BtnRemoveP.Visibility        = "Visible"
+    $pJob.BtnKeepReview.Visibility     = "Collapsed"
+    $pJob.BtnRevertReview.Visibility   = "Collapsed"
+    # Reset review border and status label
+    $pJob.RowPanel.BorderBrush     = Get-WpfColor "#2A2C35"
+    $pJob.RowPanel.BorderThickness = New-Object System.Windows.Thickness(1)
+    if ($null -ne $pJob.ReviewStatusLabel) {
+        $pJob.ReviewStatusLabel.Text       = ""
+        $pJob.ReviewStatusLabel.Visibility = "Collapsed"
+    }
+}
+
+# Toggle an entire grandparent group between Edit and Review mode
+function Toggle-GpMode($gpJob) {
+    if ($gpJob.ReviewMode) {
+        # ── Switch back to Edit mode ──────────────────────────────────────
+        $gpJob.ReviewMode = $false
+        $gpJob.BtnModeToggle.Content    = "Review Mode"
+        $gpJob.BtnModeToggle.Background = Get-WpfColor "#4A4A7A"
+        $gpJob.HeaderGrid.Background    = Get-WpfColor "#2A2C35"
+        $gpJob.CbPrefix.IsEnabled       = $true
+        $gpJob.TBTheme.IsEnabled        = $true
+        $gpJob.ChkSkip.IsEnabled        = $true
+        $gpJob.LblGpPreview.Visibility  = "Visible"
+        if ($null -ne $gpJob.ThemeBar)   { $gpJob.ThemeBar.Visibility   = "Visible"   }
+        foreach ($pj in $gpJob.Parents) { Set-PJobEditMode $pj }
+    } else {
+        # ── Switch to Review mode ─────────────────────────────────────────
+        $gpJob.ReviewMode = $true
+        $gpJob.BtnModeToggle.Content    = "Edit Mode"
+        $gpJob.BtnModeToggle.Background = Get-WpfColor "#7A5A2A"
+        $gpJob.HeaderGrid.Background    = Get-WpfColor "#1A1C22"
+        $gpJob.CbPrefix.IsEnabled       = $false
+        $gpJob.TBTheme.IsEnabled        = $false
+        $gpJob.ChkSkip.IsEnabled        = $false
+        $gpJob.LblGpPreview.Visibility  = "Collapsed"
+        if ($null -ne $gpJob.ThemeBar)   { $gpJob.ThemeBar.Visibility   = "Collapsed" }
+        foreach ($pj in $gpJob.Parents) { Set-PJobReviewMode $pj }
+    }
+}
+
 function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $tempWork = Join-Path $env:TEMP ("LiveCard_" + [guid]::NewGuid().ToString().Substring(0,8))
     New-Item -ItemType Directory -Path $tempWork | Out-Null
@@ -1177,6 +1353,12 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         UISlots = New-Object System.Collections.ArrayList
         FileRows = New-Object System.Collections.ArrayList
         IsDone = $false; IsQueued = $false; HasCollision = $false
+        ReviewBuilt = $false
+        GcodeImgPath = ""; ReviewCardOverlay = $null; ReviewPanel = $null; ReviewStack = $null
+        TasksBox = $null; EditBox = $null; ApplyRow = $null
+        BtnRefresh = $null; BtnRemoveP = $null; BtnKeepReview = $null; BtnRevertReview = $null
+        ReviewStatusLabel = $null
+        _GpJob = $gpJob
     }
 
     # ── Outer row border (the RowPanel equivalent) ───────────────────────────
@@ -1296,6 +1478,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             if ($entry) {
                 $gcodeImgPath = Join-Path $tempWork "plate_1_gcode.png"
                 [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $gcodeImgPath, $true)
+                $pJob.GcodeImgPath = $gcodeImgPath
                 $pbCurrent.Source = Load-WpfImage $gcodeImgPath
             } else { $currentGrid.Visibility = "Collapsed" }
         } catch { $currentGrid.Visibility = "Collapsed" }
@@ -1451,6 +1634,25 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pJob.ProcessingOverlay = $cardBorderOverlay
     $pJob.CardStatusLabel   = $cardStatusLbl
 
+    # Review-mode plate overlay — covers the full card area; shown only in Review mode
+    $reviewCardOverlay = New-Object System.Windows.Controls.Image
+    $reviewCardOverlay.Stretch = "Uniform"; $reviewCardOverlay.Visibility = "Collapsed"
+    $reviewCardOverlay.Cursor = [System.Windows.Input.Cursors]::Hand
+    $reviewCardOverlay.Add_MouseLeftButtonDown({
+        if ($_.ClickCount -ge 2 -and $null -ne $this.Source) {
+            $viewer = New-Object System.Windows.Window
+            $viewer.Title = "Plate Preview (gcode)"; $viewer.Background = Get-WpfColor "#0D0E10"
+            $viewer.SizeToContent = "WidthAndHeight"; $viewer.WindowStartupLocation = "CenterScreen"
+            $viewer.ResizeMode = "CanResizeWithGrip"
+            $imgV = New-Object System.Windows.Controls.Image
+            $imgV.Source = $this.Source; $imgV.MaxWidth = 900; $imgV.MaxHeight = 900; $imgV.Stretch = "Uniform"
+            $imgV.Margin = New-Object System.Windows.Thickness(10)
+            $viewer.Content = $imgV; $viewer.ShowDialog() | Out-Null
+        }
+    })
+    $cardGrid.Children.Add($reviewCardOverlay) | Out-Null
+    $pJob.ReviewCardOverlay = $reviewCardOverlay
+
     $cardGrid.AllowDrop = $true
     $cardGrid.Tag = $pJob
     $cardGrid.Add_DragOver({
@@ -1464,14 +1666,31 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     })
     $cardGrid.Add_Drop({
         $files = $_.Data.GetData([System.Windows.DataFormats]::FileDrop)
-        if ($files -and $files.Count -gt 0 -and [System.IO.Path]::GetExtension($files) -imatch '\.(png|jpg|jpeg)$') {
+        if ($files -and $files.Count -gt 0 -and [System.IO.Path]::GetExtension($files[0]) -imatch '\.(png|jpg|jpeg)$') {
             $job = $this.Tag
-            $srcPath = $files
-            $destPath = Join-Path $job.FolderPath ([System.IO.Path]::GetFileName($srcPath))
+            $srcPath = $files[0]
+            $destName = [System.IO.Path]::GetFileName($srcPath)
+            $destPath = Join-Path $job.FolderPath $destName
+
+            # Remove any existing non-slicePreview PNGs in the folder first
+            Get-ChildItem -Path $job.FolderPath -Filter "*.png" -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -notmatch "(?i)_slicePreview\.png" } |
+                ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
+
+            # Copy the dropped file
             if ($srcPath -ne $destPath) { Copy-Item -Path $srcPath -Destination $destPath -Force }
             $job.CustomImagePath = $destPath
-            $job.PbPlate.Source = Load-WpfImage $destPath
+            $job.PbPlate.Source  = Load-WpfImage $destPath
             if ($job.BtnBrowseImg) { $job.BtnBrowseImg.Background = Get-WpfColor "#4CAF72" }
+
+            # Refresh the file-list panel
+            $job.FileRows.Clear()
+            $job.PnlFiles.Children.Clear()
+            $gj = $job._GpJob
+            $folderFiles = Get-ChildItem -Path $job.FolderPath -File -ErrorAction SilentlyContinue |
+                Sort-Object { switch -Regex ($_.Name) { 'Final\.3mf$' {0} 'Nest\.3mf$' {1} 'Full\.3mf$' {2} 'Full\.gcode\.3mf$' {3} default {4} } }, Name
+            foreach ($fi2 in $folderFiles) { Add-FileRow $job $gj $fi2 }
+            Update-ParentPreview $job $gj
         }
         $_.Handled = $true
     })
@@ -1629,6 +1848,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnRefresh.Tag = @{ P = $pJob; G = $gpJob }
     $btnRefresh.Add_Click({ $t = $this.Tag; Refresh-PJob $t.P $t.G })
     $btnHdrStack.Children.Add($btnRefresh) | Out-Null
+    $pJob.BtnRefresh = $btnRefresh
 
     $btnOpenFolder = New-Object System.Windows.Controls.Button
     $btnOpenFolder.Content = "Open Folder"; $btnOpenFolder.Background = Get-WpfColor "#2E7D8A"; $btnOpenFolder.Foreground = Get-WpfColor "#FFFFFF"
@@ -1654,6 +1874,57 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         }
     })
     $btnHdrStack.Children.Add($btnRemoveP) | Out-Null
+    $pJob.BtnRemoveP = $btnRemoveP
+
+    # Keep button (Review mode only — marks design as checked, green border)
+    $btnKeepReview = New-Object System.Windows.Controls.Button
+    $btnKeepReview.Content = "Keep"; $btnKeepReview.Background = Get-WpfColor "#2E7D32"; $btnKeepReview.Foreground = Get-WpfColor "#FFFFFF"
+    $btnKeepReview.Width = 70; $btnKeepReview.Height = 25; $btnKeepReview.BorderThickness = 0
+    $btnKeepReview.Margin = New-Object System.Windows.Thickness(0,0,10,0); $btnKeepReview.Visibility = "Collapsed"; $btnKeepReview.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnKeepReview.Tag = $pJob
+    $btnKeepReview.Add_Click({
+        $pj = $this.Tag
+        $pj.RowPanel.BorderBrush     = Get-WpfColor "#4CAF72"
+        $pj.RowPanel.BorderThickness = New-Object System.Windows.Thickness(3)
+        $pj.ReviewStatusLabel.Text       = "CHECKED"
+        $pj.ReviewStatusLabel.Foreground = Get-WpfColor "#4CAF72"
+        $pj.ReviewStatusLabel.Visibility = "Visible"
+    })
+    $btnHdrStack.Children.Add($btnKeepReview) | Out-Null
+    $pJob.BtnKeepReview = $btnKeepReview
+
+    # Revert button (Review mode only — runs the revert bat, marks red)
+    $btnRevertReview = New-Object System.Windows.Controls.Button
+    $btnRevertReview.Content = "Revert"; $btnRevertReview.Background = Get-WpfColor "#D95F5F"; $btnRevertReview.Foreground = Get-WpfColor "#FFFFFF"
+    $btnRevertReview.Width = 70; $btnRevertReview.Height = 25; $btnRevertReview.BorderThickness = 0
+    $btnRevertReview.Margin = New-Object System.Windows.Thickness(0,0,0,0); $btnRevertReview.Visibility = "Collapsed"; $btnRevertReview.Cursor = [System.Windows.Input.Cursors]::Hand
+    if (-not $nestExists) { $btnRevertReview.IsEnabled = $false; $btnRevertReview.Background = Get-WpfColor "#555555" }
+    $btnRevertReview.Tag = @{ P = $pJob; G = $gpJob }
+    $btnRevertReview.Add_Click({
+        $t = $this.Tag; $pj = $t.P
+        $batPath = Join-Path $scriptDir "..\callers\RevertMerge.bat"
+        if (-not (Test-Path $batPath)) {
+            [System.Windows.MessageBox]::Show("RevertMerge.bat not found.", "Error") | Out-Null; return
+        }
+        $targetPath = if ($pj.ProcessedAnchorPath -ne "") { $pj.ProcessedAnchorPath } else { $pj.AnchorFile.FullName }
+        try {
+            $argList = '/c ""' + $batPath + '" "' + $targetPath + '""'
+            $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $argList -WindowStyle Hidden -PassThru
+            $timeout = 100
+            while (-not $proc.HasExited -and $timeout -gt 0) {
+                [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
+                Start-Sleep -Milliseconds 100; $timeout--
+            }
+            if (-not $proc.HasExited) { try { $proc.Kill() } catch {} }
+        } catch {}
+        $pj.RowPanel.BorderBrush     = Get-WpfColor "#D95F5F"
+        $pj.RowPanel.BorderThickness = New-Object System.Windows.Thickness(3)
+        $pj.ReviewStatusLabel.Text       = "REVERTED"
+        $pj.ReviewStatusLabel.Foreground = Get-WpfColor "#D95F5F"
+        $pj.ReviewStatusLabel.Visibility = "Visible"
+    })
+    $btnHdrStack.Children.Add($btnRevertReview) | Out-Null
+    $pJob.BtnRevertReview = $btnRevertReview
 
     $headerStack.Children.Add($btnHdrStack) | Out-Null
     $rightStack.Children.Add($headerStack) | Out-Null
@@ -1695,6 +1966,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
     $tasksBox.Child = $tasksOuter
     $rightStack.Children.Add($tasksBox) | Out-Null
+    $pJob.TasksBox = $tasksBox
 
     $pJob.ChkRename = $chkRename; $pJob.ChkMerge = $chkMerge; $pJob.ChkSlice = $chkSlice; $pJob.ChkExtract = $chkExtract; $pJob.ChkImage = $chkImage; $pJob.ChkLogs = $chkLogs
     if ($nestExists) {
@@ -1824,6 +2096,18 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $adjStack.Children.Add($cbAdj) | Out-Null; $editStack.Children.Add($adjStack) | Out-Null
     $pJob.TBAdj = $cbAdj
     $editBox.Child = $editStack; $rightStack.Children.Add($editBox) | Out-Null
+    $pJob.EditBox = $editBox
+
+    # Review panel — shown only in Review mode (lazy-populated on first toggle)
+    $reviewPanelBorder = New-Object System.Windows.Controls.Border
+    $reviewPanelBorder.Background = Get-WpfColor "#1C1D23"; $reviewPanelBorder.BorderBrush = Get-WpfColor "#2A2C35"
+    $reviewPanelBorder.BorderThickness = New-Object System.Windows.Thickness(1)
+    $reviewPanelBorder.Margin = New-Object System.Windows.Thickness(0,10,0,0); $reviewPanelBorder.Padding = New-Object System.Windows.Thickness(10)
+    $reviewPanelBorder.Visibility = "Collapsed"
+    $reviewStack = New-Object System.Windows.Controls.StackPanel
+    $reviewPanelBorder.Child = $reviewStack
+    $rightStack.Children.Add($reviewPanelBorder) | Out-Null
+    $pJob.ReviewPanel = $reviewPanelBorder; $pJob.ReviewStack = $reviewStack
 
     # Files list
     $pnlFiles = New-Object System.Windows.Controls.StackPanel; $pnlFiles.Margin = New-Object System.Windows.Thickness(0,10,0,0)
@@ -1866,6 +2150,16 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnRevertDone.Margin = New-Object System.Windows.Thickness(10,0,0,0); $btnRevertDone.Visibility = "Collapsed"; $btnRevertDone.Cursor = [System.Windows.Input.Cursors]::Hand
     $applyRow.Children.Add($btnRevertDone) | Out-Null; $pJob.BtnRevertDone = $btnRevertDone
     $rightStack.Children.Add($applyRow) | Out-Null
+    $pJob.ApplyRow = $applyRow
+
+    # Review status label — shown at bottom in Review mode after Keep/Revert
+    $reviewStatusLabel = New-Object System.Windows.Controls.TextBlock
+    $reviewStatusLabel.FontSize = 16; $reviewStatusLabel.FontWeight = [System.Windows.FontWeights]::Bold
+    $reviewStatusLabel.HorizontalAlignment = "Center"; $reviewStatusLabel.TextAlignment = "Center"
+    $reviewStatusLabel.Margin = New-Object System.Windows.Thickness(0,10,0,0)
+    $reviewStatusLabel.Visibility = "Collapsed"
+    $rightStack.Children.Add($reviewStatusLabel) | Out-Null
+    $pJob.ReviewStatusLabel = $reviewStatusLabel
 
     $btnApply.Tag = @{ P = $pJob; G = $gpJob }
     $btnApply.Add_Click({
@@ -2009,7 +2303,7 @@ function Build-GpJob($gpPath, $parentDict) {
         if ($detectedTheme) { $gpNameForTheme = $detectedTheme }
     }
 
-    $gpJob = @{ GpPath = $gpPath; DiGrand = $diGrand; Parents = New-Object System.Collections.ArrayList; CbPrefix = $null; GpRenameConfirmed = $false }
+    $gpJob = @{ GpPath = $gpPath; DiGrand = $diGrand; Parents = New-Object System.Collections.ArrayList; CbPrefix = $null; GpRenameConfirmed = $false; ReviewMode = $false; HeaderGrid = $null; ThemeBar = $null; BtnModeToggle = $null }
     $script:jobs.Add($gpJob) | Out-Null
 
     $container = New-Object System.Windows.Controls.Border
@@ -2022,6 +2316,7 @@ function Build-GpJob($gpPath, $parentDict) {
 
     $headerGrid = New-Object System.Windows.Controls.Grid
     $headerGrid.Background = Get-WpfColor "#2A2C35"; $headerGrid.Height = 60
+    $gpJob.HeaderGrid = $headerGrid
 
     $headerStack = New-Object System.Windows.Controls.StackPanel; $headerStack.Orientation = "Horizontal"
 
@@ -2099,6 +2394,16 @@ function Build-GpJob($gpPath, $parentDict) {
     $gpRightBtnStack = New-Object System.Windows.Controls.StackPanel
     $gpRightBtnStack.Orientation = "Horizontal"; $gpRightBtnStack.HorizontalAlignment = "Right"
     $gpRightBtnStack.VerticalAlignment = "Center"; $gpRightBtnStack.Margin = New-Object System.Windows.Thickness(0,0,15,0)
+
+    # Review Mode toggle for this entire theme group
+    $btnGpModeToggle = New-Object System.Windows.Controls.Button
+    $btnGpModeToggle.Content = "Review Mode"; $btnGpModeToggle.Background = Get-WpfColor "#4A4A7A"; $btnGpModeToggle.Foreground = Get-WpfColor "#FFFFFF"
+    $btnGpModeToggle.FontWeight = [System.Windows.FontWeights]::Bold; $btnGpModeToggle.Width = 120; $btnGpModeToggle.Height = 30; $btnGpModeToggle.BorderThickness = 0
+    $btnGpModeToggle.Margin = New-Object System.Windows.Thickness(0,0,10,0); $btnGpModeToggle.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnGpModeToggle.Tag = $gpJob
+    $btnGpModeToggle.Add_Click({ Toggle-GpMode $this.Tag })
+    $gpRightBtnStack.Children.Add($btnGpModeToggle) | Out-Null
+    $gpJob.BtnModeToggle = $btnGpModeToggle
 
     $btnCombineGp = New-Object System.Windows.Controls.Button
     $btnCombineGp.Content = "Combine TSV Data"; $btnCombineGp.Background = Get-WpfColor "#7B4FBF"; $btnCombineGp.Foreground = Get-WpfColor "#FFFFFF"
@@ -2191,6 +2496,7 @@ function Build-GpJob($gpPath, $parentDict) {
     $themeBarStack.Children.Add($btnThRefresh)  | Out-Null
     $themeBar.Child = $themeBarStack
     $gpStack.Children.Add($themeBar) | Out-Null
+    $gpJob.ThemeBar = $themeBar
 
     $parentListStack = New-Object System.Windows.Controls.StackPanel
     $parentListStack.Margin = New-Object System.Windows.Thickness(15)
