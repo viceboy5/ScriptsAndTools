@@ -1885,7 +1885,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnKeepReview.Add_Click({
         $pj = $this.Tag
         $pj.RowPanel.BorderBrush     = Get-WpfColor "#4CAF72"
-        $pj.RowPanel.BorderThickness = New-Object System.Windows.Thickness(3)
+        $pj.RowPanel.BorderThickness = New-Object System.Windows.Thickness(15)
         $pj.ReviewStatusLabel.Text       = "CHECKED"
         $pj.ReviewStatusLabel.Foreground = Get-WpfColor "#4CAF72"
         $pj.ReviewStatusLabel.Visibility = "Visible"
