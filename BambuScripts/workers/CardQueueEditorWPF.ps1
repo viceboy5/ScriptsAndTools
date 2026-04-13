@@ -283,6 +283,23 @@ function ParseFile([string]$filename) {
     return @{ Suffix = $suffix; Extension = $ext; Stem = $stem; Parts = $parts }
 }
 
+# Scan a string for a token that matches a known GpTheme, skipping leading
+# printer-prefix and tag qualifiers.  Returns the canonical theme string from
+# $script:GpThemes, or '' if none found.
+function Find-ThemeMatch([string]$s) {
+    $toks = $s -split '[_\-\s.]+' | Where-Object { $_ -ne '' }
+    $i = 0
+    while ($i -lt $toks.Count - 1 -and (
+           $script:PrinterPrefixes -icontains $toks[$i] -or
+           $script:Tags            -icontains $toks[$i])) { $i++ }
+    for ($j = $i; $j -lt $toks.Count; $j++) {
+        $clean = $toks[$j] -replace '[^a-zA-Z0-9]', ''
+        $m = $script:GpThemes | Where-Object { ($_ -replace '[^a-zA-Z0-9]','') -ieq $clean } | Select-Object -First 1
+        if ($m) { return $m }
+    }
+    return ''
+}
+
 function SmartFill([string]$anchorName, [string]$gpName) {
     $stem = $anchorName -replace '(?i)\.gcode\.3mf$|\.3mf$|\.stl$|\.png$', ''
     $stem = $stem -replace '(?i)_(Full|Final|Nest)$', ''
@@ -1595,20 +1612,18 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $rightStack.Orientation = "Vertical"; $rightStack.Margin = New-Object System.Windows.Thickness(15,0,0,0)
     [System.Windows.Controls.Grid]::SetColumn($rightStack, 1); $pGrid.Children.Add($rightStack) | Out-Null
 
-    # Header row: folder label + Refresh + Remove Folder
-    $headerGrid = New-Object System.Windows.Controls.Grid
-    $headerGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=(New-Object System.Windows.GridLength(1, [System.Windows.GridUnitType]::Star))}))
-    $headerGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::Auto}))
+    # Header: folder name on its own line, then the action buttons below
+    $headerStack = New-Object System.Windows.Controls.StackPanel; $headerStack.Orientation = "Vertical"
 
     $lblFolder = Create-TextBlock "Folder: $(Split-Path $parentPath -Leaf)" "#FFFFFF" 14 "Bold"
-    [System.Windows.Controls.Grid]::SetColumn($lblFolder, 0); $headerGrid.Children.Add($lblFolder) | Out-Null
+    $lblFolder.Margin = New-Object System.Windows.Thickness(0,0,0,6)
+    $headerStack.Children.Add($lblFolder) | Out-Null
     $pJob.LblFolder = $lblFolder
 
     $btnHdrStack = New-Object System.Windows.Controls.StackPanel; $btnHdrStack.Orientation = "Horizontal"
-    [System.Windows.Controls.Grid]::SetColumn($btnHdrStack, 1)
 
     $btnRefresh = New-Object System.Windows.Controls.Button
-    $btnRefresh.Content = "Refresh"; $btnRefresh.Background = Get-WpfColor "#2A2C35"; $btnRefresh.Foreground = Get-WpfColor "#FFFFFF"
+    $btnRefresh.Content = "Refresh"; $btnRefresh.Background = Get-WpfColor "#5A78C4"; $btnRefresh.Foreground = Get-WpfColor "#FFFFFF"
     $btnRefresh.Width = 100; $btnRefresh.Height = 25; $btnRefresh.BorderThickness = 0
     $btnRefresh.Margin = New-Object System.Windows.Thickness(0,0,10,0); $btnRefresh.Cursor = [System.Windows.Input.Cursors]::Hand
     $btnRefresh.Tag = @{ P = $pJob; G = $gpJob }
@@ -1616,7 +1631,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnHdrStack.Children.Add($btnRefresh) | Out-Null
 
     $btnOpenFolder = New-Object System.Windows.Controls.Button
-    $btnOpenFolder.Content = "Open Folder"; $btnOpenFolder.Background = Get-WpfColor "#2A2C35"; $btnOpenFolder.Foreground = Get-WpfColor "#FFFFFF"
+    $btnOpenFolder.Content = "Open Folder"; $btnOpenFolder.Background = Get-WpfColor "#2E7D8A"; $btnOpenFolder.Foreground = Get-WpfColor "#FFFFFF"
     $btnOpenFolder.Width = 100; $btnOpenFolder.Height = 25; $btnOpenFolder.BorderThickness = 0
     $btnOpenFolder.Margin = New-Object System.Windows.Thickness(0,0,10,0); $btnOpenFolder.Cursor = [System.Windows.Input.Cursors]::Hand
     $btnOpenFolder.Tag = $pJob
@@ -1640,8 +1655,8 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     })
     $btnHdrStack.Children.Add($btnRemoveP) | Out-Null
 
-    $headerGrid.Children.Add($btnHdrStack) | Out-Null
-    $rightStack.Children.Add($headerGrid) | Out-Null
+    $headerStack.Children.Add($btnHdrStack) | Out-Null
+    $rightStack.Children.Add($headerStack) | Out-Null
 
     # Tasks box
     $tasksBox = New-Object System.Windows.Controls.Border
@@ -1934,40 +1949,64 @@ function Build-GpJob($gpPath, $parentDict) {
     $diGrand = if ($gpPath -notlike "ROOT_*") { [System.IO.DirectoryInfo]::new($gpPath) } else { $null }
     $gpName = if ($diGrand) { $diGrand.Name } else { "(No Parent Folder)" }
 
-    # Detect printer prefix and strip all leading qualifier tokens (printer prefix + tags)
-    # from the grandparent folder name to isolate the bare theme.
-    # Handles any combination/order, e.g.:
-    #   "P2S_KC_Licensing"  -> prefix "P2S", theme "Licensing"
-    #   "KC_Licensing"      -> prefix "",    theme "Licensing"
-    #   "P2S_Licensing"     -> prefix "P2S", theme "Licensing"
-    #   "Licensing"         -> prefix "",    theme "Licensing"
+    # ── Detect printer prefix ────────────────────────────────────────────────
+    # Peel leading qualifier tokens (printer prefix + tags) from the GP folder
+    # name; also search anchor file stems, and walk up to the great-grandparent.
     $gpDetectedPrefix = ""; $gpNameForTheme = $gpName
     if ($gpName -ne "(No Parent Folder)") {
         $gpTokens = [System.Collections.Generic.List[string]]($gpName -split '_' | Where-Object { $_ -ne '' })
-        # Peel tokens from the front as long as they are a known printer prefix or tag
         while ($gpTokens.Count -gt 1) {
             $head = $gpTokens[0]
             if ($script:PrinterPrefixes -icontains $head) {
-                if ($gpDetectedPrefix -eq '') { $gpDetectedPrefix = $head }   # keep first printer prefix
+                if ($gpDetectedPrefix -eq '') { $gpDetectedPrefix = $head }
                 $gpTokens.RemoveAt(0)
             } elseif ($script:Tags -icontains $head) {
-                $gpTokens.RemoveAt(0)   # strip tag qualifiers (KC, Big, Huge, …)
-            } else {
-                break
-            }
+                $gpTokens.RemoveAt(0)
+            } else { break }
         }
         $gpNameForTheme = $gpTokens -join '_'
 
-        # Fallback: detect printer prefix from first anchor file stem if still not found
+        # Prefix fallback 1 – anchor file stems
         if ($gpDetectedPrefix -eq "") {
             foreach ($pKey in $parentDict.Keys) {
-                $stemTest = ($parentDict[$pKey]).BaseName -replace '(?i)_Full$', ''
-                $afParts = $stemTest -split '_'
+                $afParts = (($parentDict[$pKey]).BaseName -replace '(?i)_(Full|Final|Nest)$','') -split '_'
                 if ($afParts.Count -gt 0 -and $script:PrinterPrefixes -icontains $afParts[0]) {
                     $gpDetectedPrefix = $afParts[0]; break
                 }
             }
         }
+        # Prefix fallback 2 – great-grandparent folder tokens
+        if ($gpDetectedPrefix -eq "" -and $diGrand -and $diGrand.Parent -and $diGrand.Parent.Parent) {
+            foreach ($tok in ($diGrand.Parent.Name -split '_' | Where-Object { $_ -ne '' })) {
+                if ($script:PrinterPrefixes -icontains $tok) { $gpDetectedPrefix = $tok; break }
+            }
+        }
+
+        # ── Detect theme name ────────────────────────────────────────────────
+        # Try each source in priority order; stop at the first recognised match.
+        # 1. GP folder (already peeled above)
+        $detectedTheme = Find-ThemeMatch $gpNameForTheme
+        # 2. Anchor file stems
+        if (-not $detectedTheme) {
+            foreach ($pKey in $parentDict.Keys) {
+                $stemTest = ($parentDict[$pKey]).BaseName -replace '(?i)_(Full|Final|Nest)$', ''
+                $detectedTheme = Find-ThemeMatch $stemTest
+                if ($detectedTheme) { break }
+            }
+        }
+        # 3. Parent (design) folder names
+        if (-not $detectedTheme) {
+            foreach ($pKey in $parentDict.Keys) {
+                $detectedTheme = Find-ThemeMatch (Split-Path $pKey -Leaf)
+                if ($detectedTheme) { break }
+            }
+        }
+        # 4. Great-grandparent folder name
+        if (-not $detectedTheme -and $diGrand -and $diGrand.Parent -and $diGrand.Parent.Parent) {
+            $detectedTheme = Find-ThemeMatch $diGrand.Parent.Name
+        }
+
+        if ($detectedTheme) { $gpNameForTheme = $detectedTheme }
     }
 
     $gpJob = @{ GpPath = $gpPath; DiGrand = $diGrand; Parents = New-Object System.Collections.ArrayList; CbPrefix = $null; GpRenameConfirmed = $false }
