@@ -16,7 +16,7 @@ $ErrorActionPreference = 'Stop'
 $scriptDir = $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($scriptDir)) { $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition }
 if ([string]::IsNullOrWhiteSpace($scriptDir)) { $scriptDir = [System.Environment]::CurrentDirectory }
-$colorCsvPath = Join-Path $scriptDir "colorNamesCSV.csv"
+$colorCsvPath = Join-Path $scriptDir "..\libraries\FilamentLibrary.csv"
 
 $LibraryColors = [ordered]@{}
 $HexToName = @{}
@@ -421,7 +421,7 @@ $script:jobs = New-Object System.Collections.ArrayList
 $script:processQueue = New-Object System.Collections.Queue
 $script:activeProcess = $null
 $script:activeProcessJob = $null
-. "$PSScriptRoot\BambuConfig.ps1"
+. (Join-Path $PSScriptRoot "..\libraries\NamesLibrary.ps1")
 $script:AdjPresets = @('Common','RARE','EPIC','LEGENDARY','Default')
 
 function Find-AnchorFile($folderPath) {

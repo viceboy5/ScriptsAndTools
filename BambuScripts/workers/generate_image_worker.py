@@ -52,10 +52,10 @@ def draw_text_with_outline(draw, pos, text, font, fill, outline_color=(0, 0, 0),
     draw.text((x, y), text, font=font, fill=fill)
 
 
-def load_gradient_library(csv_filename="colorNamesCSV.csv"):
+def load_gradient_library(csv_filename="FilamentLibrary.csv"):
     gradient_map = {}
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_path = os.path.join(script_dir, csv_filename)
+    csv_path = os.path.join(script_dir, "..", "libraries", csv_filename)
 
     if os.path.exists(csv_path):
         with open(csv_path, mode='r', encoding='utf-8-sig') as f:

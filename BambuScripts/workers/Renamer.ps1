@@ -122,7 +122,7 @@ $cBtnOnT  = clr "#6FD98F"
 $cBtnOnBd = clr "#4CAF72"
 $cFileSep = clr "#1A1C22"
 
-. "$PSScriptRoot\BambuConfig.ps1"
+. (Join-Path $PSScriptRoot "..\libraries\NamesLibrary.ps1")
 $script:validPrefixes = $script:PrinterPrefixes
 $script:GpTags        = $script:Tags
 

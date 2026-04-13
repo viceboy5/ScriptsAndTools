@@ -9,7 +9,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $scriptDir = $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($scriptDir)) { $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition }
 if ([string]::IsNullOrWhiteSpace($scriptDir)) { $scriptDir = [System.Environment]::CurrentDirectory }
-$colorCsvPath = Join-Path $scriptDir "colorNamesCSV.csv"
+$colorCsvPath = Join-Path $scriptDir "..\libraries\FilamentLibrary.csv"
 # ----------------------------------
 
 # --- 1. Load the Official Library ---

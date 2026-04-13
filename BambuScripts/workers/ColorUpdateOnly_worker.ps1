@@ -11,7 +11,7 @@ Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$colorCsvPath = Join-Path $scriptDir "colorNamesCSV.csv"
+$colorCsvPath = Join-Path $scriptDir "..\libraries\FilamentLibrary.csv"
 
 # 1. Dynamically Load the Official Library from your CSV (RGB EDITION)
 $LibraryColors = [ordered]@{}
