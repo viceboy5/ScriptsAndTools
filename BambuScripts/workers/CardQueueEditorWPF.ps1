@@ -378,8 +378,7 @@ $script:jobs = New-Object System.Collections.ArrayList
 $script:processQueue = New-Object System.Collections.Queue
 $script:activeProcess = $null
 $script:activeProcessJob = $null
-$script:PrinterPrefixes = @('P2S', 'X1C', 'H2S')
-$script:GpThemes   = @('Fantasy','Puppies','Original','Ocean','Farm','Foodz','StarsAndStripes','Spring','Prehistoric','Halloween 2025','Christmas 2025','RTC','Summer','Licensing','Jungle','Halloween26','SciFi','Sports','KidsCreations','Careers')
+. "$PSScriptRoot\BambuConfig.ps1"
 $script:AdjPresets = @('Common','RARE','EPIC','LEGENDARY','Default')
 
 function Find-AnchorFile($folderPath) {
@@ -1068,23 +1067,45 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             }
         }
 
-        if (Test-Path $modSetPath) {
-            try {
-                [xml]$modXml = [System.IO.File]::ReadAllText($modSetPath, [System.Text.Encoding]::UTF8)
-                foreach ($node in $modXml.SelectNodes('//metadata[contains(@key, "extruder")]')) {
-                    $val = $node.GetAttribute('value')
-                    if (-not [string]::IsNullOrWhiteSpace($val)) { $UsedSlots.Add($val) | Out-Null }
-                }
-            } catch {}
+        # plate_N.json contains exactly which filament slots are used on each plate
+        # (filament_ids is 0-based). Use this when available — it's more precise than
+        # scanning the whole model, and correctly excludes slots only used on other plates.
+        $plateSlots = New-Object System.Collections.Generic.HashSet[string]
+        $metaDir = Join-Path $tempWork "Metadata"
+        if (Test-Path $metaDir) {
+            foreach ($pjf in (Get-ChildItem -Path $metaDir -Filter 'plate_*.json' -ErrorAction SilentlyContinue)) {
+                try {
+                    $pjObj = ([System.IO.File]::ReadAllText($pjf.FullName, [System.Text.Encoding]::UTF8)) | ConvertFrom-Json
+                    if ($pjObj.filament_ids) {
+                        foreach ($fid in $pjObj.filament_ids) { $plateSlots.Add(($fid + 1).ToString()) | Out-Null }
+                    }
+                } catch {}
+            }
         }
 
-        $modelFile = Get-ChildItem -Path $tempWork -Filter '3dmodel.model' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($modelFile -and (Test-Path $modelFile.FullName)) {
-            try {
-                $modelContent = [System.IO.File]::ReadAllText($modelFile.FullName, [System.Text.Encoding]::UTF8)
-                $matMatches = [regex]::Matches($modelContent, '(?i)materialid="(\d+)"')
-                foreach ($m in $matMatches) { $UsedSlots.Add($m.Groups[1].Value) | Out-Null }
-            } catch {}
+        if ($plateSlots.Count -gt 0) {
+            # Plate data found — use it directly; it already represents only what's on the plates
+            $UsedSlots = $plateSlots
+        } else {
+            # No plate JSON — fall back to scanning model_settings.config and 3dmodel.model
+            if (Test-Path $modSetPath) {
+                try {
+                    [xml]$modXml = [System.IO.File]::ReadAllText($modSetPath, [System.Text.Encoding]::UTF8)
+                    foreach ($node in $modXml.SelectNodes('//metadata[contains(@key, "extruder")]')) {
+                        $val = $node.GetAttribute('value')
+                        if (-not [string]::IsNullOrWhiteSpace($val)) { $UsedSlots.Add($val) | Out-Null }
+                    }
+                } catch {}
+            }
+
+            $modelFile = Get-ChildItem -Path $tempWork -Filter '3dmodel.model' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($modelFile -and (Test-Path $modelFile.FullName)) {
+                try {
+                    $modelContent = [System.IO.File]::ReadAllText($modelFile.FullName, [System.Text.Encoding]::UTF8)
+                    $matMatches = [regex]::Matches($modelContent, '(?i)materialid="(\d+)"')
+                    foreach ($m in $matMatches) { $UsedSlots.Add($m.Groups[1].Value) | Out-Null }
+                } catch {}
+            }
         }
 
         foreach ($hex in $SlotMap.Keys) {

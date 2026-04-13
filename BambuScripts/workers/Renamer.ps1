@@ -122,7 +122,8 @@ $cBtnOnT  = clr "#6FD98F"
 $cBtnOnBd = clr "#4CAF72"
 $cFileSep = clr "#1A1C22"
 
-$script:validPrefixes = @('X1C', 'P2S', 'H2S')
+. "$PSScriptRoot\BambuConfig.ps1"
+$script:validPrefixes = $script:PrinterPrefixes
 
 # --- Data stores -------------------------------------------------------------
 $script:db         = [System.Collections.Specialized.OrderedDictionary]::new()
@@ -256,9 +257,17 @@ function script:SmartFill([string]$ppKey, [string]$gpTheme) {
     # 2. Strip the "_Full" anchor from the end
     $stem = $stem -ireplace "(?i)[_\-\s.]*Full$", ""
 
-    # 3. Strip the Theme from the string if it exists
-    if ($gpTheme -ne '') {
-        $escapedTheme = [regex]::Escape($gpTheme)
+    # 3. Strip the Theme from the string if it exists — check current GP theme
+    #    first, then fall back to the full known-themes list so that any theme
+    #    name in $script:GpThemes is never picked up as part of the Adjective.
+    $themesToStrip = [System.Collections.Generic.List[string]]::new()
+    if ($gpTheme -ne '') { $themesToStrip.Add($gpTheme) }
+    foreach ($t in $script:GpThemes) {
+        $tClean = script:ToPascalCase $t
+        if ($tClean -ne '' -and $tClean -ine $gpTheme) { $themesToStrip.Add($tClean) }
+    }
+    foreach ($t in $themesToStrip) {
+        $escapedTheme = [regex]::Escape($t)
         $stem = $stem -ireplace "(?i)[_\-\s.]*$escapedTheme\b", ""
     }
 

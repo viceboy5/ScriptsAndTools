@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "Bash(ls -lah /d/GitRepos/ScriptsAndTools/BambuScripts/.claude/worktrees/heuristic-dubinsky/BambuScripts/*.ps1)",
-      "Bash(find /c/GitRepos/ScriptsAndTools/BambuScripts/.claude/worktrees/romantic-cray -type f \\\\\\(-name *.cs -o -name *.xaml -o -name *.csproj -o -name *.sln \\\\\\))"
+      "Bash(find /c/GitRepos/ScriptsAndTools/BambuScripts/.claude/worktrees/romantic-cray -type f \\\\\\(-name *.cs -o -name *.xaml -o -name *.csproj -o -name *.sln \\\\\\))",
+      "Bash(xargs file:*)",
+      "Bash(grep -n 'validPrefixes\\\\|$script:db\\\\|gpPrefix\\\\|gpTheme' /c/GitRepos/ScriptsAndTools/BambuScripts/.claude/worktrees/practical-hellman/BambuScripts/workers/Renamer.ps1)",
+      "Bash(python3 -c ':*)",
+      "Bash(python3)",
+      "Bash(powershell.exe -Command \"Get-Content 'C:\\\\Users\\\\Owner\\\\AppData\\\\Local\\\\Temp\\\\frankenstein_inspect\\\\extracted\\\\Metadata\\\\project_settings.config' -Raw | Select-String 'filament_color' | Select-Object -First 3\")",
+      "Bash(powershell.exe -NoProfile -Command ':*)"
     ]
   }
 }
