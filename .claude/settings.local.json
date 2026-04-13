@@ -8,7 +8,9 @@
       "Bash(python3 -c ':*)",
       "Bash(python3)",
       "Bash(powershell.exe -Command \"Get-Content 'C:\\\\Users\\\\Owner\\\\AppData\\\\Local\\\\Temp\\\\frankenstein_inspect\\\\extracted\\\\Metadata\\\\project_settings.config' -Raw | Select-String 'filament_color' | Select-Object -First 3\")",
-      "Bash(powershell.exe -NoProfile -Command ':*)"
+      "Bash(powershell.exe -NoProfile -Command ':*)",
+      "Bash(grep -n '$ch\\\\|$ad\\\\|$th\\\\|$pf\\\\|chSpaced\\\\|adSpaced' 'C:\\\\GitRepos\\\\ScriptsAndTools\\\\BambuScripts\\\\.claude\\\\worktrees\\\\practical-hellman\\\\BambuScripts\\\\workers\\\\CardQueueEditorWPF.ps1')",
+      "Bash(powershell.exe -NoProfile -File -)"
     ]
   }
 }

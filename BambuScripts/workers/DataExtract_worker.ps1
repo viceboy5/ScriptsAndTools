@@ -21,6 +21,7 @@ if ($ConsoleOnly) {
 }
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+. "$scriptDir\BambuConfig.ps1"
 $colorCsvPath = Join-Path $scriptDir "colorNamesCSV.csv"
 
 # --- 1. Load the Reverse-Lookup Color Dictionary (RGB EDITION) ---
@@ -180,6 +181,19 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 # INITIALIZE VARIABLES
 # ---------------------------------------------------------------------------------
 $projectName = ((Split-Path $InputFile -Leaf) -replace '\.gcode\.3mf$', '') -replace '(?i)_Full$', ''
+
+# --- DETECT TAG PREFIX from the character token (e.g. "KCFrankenstein" -> tag "KC") ---
+$detectedTag = ''
+$nameForParse = $projectName
+foreach ($pfx in $script:PrinterPrefixes) {
+    if ($nameForParse -imatch "^${pfx}_") { $nameForParse = $nameForParse.Substring($pfx.Length + 1); break }
+}
+$firstToken = ($nameForParse -split '_')[0]
+foreach ($t in $script:Tags) {
+    if ($firstToken.Length -gt $t.Length -and $firstToken.Substring(0, $t.Length) -ieq $t) {
+        $detectedTag = $t; break
+    }
+}
 
 # --- NEW: PARSE THEME AND RARITY FROM FILENAME ---
 $nameParts = $projectName -split '_'
@@ -451,7 +465,8 @@ if ($GenerateImage) {
 
             if (Test-Path $sourceImg) {
                 # Build Python arguments as a single strict string to protect spaces in paths!
-                $pyArgsStr = "`"$pyScript`" --name `"$projectName`" --time `"$timeAdd`" --img `"$sourceImg`" --out `"$expectedPng`" --colors"
+                $tagArg = if ($detectedTag -ne '') { " --tag `"$detectedTag`"" } else { "" }
+                $pyArgsStr = "`"$pyScript`" --name `"$projectName`" --time `"$timeAdd`" --img `"$sourceImg`" --out `"$expectedPng`"$tagArg --colors"
                 foreach ($i in 1..8) {
                     if ($filData[$i].g -gt 0) {
                         $pyArgsStr += " `"$($filData[$i].color)|$($filData[$i].rawHex)|$($filData[$i].g)`""
