@@ -319,6 +319,14 @@ function SmartFill([string]$anchorName, [string]$gpName) {
         $parts = $parts[0..($parts.Count-2)]
     }
 
+    # Never let a known theme name appear in Character or Adjective regardless of how
+    # it ended up in the token list (e.g. theme not set at the GP level, positional
+    # fallback missed, etc.)
+    $parts = [string[]]($parts | Where-Object {
+        $clean = $_ -replace '[^a-zA-Z0-9]', ''
+        -not ($script:GpThemes | Where-Object { ($_ -replace '[^a-zA-Z0-9]', '') -ieq $clean })
+    })
+
     if ($parts.Count -ge 2) { return @{ Char = $parts[0]; Adj = ($parts[1..($parts.Count-1)] -join '') } }
     return @{ Char = ($parts -join ''); Adj = '' }
 }
