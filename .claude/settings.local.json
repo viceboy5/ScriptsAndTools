@@ -10,7 +10,12 @@
       "Bash(powershell.exe -Command \"Get-Content 'C:\\\\Users\\\\Owner\\\\AppData\\\\Local\\\\Temp\\\\frankenstein_inspect\\\\extracted\\\\Metadata\\\\project_settings.config' -Raw | Select-String 'filament_color' | Select-Object -First 3\")",
       "Bash(powershell.exe -NoProfile -Command ':*)",
       "Bash(grep -n '$ch\\\\|$ad\\\\|$th\\\\|$pf\\\\|chSpaced\\\\|adSpaced' 'C:\\\\GitRepos\\\\ScriptsAndTools\\\\BambuScripts\\\\.claude\\\\worktrees\\\\practical-hellman\\\\BambuScripts\\\\workers\\\\CardQueueEditorWPF.ps1')",
-      "Bash(powershell.exe -NoProfile -File -)"
+      "Bash(powershell.exe -NoProfile -File -)",
+      "Bash(grep -n 'tsv\\\\|TSV\\\\|$time\\\\|print_time\\\\|prediction\\\\|Out-File\\\\|Set-Content\\\\|\\\\.tsv' 'C:\\\\GitRepos\\\\ScriptsAndTools\\\\BambuScripts\\\\workers\\\\DataExtract_worker.ps1')",
+      "Bash(grep -n 'outputValues\\\\|tsvLine\\\\|$cols\\\\[' 'C:\\\\GitRepos\\\\ScriptsAndTools\\\\BambuScripts\\\\workers\\\\DataExtract_worker.ps1')",
+      "Bash(grep -n '^\\\\s*$h\\\\s*=\\\\|$m\\\\s*=\\\\|$h,\\\\s*$m\\\\|hours\\\\|minutes' 'C:\\\\GitRepos\\\\ScriptsAndTools\\\\BambuScripts\\\\workers\\\\DataExtract_worker.ps1')",
+      "Read(//c/GitRepos/ScriptsAndTools/BambuScripts/**)",
+      "Bash(gh pr create --title 'Review Mode, drag-drop PNG replacement, and per-theme review toggle' --body ':*)"
     ]
   }
 }
