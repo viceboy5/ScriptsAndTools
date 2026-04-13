@@ -287,14 +287,19 @@ function SmartFill([string]$anchorName, [string]$gpName) {
     $stem = $anchorName -replace '(?i)\.gcode\.3mf$|\.3mf$|\.stl$|\.png$', ''
     $stem = $stem -replace '(?i)_(Full|Final|Nest)$', ''
 
-    # Strip printer prefix from gpName so we match against the bare theme token
-    # e.g. gpName "P2S_Puppies" -> cleanGpName "Puppies"
+    # Strip all leading qualifier tokens (printer prefix + tags) from gpName
+    # so we match only the bare theme token against the filename stem.
+    # e.g. "P2S_KC_Puppies" -> "Puppies", "KC_Puppies" -> "Puppies"
     $cleanGpName = $gpName
     if ($gpName -ne '') {
-        $gpParts = $gpName -split '_'
-        if ($gpParts.Count -gt 1 -and $script:PrinterPrefixes -icontains $gpParts[0]) {
-            $cleanGpName = ($gpParts[1..($gpParts.Count-1)] -join '_')
+        $gpTokens = [System.Collections.Generic.List[string]]($gpName -split '_' | Where-Object { $_ -ne '' })
+        while ($gpTokens.Count -gt 1) {
+            $head = $gpTokens[0]
+            if (($script:PrinterPrefixes -icontains $head) -or ($script:Tags -icontains $head)) {
+                $gpTokens.RemoveAt(0)
+            } else { break }
         }
+        $cleanGpName = $gpTokens -join '_'
     }
 
     # Try to strip the theme by matching the cleaned gpName at the end of the stem
@@ -327,8 +332,21 @@ function SmartFill([string]$anchorName, [string]$gpName) {
         -not ($script:GpThemes | Where-Object { ($_ -replace '[^a-zA-Z0-9]', '') -ieq $clean })
     })
 
-    if ($parts.Count -ge 2) { return @{ Char = $parts[0]; Adj = ($parts[1..($parts.Count-1)] -join '') } }
-    return @{ Char = ($parts -join ''); Adj = '' }
+    # Detect a known tag prefix at the start of the first part
+    # e.g. "KCFrankenstein" -> Tag="KC", Char="Frankenstein"
+    $detectedTag = ''
+    if ($parts.Count -ge 1) {
+        foreach ($t in $script:Tags) {
+            if ($parts[0].Length -gt $t.Length -and $parts[0].Substring(0, $t.Length) -ieq $t) {
+                $detectedTag = $t
+                $parts[0] = $parts[0].Substring($t.Length)
+                break
+            }
+        }
+    }
+
+    if ($parts.Count -ge 2) { return @{ Char = $parts[0]; Adj = ($parts[1..($parts.Count-1)] -join ''); Tag = $detectedTag } }
+    return @{ Char = ($parts -join ''); Adj = ''; Tag = $detectedTag }
 }
 
 function Invoke-RandomizePickColors($sourcePath, $destPath) {
@@ -516,6 +534,10 @@ function Update-ParentPreview($pJob, $gpJob) {
     $ch = $pJob.TBChar.Text -replace '[^a-zA-Z0-9]', ''
     $ad = $pJob.TBAdj.Text -replace '[^a-zA-Z0-9]', ''
     $th = ("$($gpJob.TBTheme.SelectedItem)" -replace '[^a-zA-Z0-9]', '')
+    $tg = ''
+    if ($null -ne $pJob.TBTag -and $null -ne $pJob.TBTag.SelectedItem -and "$($pJob.TBTag.SelectedItem)" -ne '(none)') {
+        $tg = "$($pJob.TBTag.SelectedItem)" -replace '[^a-zA-Z0-9]', ''
+    }
     $pf = ""
     if ($null -ne $gpJob.CbPrefix -and $null -ne $gpJob.CbPrefix.SelectedItem) {
         $pf = $gpJob.CbPrefix.SelectedItem.ToString()
@@ -526,8 +548,8 @@ function Update-ParentPreview($pJob, $gpJob) {
     $chSpaced = $ch -creplace '([a-z])([A-Z])', '$1 $2'
     $adSpaced = $ad -creplace '([a-z])([A-Z])', '$1 $2'
 
-    # 2. Format with Adjective in parentheses
-    $displayTitle = $chSpaced
+    # 2. Format title: "Tag - Character (Adj)" when tag set, else "Character (Adj)"
+    $displayTitle = if ($tg) { "$tg - $chSpaced" } else { $chSpaced }
     if (-not [string]::IsNullOrWhiteSpace($adSpaced)) {
         $displayTitle += " ($adSpaced)"
     }
@@ -535,13 +557,16 @@ function Update-ParentPreview($pJob, $gpJob) {
     # 3. Apply to the UI card in ALL CAPS
     if ($null -ne $pJob.LblCharCard) { $pJob.LblCharCard.Text = $displayTitle.ToUpper() }
 
+    # Tag is prepended directly to Character (no separator) in filenames: Printer_TagChar_Adj_Theme_Suffix
+    $combined = "$tg$ch"
+
     $nameCounts = @{}
     foreach ($r in $pJob.FileRows) {
         $sf = $r.SuffixBox.Text -replace '[^a-zA-Z0-9]', ''
         $parts = New-Object System.Collections.ArrayList
-        if ($pf) { [void]$parts.Add($pf) }
-        if ($ch) { [void]$parts.Add($ch) }; if ($ad) { [void]$parts.Add($ad) }
-        if ($th) { [void]$parts.Add($th) }; if ($sf) { [void]$parts.Add($sf) }
+        if ($pf)       { [void]$parts.Add($pf) }
+        if ($combined) { [void]$parts.Add($combined) }; if ($ad) { [void]$parts.Add($ad) }
+        if ($th)       { [void]$parts.Add($th) }; if ($sf) { [void]$parts.Add($sf) }
         $r.TargetName = ($parts.ToArray() -join '_') + $r.Ext
         if (-not $nameCounts.ContainsKey($r.TargetName)) { $nameCounts[$r.TargetName] = 0 }
         $nameCounts[$r.TargetName]++
@@ -566,12 +591,12 @@ function Update-ParentPreview($pJob, $gpJob) {
             if ($r.OldLbl) { $r.OldLbl.Foreground = Get-WpfColor "#6B6E7A" }
         }
     }
-    # Update folder label to preview the renamed folder name (Prefix_Character_Adjective_Theme)
+    # Update folder label to preview the renamed folder name (Prefix_TagCharacter_Adjective_Theme)
     $folderParts = @()
-    if ($pf) { $folderParts += $pf }
-    if ($ch) { $folderParts += $ch }
-    if ($ad) { $folderParts += $ad }
-    if ($th) { $folderParts += $th }
+    if ($pf)       { $folderParts += $pf }
+    if ($combined) { $folderParts += $combined }
+    if ($ad)       { $folderParts += $ad }
+    if ($th)       { $folderParts += $th }
     $previewFolderName = $folderParts -join '_'
     if ($null -ne $pJob.LblFolder) {
         if ($previewFolderName) { $pJob.LblFolder.Text = "Folder: $previewFolderName" }
@@ -867,11 +892,13 @@ function Start-NextProcess {
         # Rename parent folder
         $cleanChar = $pJob.TBChar.Text -replace '[^a-zA-Z0-9]', ''
         $cleanAdj  = $pJob.TBAdj.Text  -replace '[^a-zA-Z0-9]', ''
+        $cleanTag  = if ($null -ne $pJob.TBTag -and $null -ne $pJob.TBTag.SelectedItem -and "$($pJob.TBTag.SelectedItem)" -ne '(none)') { "$($pJob.TBTag.SelectedItem)" -replace '[^a-zA-Z0-9]', '' } else { '' }
+        $cleanCombined = "$cleanTag$cleanChar"
         $pParts = New-Object System.Collections.ArrayList
-        if ($pf)        { $pParts.Add($pf)         | Out-Null }
-        if ($cleanChar) { $pParts.Add($cleanChar)  | Out-Null }
-        if ($cleanAdj)  { $pParts.Add($cleanAdj)   | Out-Null }
-        if ($th)        { $pParts.Add($th)          | Out-Null }
+        if ($pf)           { $pParts.Add($pf)           | Out-Null }
+        if ($cleanCombined){ $pParts.Add($cleanCombined) | Out-Null }
+        if ($cleanAdj)     { $pParts.Add($cleanAdj)     | Out-Null }
+        if ($th)           { $pParts.Add($th)            | Out-Null }
         $newParentName = $pParts.ToArray() -join '_'
 
         $oldFolder = $pJob.FolderPath
@@ -1736,15 +1763,35 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $editBox.Margin = New-Object System.Windows.Thickness(0,10,0,0); $editBox.Padding = New-Object System.Windows.Thickness(10)
     $editStack = New-Object System.Windows.Controls.StackPanel; $editStack.Orientation = "Horizontal"
 
-    $charStack = New-Object System.Windows.Controls.StackPanel; $charStack.Margin = New-Object System.Windows.Thickness(0,0,20,0)
+    $charStack = New-Object System.Windows.Controls.StackPanel; $charStack.Margin = New-Object System.Windows.Thickness(0,0,12,0)
     $charStack.Children.Add((Create-TextBlock "Character *" "#A0A0A0" 12 "Normal")) | Out-Null
-    $tbChar = New-Object System.Windows.Controls.TextBox; $tbChar.Text = $fills.Char; $tbChar.Width = 200; $tbChar.Background = Get-WpfColor "#1E2028"; $tbChar.Foreground = Get-WpfColor "#FFFFFF"
+    $tbChar = New-Object System.Windows.Controls.TextBox; $tbChar.Text = $fills.Char; $tbChar.Width = 175; $tbChar.Background = Get-WpfColor "#1E2028"; $tbChar.Foreground = Get-WpfColor "#FFFFFF"
     $charStack.Children.Add($tbChar) | Out-Null; $editStack.Children.Add($charStack) | Out-Null
     $pJob.TBChar = $tbChar
 
+    $tagStack = New-Object System.Windows.Controls.StackPanel; $tagStack.Margin = New-Object System.Windows.Thickness(0,0,12,0)
+    $tagStack.Children.Add((Create-TextBlock "Tag" "#A0A0A0" 12 "Normal")) | Out-Null
+    $cbTag = New-Object System.Windows.Controls.ComboBox; $cbTag.IsEditable = $false; $cbTag.Width = 80
+    $cbTag.Background = Get-WpfColor "#1E2028"; $cbTag.Foreground = Get-WpfColor "#E8A135"
+    $cbTag.BorderBrush = Get-WpfColor "#5A78C4"; $cbTag.BorderThickness = New-Object System.Windows.Thickness(1)
+    $cbTag.SetResourceReference([System.Windows.FrameworkElement]::StyleProperty, [System.Windows.Controls.ToolBar]::ComboBoxStyleKey)
+    $cbTag.Resources[[System.Windows.SystemColors]::WindowBrushKey]        = Get-WpfColor "#1E2028"
+    $cbTag.Resources[[System.Windows.SystemColors]::WindowTextBrushKey]    = Get-WpfColor "#E8A135"
+    $cbTag.Resources[[System.Windows.SystemColors]::HighlightBrushKey]     = Get-WpfColor "#5A78C4"
+    $cbTag.Resources[[System.Windows.SystemColors]::HighlightTextBrushKey] = Get-WpfColor "#FFFFFF"
+    $cbTagItemStyle = New-Object System.Windows.Style([System.Windows.Controls.ComboBoxItem])
+    $cbTagItemStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::BackgroundProperty, (Get-WpfColor "#1E2028"))))
+    $cbTagItemStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::ForegroundProperty, (Get-WpfColor "#E8A135"))))
+    $cbTag.ItemContainerStyle = $cbTagItemStyle
+    [void]$cbTag.Items.Add("(none)")
+    foreach ($tag in $script:Tags) { [void]$cbTag.Items.Add($tag) }
+    $cbTag.SelectedItem = if ($fills.Tag -ne '') { $fills.Tag } else { "(none)" }
+    $tagStack.Children.Add($cbTag) | Out-Null; $editStack.Children.Add($tagStack) | Out-Null
+    $pJob.TBTag = $cbTag
+
     $adjStack = New-Object System.Windows.Controls.StackPanel
     $adjStack.Children.Add((Create-TextBlock "Adjective (Optional)" "#A0A0A0" 12 "Normal")) | Out-Null
-    $cbAdj = New-Object System.Windows.Controls.ComboBox; $cbAdj.IsEditable = $true; $cbAdj.Width = 200
+    $cbAdj = New-Object System.Windows.Controls.ComboBox; $cbAdj.IsEditable = $true; $cbAdj.Width = 220
     $cbAdj.Background = Get-WpfColor "#1E2028"; $cbAdj.Foreground = Get-WpfColor "#FFFFFF"
     $cbAdj.BorderBrush = Get-WpfColor "#5A78C4"; $cbAdj.BorderThickness = New-Object System.Windows.Thickness(1)
     $cbAdj.SetResourceReference([System.Windows.FrameworkElement]::StyleProperty, [System.Windows.Controls.ToolBar]::ComboBoxStyleKey)
@@ -1867,6 +1914,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     })
 
     $tbChar.Tag = @{ P = $pJob; G = $gpJob }; $tbChar.Add_TextChanged({ $t = $this.Tag; Update-ParentPreview $t.P $t.G })
+    $cbTag.Tag  = @{ P = $pJob; G = $gpJob }; $cbTag.Add_SelectionChanged({ $t = $this.Tag; Update-ParentPreview $t.P $t.G })
     $cbAdj.Tag = @{ P = $pJob; G = $gpJob }
     $cbAdj.AddHandler([System.Windows.Controls.Primitives.TextBoxBase]::TextChangedEvent, [System.Windows.Controls.TextChangedEventHandler]{ param($s,$e); $t = $s.Tag; Update-ParentPreview $t.P $t.G })
 
@@ -1886,15 +1934,31 @@ function Build-GpJob($gpPath, $parentDict) {
     $diGrand = if ($gpPath -notlike "ROOT_*") { [System.IO.DirectoryInfo]::new($gpPath) } else { $null }
     $gpName = if ($diGrand) { $diGrand.Name } else { "(No Parent Folder)" }
 
-    # Detect printer prefix from grandparent folder name (e.g. "P2S_Puppies" -> prefix "P2S", theme "Puppies")
+    # Detect printer prefix and strip all leading qualifier tokens (printer prefix + tags)
+    # from the grandparent folder name to isolate the bare theme.
+    # Handles any combination/order, e.g.:
+    #   "P2S_KC_Licensing"  -> prefix "P2S", theme "Licensing"
+    #   "KC_Licensing"      -> prefix "",    theme "Licensing"
+    #   "P2S_Licensing"     -> prefix "P2S", theme "Licensing"
+    #   "Licensing"         -> prefix "",    theme "Licensing"
     $gpDetectedPrefix = ""; $gpNameForTheme = $gpName
     if ($gpName -ne "(No Parent Folder)") {
-        $gpParts = $gpName -split '_'
-        if ($gpParts.Count -gt 1 -and $script:PrinterPrefixes -icontains $gpParts[0]) {
-            $gpDetectedPrefix = $gpParts[0]
-            $gpNameForTheme = ($gpParts[1..($gpParts.Count-1)] -join '_')
+        $gpTokens = [System.Collections.Generic.List[string]]($gpName -split '_' | Where-Object { $_ -ne '' })
+        # Peel tokens from the front as long as they are a known printer prefix or tag
+        while ($gpTokens.Count -gt 1) {
+            $head = $gpTokens[0]
+            if ($script:PrinterPrefixes -icontains $head) {
+                if ($gpDetectedPrefix -eq '') { $gpDetectedPrefix = $head }   # keep first printer prefix
+                $gpTokens.RemoveAt(0)
+            } elseif ($script:Tags -icontains $head) {
+                $gpTokens.RemoveAt(0)   # strip tag qualifiers (KC, Big, Huge, …)
+            } else {
+                break
+            }
         }
-        # Fallback: detect from first anchor file stem if not found in folder name
+        $gpNameForTheme = $gpTokens -join '_'
+
+        # Fallback: detect printer prefix from first anchor file stem if still not found
         if ($gpDetectedPrefix -eq "") {
             foreach ($pKey in $parentDict.Keys) {
                 $stemTest = ($parentDict[$pKey]).BaseName -replace '(?i)_Full$', ''

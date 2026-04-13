@@ -124,6 +124,7 @@ $cFileSep = clr "#1A1C22"
 
 . "$PSScriptRoot\BambuConfig.ps1"
 $script:validPrefixes = $script:PrinterPrefixes
+$script:GpTags        = $script:Tags
 
 # --- Data stores -------------------------------------------------------------
 $script:db         = [System.Collections.Specialized.OrderedDictionary]::new()
@@ -670,21 +671,24 @@ function script:RebuildPanel {
         foreach ($pk in $gd.Parents.Keys) { $totalFiles += $gd.Parents[$pk].Files.Count }
         $badge = if ($totalFiles -eq 1) { '1 file' } else { "$totalFiles files" }
 
-        # Safely extract existing GP Prefix & Theme using raw strings
+        # Strip all leading qualifier tokens (printer prefix + tags) from the GP folder name
+        # to isolate the bare theme. Handles any combination, e.g.:
+        #   "P2S_KC_Licensing" -> prefix "P2S", theme "Licensing"
+        #   "KC_Licensing"     -> prefix "",    theme "Licensing"
         $gpTheme = $gd.Name
         $gpPrefix = ''
 
-        foreach ($p in $script:validPrefixes) {
-            if ($gpTheme -imatch "(?i)^$p([_\-\s.]+|$)") {
-                $gpPrefix = $p
-                $gpTheme = $gpTheme -ireplace "(?i)^$p[_\-\s.]*", ""
-                break
-            } elseif ($gpTheme -imatch "(?i)([_\-\s.]+)$p$") {
-                $gpPrefix = $p
-                $gpTheme = $gpTheme -ireplace "(?i)[_\-\s.]*$p$", ""
-                break
-            }
+        $gpTokens = [System.Collections.Generic.List[string]]($gpTheme -split '[_\-\s.]+' | Where-Object { $_ -ne '' })
+        while ($gpTokens.Count -gt 1) {
+            $head = $gpTokens[0]
+            if ($script:validPrefixes -icontains $head) {
+                if ($gpPrefix -eq '') { $gpPrefix = $head }
+                $gpTokens.RemoveAt(0)
+            } elseif ($script:GpTags -icontains $head) {
+                $gpTokens.RemoveAt(0)
+            } else { break }
         }
+        $gpTheme = $gpTokens -join '_'
 
         # Enforce alphanumeric immediately on load for the theme
         $gpTheme = script:ToPascalCase $gpTheme

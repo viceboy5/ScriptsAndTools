@@ -177,6 +177,7 @@ def main():
     parser.add_argument("--time", required=True)
     parser.add_argument("--img", required=True)
     parser.add_argument("--out", required=True)
+    parser.add_argument("--tag", default="")
     parser.add_argument("--colors", nargs='*', default=[])
     args = parser.parse_args()
 
@@ -211,6 +212,11 @@ def main():
 
     char_display = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', character_raw).upper()
     adj_display = adj_raw.upper()
+
+    # Prepend tag to title when provided: "KC - FRANKENSTEIN" instead of "KCFRANKENSTEIN"
+    tag_display = args.tag.strip().upper()
+    if tag_display:
+        char_display = f"{tag_display} - {char_display}"
 
     background = Image.new("RGBA", (CANVAS_SIZE, CANVAS_SIZE), (0, 0, 0, 255))
     ui_layer = Image.new("RGBA", (CANVAS_SIZE, CANVAS_SIZE), (0, 0, 0, 0))
