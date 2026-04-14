@@ -213,9 +213,12 @@ def main():
     char_display = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', character_raw).upper()
     adj_display = adj_raw.upper()
 
-    # Prepend tag to title when provided: "KC - FRANKENSTEIN" instead of "KCFRANKENSTEIN"
+    # Prepend tag to title when provided: "KC - HUNTER" instead of "KCHUNTER"
+    # Strip the tag prefix from the character name first to avoid doubling (e.g. "KC" + "KCHunter" -> "KC - HUNTER")
     tag_display = args.tag.strip().upper()
     if tag_display:
+        if char_display.upper().startswith(tag_display):
+            char_display = char_display[len(tag_display):].lstrip(' -_')
         char_display = f"{tag_display} - {char_display}"
 
     background = Image.new("RGBA", (CANVAS_SIZE, CANVAS_SIZE), (0, 0, 0, 255))
