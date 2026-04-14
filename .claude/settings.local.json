@@ -15,7 +15,12 @@
       "Bash(grep -n 'outputValues\\\\|tsvLine\\\\|$cols\\\\[' 'C:\\\\GitRepos\\\\ScriptsAndTools\\\\BambuScripts\\\\workers\\\\DataExtract_worker.ps1')",
       "Bash(grep -n '^\\\\s*$h\\\\s*=\\\\|$m\\\\s*=\\\\|$h,\\\\s*$m\\\\|hours\\\\|minutes' 'C:\\\\GitRepos\\\\ScriptsAndTools\\\\BambuScripts\\\\workers\\\\DataExtract_worker.ps1')",
       "Read(//c/GitRepos/ScriptsAndTools/BambuScripts/**)",
-      "Bash(gh pr create --title 'Review Mode, drag-drop PNG replacement, and per-theme review toggle' --body ':*)"
+      "Bash(gh pr create --title 'Review Mode, drag-drop PNG replacement, and per-theme review toggle' --body ':*)",
+      "Bash(powershell -Command ':*)",
+      "Bash(cd /tmp)",
+      "Bash(powershell -Command '& { $null = [System.Management.Automation.Language.Parser]::ParseFile\\('\\\\''C:/GitRepos/ScriptsAndTools/BambuScripts/.claude/worktrees/practical-hellman/BambuScripts/workers/merge_3mf_worker.ps1'\\\\'', [ref]$null, [ref]$errs\\); if \\($errs.Count -eq 0\\) { '\\\\''PARSE OK'\\\\'' } else { $errs | ForEach-Object { $_.Message + '\\\\'' at line '\\\\'' + $_.Extent.StartLineNumber } } }')",
+      "Skill(update-config)",
+      "Skill(update-config:*)"
     ]
   }
 }
