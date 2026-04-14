@@ -234,6 +234,60 @@ $report.Add("Items to merge: $totalItems")
 $report.Add("Lone (untouched) target items: $lone")
 $report.Add("Merge plan: $($mergePlan -join ', ') ($($mergePlan.Count) groups)")
 
+# ── SPATIAL PROXIMITY GROUPING ────────────────────────────────────────────────
+# Reorder $mergeItems so that each consecutive block of $mergePlan[i] items is
+# spatially clustered.  The anchor of each group is the leftmost unassigned item;
+# remaining slots are filled greedily with the nearest unassigned neighbour.
+# Lone items are left at the tail unchanged.
+$mergeableCount = $totalItems - $lone
+if ($mergeableCount -gt 0 -and $mergePlan.Count -gt 0) {
+    $mergeable = @($mergeItems[0..($mergeableCount - 1)])
+    $loneItems = if ($lone -gt 0) { @($mergeItems[$mergeableCount..($totalItems - 1)]) } else { @() }
+
+    # Build pool with positions extracted once
+    $pool = [System.Collections.Generic.List[PSCustomObject]]::new()
+    foreach ($item in $mergeable) {
+        $itx = Parse-Tx ($item.GetAttribute('transform'))
+        $pool.Add([PSCustomObject]@{ Item = $item; X = $itx[9]; Y = $itx[10] }) | Out-Null
+    }
+
+    $ordered = [System.Collections.Generic.List[object]]::new()
+    foreach ($size in $mergePlan) {
+        if ($pool.Count -lt $size) { break }
+
+        # Anchor: leftmost unassigned item (min X, tie-break min Y) for a
+        # consistent left-to-right traversal across the plate
+        $anchorIdx = 0
+        for ($ai = 1; $ai -lt $pool.Count; $ai++) {
+            if ($pool[$ai].X -lt $pool[$anchorIdx].X -or
+                ($pool[$ai].X -eq $pool[$anchorIdx].X -and $pool[$ai].Y -lt $pool[$anchorIdx].Y)) {
+                $anchorIdx = $ai
+            }
+        }
+        $grp = [System.Collections.Generic.List[PSCustomObject]]::new()
+        $grp.Add($pool[$anchorIdx]) | Out-Null
+        $pool.RemoveAt($anchorIdx)
+
+        # Greedily pick nearest unassigned neighbour for each remaining slot
+        for ($n = 1; $n -lt $size; $n++) {
+            $last = $grp[$grp.Count - 1]
+            $nearIdx = 0; $nearDist = [double]::MaxValue
+            for ($ri = 0; $ri -lt $pool.Count; $ri++) {
+                $dx = $pool[$ri].X - $last.X; $dy = $pool[$ri].Y - $last.Y
+                $d  = $dx * $dx + $dy * $dy   # squared distance sufficient for comparison
+                if ($d -lt $nearDist) { $nearDist = $d; $nearIdx = $ri }
+            }
+            $grp.Add($pool[$nearIdx]) | Out-Null
+            $pool.RemoveAt($nearIdx)
+        }
+
+        foreach ($entry in $grp) { $ordered.Add($entry.Item) | Out-Null }
+    }
+
+    $mergeItems = @($ordered) + $loneItems
+    $report.Add("Spatial grouping applied: items reordered by proximity")
+}
+
 # ── DYNAMIC MESH FILE TRACKER ─────────────────────────────────────────────────
 $emptyShell = "<?xml version=`"1.0`" encoding=`"UTF-8`"?>`n<model unit=`"millimeter`" xml:lang=`"en-US`" xmlns=`"http://schemas.microsoft.com/3dmanufacturing/core/2015/02`" xmlns:p=`"http://schemas.microsoft.com/3dmanufacturing/production/2015/06`" requiredextensions=`"p`">`n  <metadata name=`"BambuStudio:3mfVersion`">1</metadata>`n  <resources>`n  </resources>`n  <build/>`n</model>"
 
