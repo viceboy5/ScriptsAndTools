@@ -2688,7 +2688,16 @@ $script:queueTimer.Add_Tick({
 
             $pJob.BtnApply.Content = "KEEP"; $pJob.BtnApply.Background = Get-WpfColor "#4CAF72"
             $pJob.BtnApply.IsEnabled = $true; $pJob.BtnApply.Width = 70
-            $pJob.BtnRevertDone.Visibility = "Visible"
+
+            # Only enable revert controls if a Nest.3mf actually exists (failed merges won't have one)
+            $nestNow = Get-ChildItem -Path $pJob.FolderPath -Filter "*Nest.3mf" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($nestNow) {
+                $pJob.BtnRevertDone.Visibility = "Visible"
+                if ($pJob.BtnRevertMerge) { $pJob.BtnRevertMerge.IsEnabled = $true; $pJob.BtnRevertMerge.Background = Get-WpfColor "#D95F5F"; $pJob.BtnRevertMerge.Foreground = Get-WpfColor "#FFFFFF"; $pJob.BtnRevertMerge.ToolTip = $null }
+            } else {
+                $pJob.BtnRevertDone.Visibility = "Collapsed"
+                if ($pJob.BtnRevertMerge) { $pJob.BtnRevertMerge.IsEnabled = $false; $pJob.BtnRevertMerge.Background = Get-WpfColor "#3A3A3A"; $pJob.BtnRevertMerge.Foreground = Get-WpfColor "#666666"; $pJob.BtnRevertMerge.ToolTip = "No Nest.3mf found - merge may have failed" }
+            }
 
             $script:activeProcess = $null; $script:activeProcessJob = $null
 
