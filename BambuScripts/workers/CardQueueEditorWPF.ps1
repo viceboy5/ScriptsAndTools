@@ -1556,9 +1556,15 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         else { $lblStatus.Text = "[UNMATCHED]"; $lblStatus.Foreground = Get-WpfColor "#D95F5F" }
 
         $combo = New-Object System.Windows.Controls.ComboBox; $combo.IsEditable = $true
+        $combo.IsTextSearchEnabled = $false  # We handle filtering ourselves
         $combo.MinWidth = $comboMinW; $combo.MaxWidth = 210 # Safe limits so it doesn't hit the image
         $combo.Width = [System.Double]::NaN # Tells WPF to Auto-size dynamically!
-        foreach ($k in $LibraryColors.Keys) { [void]$combo.Items.Add($k) }
+        $allColorKeys = @($LibraryColors.Keys | Sort-Object)
+        $colorCollection = New-Object System.Collections.ObjectModel.ObservableCollection[string]
+        foreach ($k in $allColorKeys) { $colorCollection.Add($k) | Out-Null }
+        $combo.ItemsSource = $colorCollection
+        # CollectionView filter — never touch the underlying collection, just swap predicates
+        $comboView = [System.Windows.Data.CollectionViewSource]::GetDefaultView($colorCollection)
         if ($slotData.Name) { $combo.Text = $slotData.Name } else { $combo.Text = "Select Color..." }
 
         $textStack.Children.Add($lblStatus) | Out-Null; $textStack.Children.Add($combo) | Out-Null
@@ -1588,24 +1594,106 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
         $pJob.UISlots.Add([PSCustomObject]@{ OldHex = $slotData.OldHex; Combo = $combo; StatusLbl = $lblStatus; SwatchBorder = $swatchBorder; LblNum = $lblNum }) | Out-Null
 
-        $combo.Tag = @{ StatusLbl = $lblStatus; OrigName = $slotData.Name; P = $pJob; Swatch = $swatchBorder; LblNum = $lblNum }
+        $combo.Tag = @{ StatusLbl = $lblStatus; OrigName = $slotData.Name; P = $pJob; Swatch = $swatchBorder; LblNum = $lblNum; AllKeys = $allColorKeys; ComboView = $comboView; Filtering = $false; NeedsFilter = $false; TypedText = $(if ($slotData.Name) { $slotData.Name } else { "" }) }
+
+        # Only flag re-filter when the user actually types or deletes — not for arrow-key navigation
+        $combo.Add_PreviewTextInput({
+            param($s, $e)
+            $s.Tag.NeedsFilter = $true
+        })
+
+        # Arrow keys navigate filtered suggestions; Tab/Enter accepts; Escape restores typed text
+        $combo.Add_PreviewKeyDown({
+            param($s, $e)
+            $data = $s.Tag
+            if ($e.Key -eq [System.Windows.Input.Key]::Back -or $e.Key -eq [System.Windows.Input.Key]::Delete) {
+                $data.NeedsFilter = $true
+            }
+            elseif ($e.Key -eq [System.Windows.Input.Key]::Down -or $e.Key -eq [System.Windows.Input.Key]::Up) {
+                if (-not $s.IsDropDownOpen -and $s.Items.Count -gt 0) { $s.IsDropDownOpen = $true; $e.Handled = $true }
+            }
+            elseif ($e.Key -eq [System.Windows.Input.Key]::Tab -or $e.Key -eq [System.Windows.Input.Key]::Enter) {
+                if ($s.IsDropDownOpen -and $s.Items.Count -gt 0) {
+                    $accepted = if ($s.SelectedItem -ne $null) { $s.SelectedItem.ToString() } else { $s.Items[0].ToString() }
+                    $data.Filtering = $true
+                    $s.IsDropDownOpen = $false
+                    $data.ComboView.Filter = $null   # Clear filter — full list visible next open
+                    $data.TypedText = $accepted
+                    $data.NeedsFilter = $false
+                    $data.Filtering = $false          # Release BEFORE setting Text so TextChanged runs
+                    $s.Text = $accepted               # TextChanged fires → updates status/swatch/validate
+                    $tb = $s.Template.FindName("PART_EditableTextBox", $s)
+                    if ($tb -ne $null) { $tb.Select($accepted.Length, 0) }
+                    $e.Handled = $true
+                }
+            }
+            elseif ($e.Key -eq [System.Windows.Input.Key]::Escape) {
+                if ($s.IsDropDownOpen) {
+                    $data.Filtering = $true
+                    $s.IsDropDownOpen = $false
+                    $data.ComboView.Filter = $null   # Clear filter
+                    $data.NeedsFilter = $false
+                    $data.Filtering = $false          # Release BEFORE restoring text
+                    $s.Text = $data.TypedText         # TextChanged fires → updates status
+                    $tb = $s.Template.FindName("PART_EditableTextBox", $s)
+                    if ($tb -ne $null) { $tb.Select($data.TypedText.Length, 0) }
+                    $e.Handled = $true
+                }
+            }
+        })
+
+        # On mouse-click selection: clear filter so full list is ready next open; commit TypedText
+        $combo.Add_DropDownClosed({
+            param($s, $e)
+            $data = $s.Tag
+            if ($data.Filtering) { return }
+            $data.Filtering = $true
+            $data.ComboView.Filter = $null   # Just clear the predicate — collection itself never changes
+            if ($LibraryColors.Contains($s.Text)) { $data.TypedText = $s.Text }
+            $data.Filtering = $false
+            # TextChanged already updated status when the item text was set
+        })
+
         $combo.AddHandler([System.Windows.Controls.Primitives.TextBoxBase]::TextChangedEvent, [System.Windows.Controls.TextChangedEventHandler]{
             param($s, $e)
             $data = $s.Tag
-            if ($LibraryColors.Contains($s.Text)) {
-                $newHex = $LibraryColors[$s.Text]
+            if ($data.Filtering) { return }
+
+            $typed = $s.Text
+
+            # Re-filter only when user typed/deleted (NeedsFilter set by PreviewTextInput/PreviewKeyDown)
+            # Arrow-key navigation leaves NeedsFilter = false so the filtered view is preserved
+            if ($data.NeedsFilter) {
+                $data.NeedsFilter = $false
+                $data.Filtering = $true
+                $data.TypedText = $typed
+                $cv = $data.ComboView
+                if ([string]::IsNullOrWhiteSpace($typed) -or $typed -eq "Select Color...") {
+                    $cv.Filter = $null
+                    $s.IsDropDownOpen = $false
+                } else {
+                    $typedLower = $typed.ToLower()
+                    $cv.Filter = [Predicate[object]]({ param($item) $item.ToString().ToLower().Contains($typedLower) }.GetNewClosure())
+                    $s.IsDropDownOpen = (-not $cv.IsEmpty)
+                }
+                $data.Filtering = $false
+            }
+
+            # Status + swatch always update (typing, navigation preview, Tab/Enter accept, mouse click)
+            if ($LibraryColors.Contains($typed)) {
+                $newHex = $LibraryColors[$typed]
                 $data.Swatch.Background = Get-WpfColor $newHex
                 try {
-                    $r = [Convert]::ToInt32($newHex.Substring(1,2), 16)
-                    $g = [Convert]::ToInt32($newHex.Substring(3,2), 16)
-                    $b = [Convert]::ToInt32($newHex.Substring(5,2), 16)
-                    $numColor = if ((0.299*$r + 0.587*$g + 0.114*$b) -gt 128) { "#000000" } else { "#FFFFFF" }
-                    $data.LblNum.Foreground = Get-WpfColor $numColor
+                    $rv = [Convert]::ToInt32($newHex.Substring(1,2), 16)
+                    $gv = [Convert]::ToInt32($newHex.Substring(3,2), 16)
+                    $bv = [Convert]::ToInt32($newHex.Substring(5,2), 16)
+                    $nc = if ((0.299*$rv + 0.587*$gv + 0.114*$bv) -gt 128) { "#000000" } else { "#FFFFFF" }
+                    $data.LblNum.Foreground = Get-WpfColor $nc
                 } catch {}
             }
-            if ($s.Text -eq $data.OrigName -and $data.OrigName) {
+            if ($typed -eq $data.OrigName -and $data.OrigName) {
                 $data.StatusLbl.Text = "[MATCHED]"; $data.StatusLbl.Foreground = Get-WpfColor "#4CAF72"
-            } elseif ($LibraryColors.Contains($s.Text)) {
+            } elseif ($LibraryColors.Contains($typed)) {
                 $data.StatusLbl.Text = "[CHANGED]"; $data.StatusLbl.Foreground = Get-WpfColor "#E8A135"
             } else {
                 $data.StatusLbl.Text = "[UNMATCHED]"; $data.StatusLbl.Foreground = Get-WpfColor "#D95F5F"
