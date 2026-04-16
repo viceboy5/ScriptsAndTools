@@ -1,5 +1,20 @@
 # BambuScripts — Project Context for Claude
 
+## Session Start Checklist
+
+> **Do this at the start of every session, before anything else:**
+> 1. Read `BambuScripts/CLAUDE.md` (this file) — confirm architecture and conventions loaded
+> 2. Read `BambuScripts/PROGRESS.md` — confirm current branch status and next steps loaded
+> 3. If working inside a worktree, also read that worktree's own `PROGRESS.md` for detailed task state
+> 4. Confirm to the user: "Context loaded — [branch/worktree], next up: [top item from next steps]"
+
+> **At the end of every session:**
+> - Update the worktree's `PROGRESS.md` with what was done, decisions made, and revised next steps
+> - Update the summary entry in the main `PROGRESS.md` worktree section
+> - Remind the user to let you do this if you haven't yet
+
+---
+
 ## Project Overview
 
 A Windows toolset for managing Bambu 3D printer batch workflows. Handles the full pipeline:
@@ -83,6 +98,18 @@ BambuScripts/
 - **Windows-only**: COM interop, WPF, WinForms, hardcoded Bambu Studio path
 - **No package manager / no tests**: Manual testing through the GUI
 - **Platform**: PowerShell 3.0+, .NET Framework (PresentationFramework, System.Windows.Forms)
+
+---
+
+## Progress File Convention
+
+| Location | Purpose |
+|---|---|
+| `BambuScripts/PROGRESS.md` | Main branch log + brief summary of each active worktree |
+| `<worktree>/BambuScripts/PROGRESS.md` | Detailed log for that specific worktree only |
+
+**Every new worktree gets its own `PROGRESS.md` created at the start of the first session in it.**  
+The main `PROGRESS.md` worktree section is updated with a brief summary at the end of each session.
 
 ---
 
