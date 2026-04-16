@@ -21,8 +21,8 @@ if ($ConsoleOnly) {
 }
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-. "$scriptDir\BambuConfig.ps1"
-$colorCsvPath = Join-Path $scriptDir "colorNamesCSV.csv"
+. (Join-Path $scriptDir "..\libraries\NamesLibrary.ps1")
+$colorCsvPath = Join-Path $scriptDir "..\libraries\FilamentLibrary.csv"
 
 # --- 1. Load the Reverse-Lookup Color Dictionary (RGB EDITION) ---
 $LibraryNames = @{}
@@ -52,7 +52,7 @@ if (Test-Path $colorCsvPath) {
         }
     }
 } else {
-    Write-Warning "Could not find colorNamesCSV.csv for reverse lookup."
+    Write-Warning "Could not find FilamentLibrary.csv for reverse lookup."
 }
 
 # --- 2. Define the Native C# Engine ---

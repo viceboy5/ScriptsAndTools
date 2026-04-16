@@ -481,7 +481,7 @@ $btnStart.Add_Click({
                                 # Load library hex values - parse manually so extra gradient columns
                                 # don't get concatenated onto the B column by Import-Csv
                                 $libHexes = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-                                $csvPath  = Join-Path $scriptDir "colorNamesCSV.csv"
+                                $csvPath  = Join-Path $scriptDir "..\libraries\FilamentLibrary.csv"
                                 if (Test-Path $csvPath) {
                                     foreach ($line in (Get-Content $csvPath)) {
                                         if ([string]::IsNullOrWhiteSpace($line)) { continue }
@@ -545,7 +545,7 @@ $btnStart.Add_Click({
                                     $colorsSafe = $false
                                     Write-Log "  [!] UNMATCHED ACTIVE COLORS - Merge/Image blocked for $inputName" "Orange"
                                     foreach ($uh in $unmatchedHexes) { Write-Log "      Unmatched: $uh  (slot $($slotMap[$uh]))" "Orange" }
-                                    Write-Log "      Add these to colorNamesCSV.csv and re-scan before merging." "Orange"
+                                    Write-Log "      Add these to FilamentLibrary.csv and re-scan before merging." "Orange"
                                 } else {
                                     Write-Log "  [+] All active colors matched. Safe to proceed." "LightGreen"
                                 }
@@ -600,7 +600,7 @@ $btnStart.Add_Click({
                 if ($doMerge) {
                     if (-not $colorsSafe) {
                         Write-Log "  [BLOCKED] Merge skipped - unmatched colors detected in Phase 1." "Red"
-                        Write-Log "            Fix colorNamesCSV.csv and re-run Scan Colors before merging." "Orange"
+                        Write-Log "            Fix FilamentLibrary.csv and re-run Scan Colors before merging." "Orange"
                     } else {
                     Write-Log "  -> Merging Geometries..." "Cyan"
                     try {
@@ -695,7 +695,7 @@ $btnStart.Add_Click({
                     $imageAllowed = $doImage
                     if ($doImage -and -not $colorsSafe) {
                         $imageAllowed = $false
-                        Write-Log "  [!] Image generation blocked - unmatched colors detected. Fix colorNamesCSV.csv and re-run." "Orange"
+                        Write-Log "  [!] Image generation blocked - unmatched colors detected. Fix FilamentLibrary.csv and re-run." "Orange"
                     }
 
                     $extractArgs = @(

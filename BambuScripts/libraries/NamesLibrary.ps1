@@ -1,7 +1,7 @@
 # --- Shared configuration for BambuScripts -----------------------------------
 # Single source of truth for grandparent theme names and printer prefixes.
 # Dot-source this file from any worker script that needs these values:
-#   . "$PSScriptRoot\BambuConfig.ps1"
+#   . (Join-Path $PSScriptRoot "..\libraries\NamesLibrary.ps1")
 
 $script:GpThemes = @(
     'Fantasy', 'Puppies', 'Original', 'Ocean', 'Farm', 'Foodz',
