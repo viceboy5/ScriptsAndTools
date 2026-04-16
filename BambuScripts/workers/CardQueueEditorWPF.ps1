@@ -1594,12 +1594,18 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
         $pJob.UISlots.Add([PSCustomObject]@{ OldHex = $slotData.OldHex; Combo = $combo; StatusLbl = $lblStatus; SwatchBorder = $swatchBorder; LblNum = $lblNum }) | Out-Null
 
-        $combo.Tag = @{ StatusLbl = $lblStatus; OrigName = $slotData.Name; P = $pJob; Swatch = $swatchBorder; LblNum = $lblNum; AllKeys = $allColorKeys; ComboView = $comboView; Filtering = $false; NeedsFilter = $false; TypedText = $(if ($slotData.Name) { $slotData.Name } else { "" }) }
+        $combo.Tag = @{ StatusLbl = $lblStatus; OrigName = $slotData.Name; P = $pJob; Swatch = $swatchBorder; LblNum = $lblNum; AllKeys = $allColorKeys; ComboView = $comboView; Filtering = $false; NeedsFilter = $false; Confirmed = $true; TypedText = $(if ($slotData.Name) { $slotData.Name } else { "" }) }
 
-        # Only flag re-filter when the user actually types or deletes — not for arrow-key navigation
+        # Flag re-filter on typing/deletion; select-all when starting fresh after a confirmed value
         $combo.Add_PreviewTextInput({
             param($s, $e)
-            $s.Tag.NeedsFilter = $true
+            $data = $s.Tag
+            if ($data.Confirmed) {
+                $data.Confirmed = $false
+                $tb = $s.Template.FindName("PART_EditableTextBox", $s)
+                if ($tb -ne $null) { $tb.SelectAll() }  # Replace confirmed value cleanly on first keystroke
+            }
+            $data.NeedsFilter = $true
         })
 
         # Arrow keys navigate filtered suggestions; Tab/Enter accepts; Escape restores typed text
@@ -1607,6 +1613,11 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             param($s, $e)
             $data = $s.Tag
             if ($e.Key -eq [System.Windows.Input.Key]::Back -or $e.Key -eq [System.Windows.Input.Key]::Delete) {
+                if ($data.Confirmed) {
+                    $data.Confirmed = $false
+                    $tb = $s.Template.FindName("PART_EditableTextBox", $s)
+                    if ($tb -ne $null) { $tb.SelectAll() }  # Select all so delete clears the whole value
+                }
                 $data.NeedsFilter = $true
             }
             elseif ($e.Key -eq [System.Windows.Input.Key]::Down -or $e.Key -eq [System.Windows.Input.Key]::Up) {
@@ -1620,10 +1631,11 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
                     $data.ComboView.Filter = $null   # Clear filter — full list visible next open
                     $data.TypedText = $accepted
                     $data.NeedsFilter = $false
+                    $data.Confirmed = $true           # Mark as confirmed so next keypress selects-all
                     $data.Filtering = $false          # Release BEFORE setting Text so TextChanged runs
                     $s.Text = $accepted               # TextChanged fires → updates status/swatch/validate
                     $tb = $s.Template.FindName("PART_EditableTextBox", $s)
-                    if ($tb -ne $null) { $tb.Select($accepted.Length, 0) }
+                    if ($tb -ne $null) { $tb.SelectAll() }  # Select all so next search replaces cleanly
                     $e.Handled = $true
                 }
             }
@@ -1633,10 +1645,11 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
                     $s.IsDropDownOpen = $false
                     $data.ComboView.Filter = $null   # Clear filter
                     $data.NeedsFilter = $false
+                    $data.Confirmed = $true
                     $data.Filtering = $false          # Release BEFORE restoring text
                     $s.Text = $data.TypedText         # TextChanged fires → updates status
                     $tb = $s.Template.FindName("PART_EditableTextBox", $s)
-                    if ($tb -ne $null) { $tb.Select($data.TypedText.Length, 0) }
+                    if ($tb -ne $null) { $tb.SelectAll() }
                     $e.Handled = $true
                 }
             }
@@ -1649,7 +1662,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             if ($data.Filtering) { return }
             $data.Filtering = $true
             $data.ComboView.Filter = $null   # Just clear the predicate — collection itself never changes
-            if ($LibraryColors.Contains($s.Text)) { $data.TypedText = $s.Text }
+            if ($LibraryColors.Contains($s.Text)) { $data.TypedText = $s.Text; $data.Confirmed = $true }
             $data.Filtering = $false
             # TextChanged already updated status when the item text was set
         })
