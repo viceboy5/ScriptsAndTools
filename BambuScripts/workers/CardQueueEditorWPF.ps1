@@ -2566,7 +2566,7 @@ function Build-GpJob($gpPath, $parentDict) {
             if ($tsv.FullName -eq $outTsvPath) { continue }
             $line = Get-Content $tsv.FullName -ErrorAction SilentlyContinue | Select-Object -Last 1
             if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            $key = ($line -split "`t")[0]
+            $cols = $line -split "`t"; $key = if ($cols.Count -ge 3) { $cols[2] } else { $cols[0] }
             $combined[$key] = $line
         }
         if ($combined.Count -eq 0) {
