@@ -182,17 +182,31 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 # ---------------------------------------------------------------------------------
 $projectName = ((Split-Path $InputFile -Leaf) -replace '\.gcode\.3mf$', '') -replace '(?i)_Full$', ''
 
-# --- DETECT TAG PREFIX from the character token (e.g. "KCFrankenstein" -> tag "KC") ---
-$detectedTag = ''
-$nameForParse = $projectName
+# --- DETECT PRINTER PREFIX and TAG, then derive clean columns ---
+$detectedTag    = ''
+$printerPrefix  = ''
+$nameForParse   = $projectName
 foreach ($pfx in $script:PrinterPrefixes) {
-    if ($nameForParse -imatch "^${pfx}_") { $nameForParse = $nameForParse.Substring($pfx.Length + 1); break }
+    if ($nameForParse -imatch "^${pfx}_") {
+        $printerPrefix = $pfx
+        $nameForParse  = $nameForParse.Substring($pfx.Length + 1)
+        break
+    }
 }
 $firstToken = ($nameForParse -split '_')[0]
 foreach ($t in $script:Tags) {
     if ($firstToken.Length -gt $t.Length -and $firstToken.Substring(0, $t.Length) -ieq $t) {
         $detectedTag = $t; break
     }
+}
+
+# File Type label from tag map (KC -> Keychain, Big -> Big Wig, Huge -> Huge Wig); no tag = Standard
+$fileTypeLabel = if ($detectedTag -ne '' -and $script:TagLabels.ContainsKey($detectedTag)) { $script:TagLabels[$detectedTag] } else { 'Standard' }
+
+# Clean file name: printer prefix and tag both stripped (e.g. "X1C_KCGoldenRetriever_Maverik" -> "GoldenRetriever_Maverik")
+$fileNameClean = $nameForParse   # already has printer prefix removed above
+if ($detectedTag -ne '' -and $fileNameClean.Substring(0, [Math]::Min($detectedTag.Length, $fileNameClean.Length)) -ieq $detectedTag) {
+    $fileNameClean = $fileNameClean.Substring($detectedTag.Length)
 }
 
 # --- NEW: PARSE THEME AND RARITY FROM FILENAME ---
@@ -361,17 +375,19 @@ if (-not $SkipExtraction) {
         $activeSlotCount = 4
         for ($i = 5; $i -le 8; $i++) { if ($filData[$i].g -gt 0) { $activeSlotCount = $i } }
 
-        $outputValues = @($projectName, $themeOutput, (Get-Date).ToString("M/d/yyyy"), $h, $m)
+        # Columns: Printer, FileType, FileName, Theme, Date, H, M, [slot grams+color ...], ColorSwaps, ObjCount, ModelGrams, SUM, TimeAdd
+        $outputValues = @($printerPrefix, $fileTypeLabel, $fileNameClean, $themeOutput, (Get-Date).ToString("M/d/yyyy"), $h, $m)
         for ($i = 1; $i -le $activeSlotCount; $i++) {
             $outputValues += $(if ($filData[$i].g -gt 0) { $filData[$i].g } else { 0 })
             $outputValues += $filData[$i].color
         }
 
-        # SUM formula: 4-slot baseline ends at 'N'; shift end column right 2 letters per extra slot
-        $endCol = [char](78 + ($activeSlotCount - 4) * 2)  # 'N'=78 for 4 slots, 'P' for 5, 'R' for 6, etc.
+        # SUM formula: slot data starts at col I (2 new prefix cols shift old G->I, old N->P baseline)
+        # 4-slot baseline ends at 'P'; shift end column right 2 letters per extra slot
+        $endCol = [char](80 + ($activeSlotCount - 4) * 2)  # 'P'=80 for 4 slots, 'R' for 5, 'T' for 6, etc.
         $outputValues += @(
             $actualColorSwaps, $objCount, [math]::Round($modelGrams, 2),
-            "=SUM(INDIRECT(`"G`"&ROW()&`":$endCol`"&ROW()))",
+            "=SUM(INDIRECT(`"I`"&ROW()&`":$endCol`"&ROW()))",
             $timeAdd
         )
     } catch {
@@ -386,12 +402,12 @@ if (-not $SkipExtraction) {
             $existingData = Get-Content $IndividualTsvPath | Select-Object -Last 1
             $cols = $existingData -split "`t"
 
-            if ($cols.Count -ge 18) {
-                # Infer slot count from column count: (total - 5 prefix - 5 trailing) / 2
-                $tsvSlotCount = [math]::Min(8, [math]::Max(4, [math]::Floor(($cols.Count - 10) / 2)))
-                # Rebuild filament array from TSV columns
+            if ($cols.Count -ge 20) {
+                # Infer slot count from column count: (total - 7 prefix - 5 trailing) / 2
+                $tsvSlotCount = [math]::Min(8, [math]::Max(4, [math]::Floor(($cols.Count - 12) / 2)))
+                # Rebuild filament array from TSV columns (slot data now starts at index 7: Printer,FileType,FileName,Theme,Date,H,M)
                 for ($i = 1; $i -le $tsvSlotCount; $i++) {
-                    $gIdx = 5 + (($i - 1) * 2)
+                    $gIdx = 7 + (($i - 1) * 2)
                     $cIdx = $gIdx + 1
                     if ($gIdx -lt $cols.Count -and [double]::TryParse($cols[$gIdx], [ref]$null)) { $filData[$i].g = [double]$cols[$gIdx] }
                     if ($cIdx -lt $cols.Count) {
@@ -536,7 +552,8 @@ if (-not $SkipExtraction) {
                 $found = $false
 
                 for ($i = 0; $i -lt $lines.Count; $i++) {
-                    if ($lines[$i] -match "^$([regex]::Escape($projectName))\t") {
+                    $rowCols = $lines[$i] -split "`t"
+                    if ($rowCols.Count -ge 3 -and $rowCols[2] -eq $fileNameClean) {
                         $lines[$i] = $tsvLine
                         $found = $true
                         break
