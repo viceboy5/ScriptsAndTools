@@ -2516,7 +2516,8 @@ function Build-GpJob($gpPath, $parentDict) {
     # Live preview of the full grandparent folder name (Prefix_Theme or just Theme)
     $lblGpPreview = Create-TextBlock "" "#6B9FD4" 14 "Bold"
     $lblGpPreview.VerticalAlignment = "Center"; $lblGpPreview.Margin = New-Object System.Windows.Thickness(20,0,0,0)
-    $initGpPreview = ((@($gpDetectedPrefix, (if ($gpDetectedTag) { $gpDetectedTag } else { "Standard" }), $gpNameForTheme) | Where-Object { $_ }) -join '_')
+    $initGpTag = if ($gpDetectedTag) { $gpDetectedTag } else { "Standard" }
+    $initGpPreview = ((@($gpDetectedPrefix, $initGpTag, $gpNameForTheme) | Where-Object { $_ }) -join '_')
     $lblGpPreview.Text = if ($initGpPreview) { [char]0x2192 + " $initGpPreview" } else { "" }
     $headerStack.Children.Add($lblGpPreview) | Out-Null; $gpJob.LblGpPreview = $lblGpPreview
 
@@ -2919,41 +2920,57 @@ $window.Add_Drop({
     if (-not $e.Data.GetDataPresent([System.Windows.DataFormats]::FileDrop)) { return }
     $dropped = $e.Data.GetData([System.Windows.DataFormats]::FileDrop)
 
+    $dbgLog = Join-Path $env:TEMP "CardQueueEditor_debug.txt"
+    [System.IO.File]::WriteAllText($dbgLog, "[DROP] Started`r`nDropped: $($dropped -join ', ')`r`n")
+
     $lblGlobalTitle.Text = "Scanning dropped folders..."
     [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
 
-    $newGpQueue = Get-AnchorQueue $dropped
+    try {
+        [System.IO.File]::AppendAllText($dbgLog, "[STEP] Calling Get-AnchorQueue`r`n")
+        $newGpQueue = Get-AnchorQueue $dropped
+        [System.IO.File]::AppendAllText($dbgLog, "[STEP] Get-AnchorQueue returned $($newGpQueue.Count) group(s)`r`n")
 
-    if ($newGpQueue.Count -gt 0) {
-        # Remove folders already loaded in the UI
-        foreach ($gpPath in @($newGpQueue.Keys)) {
-            foreach ($parentPath in @($newGpQueue[$gpPath].Keys)) {
-                $exists = $false
-                foreach ($j in $script:jobs) { foreach ($parentJob in $j.Parents) { if ($parentJob.FolderPath -eq $parentPath) { $exists = $true; break } } }
-                if ($exists) { $newGpQueue[$gpPath].Remove($parentPath) }
-            }
-            if ($newGpQueue[$gpPath].Count -eq 0) { $newGpQueue.Remove($gpPath) }
-        }
-
-        foreach ($gpPath in $newGpQueue.Keys) {
-            $existingGp = $null
-            foreach ($j in $script:jobs) { if ($j.GpPath -eq $gpPath) { $existingGp = $j; break } }
-
-            if ($existingGp) {
-                # Append to existing Grandparent group
-                foreach ($pKey in $newGpQueue[$gpPath].Keys) {
-                    $pJob = Build-PJob $pKey $newGpQueue[$gpPath][$pKey] $existingGp
-                    $existingGp.Parents.Add($pJob) | Out-Null
+        if ($newGpQueue.Count -gt 0) {
+            # Remove folders already loaded in the UI
+            foreach ($gpPath in @($newGpQueue.Keys)) {
+                foreach ($parentPath in @($newGpQueue[$gpPath].Keys)) {
+                    $exists = $false
+                    foreach ($j in $script:jobs) { foreach ($parentJob in $j.Parents) { if ($parentJob.FolderPath -eq $parentPath) { $exists = $true; break } } }
+                    if ($exists) { $newGpQueue[$gpPath].Remove($parentPath) }
                 }
-            } else {
-                # Create a brand new Grandparent group
-                Build-GpJob $gpPath $newGpQueue[$gpPath]
+                if ($newGpQueue[$gpPath].Count -eq 0) { $newGpQueue.Remove($gpPath) }
+            }
+
+            foreach ($gpPath in $newGpQueue.Keys) {
+                $existingGp = $null
+                foreach ($j in $script:jobs) { if ($j.GpPath -eq $gpPath) { $existingGp = $j; break } }
+
+                if ($existingGp) {
+                    # Append to existing Grandparent group
+                    foreach ($pKey in $newGpQueue[$gpPath].Keys) {
+                        [System.IO.File]::AppendAllText($dbgLog, "[STEP] Build-PJob (existing GP): $pKey`r`n")
+                        $pJob = Build-PJob $pKey $newGpQueue[$gpPath][$pKey] $existingGp
+                        $existingGp.Parents.Add($pJob) | Out-Null
+                        [System.IO.File]::AppendAllText($dbgLog, "[STEP] Build-PJob done: $pKey`r`n")
+                    }
+                } else {
+                    [System.IO.File]::AppendAllText($dbgLog, "[STEP] Build-GpJob: $gpPath`r`n")
+                    Build-GpJob $gpPath $newGpQueue[$gpPath]
+                    [System.IO.File]::AppendAllText($dbgLog, "[STEP] Build-GpJob done: $gpPath`r`n")
+                }
             }
         }
-    }
 
-    $lblGlobalTitle.Text = "Queue Dashboard ($($script:jobs.Count) Theme(s) found)"
-    if ($script:jobs.Count -gt 0) { Update-GlobalProcessAllStatus }
+        $lblGlobalTitle.Text = "Queue Dashboard ($($script:jobs.Count) Theme(s) found)"
+        if ($script:jobs.Count -gt 0) { Update-GlobalProcessAllStatus }
+        [System.IO.File]::AppendAllText($dbgLog, "[DROP] Complete. Jobs: $($script:jobs.Count)`r`n")
+    } catch {
+        $errMsg = $_.Exception.Message
+        $errPos = $_.InvocationInfo.PositionMessage
+        [System.IO.File]::AppendAllText($dbgLog, "[ERROR] $errMsg`r`nAt: $errPos`r`n")
+        $lblGlobalTitle.Text = "Error - see $dbgLog"
+    }
 })
 
 $btnProcessAll.Add_Click({
