@@ -36,6 +36,18 @@ Newest entries at top.
 
 ---
 
+### WORKTREE `claude/FeaturesAndEdits` — Summary
+
+**Status:** Active — features and general edits to the PS1/WPF toolset
+**Detailed log:** `BambuScripts/.claude/worktrees/FeaturesAndEdits/BambuScripts/PROGRESS.md`
+**Branched from:** `main` at `039693a`
+
+**This session:** Worktree created.
+
+**Next up:** _(to be filled in)_
+
+---
+
 ### WORKTREE `claude/upbeat-grothendieck` — Summary
 
 **Status:** Python/PySide6 CardQueueEditor rewrite — active development  
