@@ -622,7 +622,7 @@ function Update-ParentPreview($pJob, $gpJob) {
 
     # Update grandparent folder name preview (Printer_Tag_Theme)
     if ($null -ne $gpJob.LblGpPreview) {
-        $gpTg = ""
+        $gpTg = "Standard"
         if ($null -ne $gpJob.CbTag -and $null -ne $gpJob.CbTag.SelectedItem -and "$($gpJob.CbTag.SelectedItem)" -ne "(none)") {
             $gpTg = "$($gpJob.CbTag.SelectedItem)"
         }
@@ -749,7 +749,7 @@ function Enqueue-PJob($pJob, $gpJob) {
         if (-not $gpJob.ChkSkip.IsChecked) {
             $th = ("$($gpJob.TBTheme.SelectedItem)" -replace '[^a-zA-Z0-9]', '')
             $pf = if ($null -ne $gpJob.CbPrefix -and "$($gpJob.CbPrefix.SelectedItem)" -ne "(none)") { "$($gpJob.CbPrefix.SelectedItem)" } else { "" }
-            $tg = if ($null -ne $gpJob.CbTag -and "$($gpJob.CbTag.SelectedItem)" -ne "(none)") { "$($gpJob.CbTag.SelectedItem)" } else { "" }
+            $tg = if ($null -ne $gpJob.CbTag -and "$($gpJob.CbTag.SelectedItem)" -ne "(none)") { "$($gpJob.CbTag.SelectedItem)" } else { "Standard" }
             $newGpFolderName = ((@($pf, $tg, $th) | Where-Object { $_ }) -join '_')
             $currentLeaf = if ($gpJob.DiGrand) { Split-Path $gpJob.GpPath -Leaf } else { "" }
 
@@ -802,10 +802,10 @@ function Start-NextProcess {
         $pf = $gpJob.CbPrefix.SelectedItem.ToString()
         if ($pf -eq "(none)") { $pf = "" }
     }
-    $tg = ""
+    $tg = "Standard"
     if ($null -ne $gpJob.CbTag -and $null -ne $gpJob.CbTag.SelectedItem) {
         $tg = $gpJob.CbTag.SelectedItem.ToString()
-        if ($tg -eq "(none)") { $tg = "" }
+        if ($tg -eq "(none)") { $tg = "Standard" }
     }
     $oldGrand = if ($gpJob.DiGrand) { $gpJob.DiGrand.FullName } else { "" }
 
@@ -2516,7 +2516,7 @@ function Build-GpJob($gpPath, $parentDict) {
     # Live preview of the full grandparent folder name (Prefix_Theme or just Theme)
     $lblGpPreview = Create-TextBlock "" "#6B9FD4" 14 "Bold"
     $lblGpPreview.VerticalAlignment = "Center"; $lblGpPreview.Margin = New-Object System.Windows.Thickness(20,0,0,0)
-    $initGpPreview = ((@($gpDetectedPrefix, $gpDetectedTag, $gpNameForTheme) | Where-Object { $_ }) -join '_')
+    $initGpPreview = ((@($gpDetectedPrefix, (if ($gpDetectedTag) { $gpDetectedTag } else { "Standard" }), $gpNameForTheme) | Where-Object { $_ }) -join '_')
     $lblGpPreview.Text = if ($initGpPreview) { [char]0x2192 + " $initGpPreview" } else { "" }
     $headerStack.Children.Add($lblGpPreview) | Out-Null; $gpJob.LblGpPreview = $lblGpPreview
 
