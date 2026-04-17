@@ -2920,9 +2920,7 @@ $window.Add_Drop({
     if (-not $e.Data.GetDataPresent([System.Windows.DataFormats]::FileDrop)) { return }
     $dropped = $e.Data.GetData([System.Windows.DataFormats]::FileDrop)
 
-    $dbgRoot = $dropped[0]
-    if (Test-Path $dbgRoot -PathType Leaf) { $dbgRoot = Split-Path $dbgRoot -Parent }
-    $dbgLog = Join-Path $dbgRoot "CardQueueEditor_debug.txt"
+    $dbgLog = Join-Path $PSScriptRoot "..\launchers\CardQueueEditor_debug.txt"
     [System.IO.File]::WriteAllText($dbgLog, "[DROP] Started`r`nDropped: $($dropped -join ', ')`r`n")
 
     $lblGlobalTitle.Text = "Scanning dropped folders..."
@@ -2971,7 +2969,7 @@ $window.Add_Drop({
         $errMsg = $_.Exception.Message
         $errPos = $_.InvocationInfo.PositionMessage
         [System.IO.File]::AppendAllText($dbgLog, "[ERROR] $errMsg`r`nAt: $errPos`r`n")
-        $lblGlobalTitle.Text = "Drop error — log saved next to dropped files"
+        $lblGlobalTitle.Text = "Drop error - log saved next to dropped files"
         $dlgResult = [System.Windows.MessageBox]::Show(
             "An error occurred loading files.`n`nLog: $dbgLog`n`nOpen the log now?",
             "CardQueueEditor Error",
