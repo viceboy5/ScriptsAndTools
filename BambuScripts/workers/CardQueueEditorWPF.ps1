@@ -1039,9 +1039,9 @@ function Start-NextProcess {
     }
 
     if ($doSlice) {
-        [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value 'SLICING...' -Force")
+        [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value 'SLICING... 0%' -Force")
         [void]$sb.AppendLine("Start-Sleep -Seconds 3")
-        [void]$sb.AppendLine("& `"$scriptDir\Slice_worker.ps1`" -InputPath `"$anchorPath`" -IsolatedPath `"$finalPath`"")
+        [void]$sb.AppendLine("& `"$scriptDir\Slice_worker.ps1`" -InputPath `"$anchorPath`" -IsolatedPath `"$finalPath`" -StatusFile `"$statusFile`"")
     } elseif ($doExtract -or $doImage) {
         [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value 'RE-SLICING FINAL FOR DATA...' -Force")
         [void]$sb.AppendLine("if (-not (Test-Path `"$finalPath`") -and (Test-Path `"$nestPath`")) {")
@@ -1727,7 +1727,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     }
     $cardGrid.Children.Add($colorsOverlayStack) | Out-Null
 
-    # Processing Overlay (border + bottom label)
+    # Processing Overlay (border + bottom label + progress bar)
     $cardBorderOverlay = New-Object System.Windows.Controls.Border
     $cardBorderOverlay.BorderThickness = New-Object System.Windows.Thickness(6)
     $cardBorderOverlay.BorderBrush = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(220,232,161,53))
@@ -1737,13 +1737,24 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $cardStatusLbl.Text = "[ PROCESSING ]"
     $cardStatusLbl.Foreground = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(255,232,161,53))
     $cardStatusLbl.FontSize = 13; $cardStatusLbl.FontWeight = [System.Windows.FontWeights]::Bold
-    $cardStatusLbl.TextAlignment = "Center"; $cardStatusLbl.VerticalAlignment = "Bottom"; $cardStatusLbl.HorizontalAlignment = "Stretch"
+    $cardStatusLbl.TextAlignment = "Center"; $cardStatusLbl.HorizontalAlignment = "Stretch"
     $cardStatusLbl.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(180,0,0,0))
     $cardStatusLbl.Padding = New-Object System.Windows.Thickness(5,4,5,6)
-    $cardBorderOverlay.Child = $cardStatusLbl
+    $cardProgressBar = New-Object System.Windows.Controls.ProgressBar
+    $cardProgressBar.Height = 7; $cardProgressBar.Minimum = 0; $cardProgressBar.Maximum = 100; $cardProgressBar.Value = 0
+    $cardProgressBar.Foreground = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(255,232,161,53))
+    $cardProgressBar.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(180,0,0,0))
+    $cardProgressBar.BorderThickness = New-Object System.Windows.Thickness(0)
+    $cardProgressBar.HorizontalAlignment = "Stretch"; $cardProgressBar.Visibility = "Collapsed"
+    $cardOverlayPanel = New-Object System.Windows.Controls.StackPanel
+    $cardOverlayPanel.VerticalAlignment = "Bottom"; $cardOverlayPanel.HorizontalAlignment = "Stretch"
+    $cardOverlayPanel.Children.Add($cardProgressBar) | Out-Null
+    $cardOverlayPanel.Children.Add($cardStatusLbl) | Out-Null
+    $cardBorderOverlay.Child = $cardOverlayPanel
     $cardGrid.Children.Add($cardBorderOverlay) | Out-Null
-    $pJob.ProcessingOverlay = $cardBorderOverlay
-    $pJob.CardStatusLabel   = $cardStatusLbl
+    $pJob.ProcessingOverlay  = $cardBorderOverlay
+    $pJob.CardStatusLabel    = $cardStatusLbl
+    $pJob.CardProgressBar    = $cardProgressBar
 
     # Review-mode plate overlay — covers the full card area; shown only in Review mode
     $reviewCardOverlay = New-Object System.Windows.Controls.Image
@@ -1873,13 +1884,24 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pickStatusLbl.Text = "[ PROCESSING ]"
     $pickStatusLbl.Foreground = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(255,232,161,53))
     $pickStatusLbl.FontSize = 13; $pickStatusLbl.FontWeight = [System.Windows.FontWeights]::Bold
-    $pickStatusLbl.TextAlignment = "Center"; $pickStatusLbl.VerticalAlignment = "Bottom"; $pickStatusLbl.HorizontalAlignment = "Stretch"
+    $pickStatusLbl.TextAlignment = "Center"; $pickStatusLbl.HorizontalAlignment = "Stretch"
     $pickStatusLbl.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(180,0,0,0))
     $pickStatusLbl.Padding = New-Object System.Windows.Thickness(5,4,5,6)
-    $pickBorderOverlay.Child = $pickStatusLbl
+    $pickProgressBar = New-Object System.Windows.Controls.ProgressBar
+    $pickProgressBar.Height = 7; $pickProgressBar.Minimum = 0; $pickProgressBar.Maximum = 100; $pickProgressBar.Value = 0
+    $pickProgressBar.Foreground = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(255,232,161,53))
+    $pickProgressBar.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(180,0,0,0))
+    $pickProgressBar.BorderThickness = New-Object System.Windows.Thickness(0)
+    $pickProgressBar.HorizontalAlignment = "Stretch"; $pickProgressBar.Visibility = "Collapsed"
+    $pickOverlayPanel = New-Object System.Windows.Controls.StackPanel
+    $pickOverlayPanel.VerticalAlignment = "Bottom"; $pickOverlayPanel.HorizontalAlignment = "Stretch"
+    $pickOverlayPanel.Children.Add($pickProgressBar) | Out-Null
+    $pickOverlayPanel.Children.Add($pickStatusLbl) | Out-Null
+    $pickBorderOverlay.Child = $pickOverlayPanel
     $pickGrid.Children.Add($pickBorderOverlay) | Out-Null
     $pJob.PickProcessingOverlay = $pickBorderOverlay
-    $pJob.PickStatusLabel = $pickStatusLbl
+    $pJob.PickStatusLabel       = $pickStatusLbl
+    $pJob.PickProgressBar       = $pickProgressBar
 
     # Merge detected banner (top of pick image)
     $nestExists = Get-ChildItem -Path $parentPath -Filter "*Nest.3mf" -File -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -2747,10 +2769,26 @@ $script:queueTimer.Add_Tick({
                     $sr = New-Object System.IO.StreamReader($fs)
                     $statusText = $sr.ReadToEnd(); $sr.Dispose(); $fs.Dispose()
                     if ($statusText) {
-                        $txt = "[ $($statusText.Trim()) ]"
+                        $raw = $statusText.Trim()
+                        # Parse "SLICING... XX%" to drive progress bar; show clean label without the number
+                        $slicePct = $null
+                        if ($raw -match '^SLICING\.\.\.\s*(\d+)%') {
+                            $slicePct = [int]$matches[1]
+                            $raw = "SLICING..."
+                        }
+                        $txt = "[ $raw ]"
                         $pJob.CardStatusLabel.Text = $txt
                         $pJob.PickStatusLabel.Text = $txt
-                        $pJob.BtnApply.Content = $statusText.Trim()
+                        $pJob.BtnApply.Content = $raw
+                        if ($slicePct -ne $null) {
+                            $pJob.CardProgressBar.Value = $slicePct
+                            $pJob.CardProgressBar.Visibility = "Visible"
+                            $pJob.PickProgressBar.Value = $slicePct
+                            $pJob.PickProgressBar.Visibility = "Visible"
+                        } else {
+                            $pJob.CardProgressBar.Visibility = "Collapsed"
+                            $pJob.PickProgressBar.Visibility = "Collapsed"
+                        }
                     }
                 } catch {}
             }
@@ -2817,6 +2855,8 @@ $script:queueTimer.Add_Tick({
             Update-ParentPreview $pJob $gpJob
 
             # Update UI to KEEP/REVERT state
+            $pJob.CardProgressBar.Visibility = "Collapsed"; $pJob.CardProgressBar.Value = 0
+            $pJob.PickProgressBar.Visibility = "Collapsed"; $pJob.PickProgressBar.Value = 0
             $pJob.ProcessingOverlay.Visibility = "Collapsed"
             $pJob.PickProcessingOverlay.Visibility = "Collapsed"
             $pJob.RowPanel.IsEnabled = $true
