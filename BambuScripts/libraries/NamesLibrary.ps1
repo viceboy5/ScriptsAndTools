@@ -8,7 +8,7 @@ $script:GpThemes = @(
     'StarsAndStripes', 'Spring', 'Prehistoric',
     'Halloween 2025', 'Christmas 2025',
     'RTC', 'Artemis', 'Punch', 'SixSeven', 'FIFA', 'Summer', 'Jungle',
-    'Halloween26', 'SciFi', 'Sports', 'KidsCreations', 'Careers',
+    'Halloween26', 'MothersDay', 'SciFi', 'Sports', 'KidsCreations', 'Careers',
     'Maverik', 'KPop', 'GirlScouts', 'Bluey', 'Hersheys', 'Wicked'
 )
 
