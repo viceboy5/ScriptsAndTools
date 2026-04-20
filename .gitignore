@@ -4,3 +4,8 @@
 MayaTools/.idea/MayaTools.iml
 
 *.pyc
+
+# Git worktrees — these contain nested .git files and must never be tracked
+BambuScripts/.claude/worktrees/
+
+BambuScripts/launchers/CardQueueEditor_debug.txt

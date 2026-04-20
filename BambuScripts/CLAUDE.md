@@ -91,6 +91,25 @@ BambuScripts/
 - Tab-separated values (TSV) for inter-process communication
 - WPF XAML defined inline as here-strings
 
+### CRITICAL — PS1 File Encoding
+
+**Never use typographic/Unicode punctuation in `.ps1` files.** PowerShell parses them as
+bare tokens and breaks the entire script silently (editor won't open, no error shown).
+
+| Forbidden | Use instead |
+|---|---|
+| `—` em dash (U+2014) | `-` hyphen-minus |
+| `–` en dash (U+2013) | `-` hyphen-minus |
+| `'` `'` curly quotes | `'` straight single quote |
+| `"` `"` curly quotes | `"` straight double quote |
+| `…` ellipsis (U+2026) | `...` three periods |
+
+These characters are injected silently by autocorrect/smart-quotes in editors and LLM outputs.
+**Always run a parse check after editing PS1 files:**
+```powershell
+$e=$null; [System.Management.Automation.Language.Parser]::ParseFile('path\to\file.ps1',[ref]$null,[ref]$e); if($e){"ERRORS: $($e.Count)"; $e|%{"  Line $($_.Extent.StartLineNumber): $($_.Message)"}}else{"Parse OK"}
+```
+
 ---
 
 ## Important Constraints

@@ -371,23 +371,19 @@ if (-not $SkipExtraction) {
             }
         }
 
-        # Determine how many slots have data (minimum 4 for schema compatibility)
-        $activeSlotCount = 4
-        for ($i = 5; $i -le 8; $i++) { if ($filData[$i].g -gt 0) { $activeSlotCount = $i } }
-
-        # Columns: Printer, FileType, FileName, Theme, Date, H, M, [slot grams+color ...], ColorSwaps, ObjCount, ModelGrams, SUM, TimeAdd
+        # Always output all 8 filament slots; unused slots get empty strings so columns stay consistent
+        # Columns: Printer, FileType, FileName, Theme, Date, H, M, [8x (grams, color)], ColorSwaps, ObjCount, ModelGrams, SUM, TimeAdd
         $outputValues = @($printerPrefix, $fileTypeLabel, $fileNameClean, $themeOutput, (Get-Date).ToString("M/d/yyyy"), $h, $m)
-        for ($i = 1; $i -le $activeSlotCount; $i++) {
-            $outputValues += $(if ($filData[$i].g -gt 0) { $filData[$i].g } else { 0 })
+        for ($i = 1; $i -le 8; $i++) {
+            $outputValues += $(if ($filData[$i].g -gt 0) { $filData[$i].g } else { "" })
             $outputValues += $filData[$i].color
         }
 
-        # SUM formula: slot data starts at col I (2 new prefix cols shift old G->I, old N->P baseline)
-        # 4-slot baseline ends at 'P'; shift end column right 2 letters per extra slot
-        $endCol = [char](80 + ($activeSlotCount - 4) * 2)  # 'P'=80 for 4 slots, 'R' for 5, 'T' for 6, etc.
+        # SUM formula spans all 8 slots: cols I-X (grams cols are numeric; color cols are text, ignored by SUM)
+        # I=slot1g, J=slot1color, K=slot2g ... W=slot8g, X=slot8color
         $outputValues += @(
             $actualColorSwaps, $objCount, [math]::Round($modelGrams, 2),
-            "=SUM(INDIRECT(`"I`"&ROW()&`":$endCol`"&ROW()))",
+            "=SUM(INDIRECT(`"I`"&ROW()&`":X`"&ROW()))",
             $timeAdd
         )
     } catch {
@@ -403,10 +399,8 @@ if (-not $SkipExtraction) {
             $cols = $existingData -split "`t"
 
             if ($cols.Count -ge 20) {
-                # Infer slot count from column count: (total - 7 prefix - 5 trailing) / 2
-                $tsvSlotCount = [math]::Min(8, [math]::Max(4, [math]::Floor(($cols.Count - 12) / 2)))
-                # Rebuild filament array from TSV columns (slot data now starts at index 7: Printer,FileType,FileName,Theme,Date,H,M)
-                for ($i = 1; $i -le $tsvSlotCount; $i++) {
+                # Slot data starts at index 7 (after Printer,FileType,FileName,Theme,Date,H,M); always read up to 8 slots
+                for ($i = 1; $i -le 8; $i++) {
                     $gIdx = 7 + (($i - 1) * 2)
                     $cIdx = $gIdx + 1
                     if ($gIdx -lt $cols.Count -and [double]::TryParse($cols[$gIdx], [ref]$null)) { $filData[$i].g = [double]$cols[$gIdx] }

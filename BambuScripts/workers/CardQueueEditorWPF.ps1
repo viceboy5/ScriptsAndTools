@@ -620,9 +620,13 @@ function Update-ParentPreview($pJob, $gpJob) {
         else { $pJob.LblFolder.Text = "Folder: $(Split-Path $pJob.FolderPath -Leaf)" }
     }
 
-    # Update grandparent folder name preview (Prefix_Theme or just Theme)
+    # Update grandparent folder name preview (Printer_Tag_Theme)
     if ($null -ne $gpJob.LblGpPreview) {
-        $gpPreview = if ($pf) { "${pf}_${th}" } else { $th }
+        $gpTg = "Standard"
+        if ($null -ne $gpJob.CbTag -and $null -ne $gpJob.CbTag.SelectedItem -and "$($gpJob.CbTag.SelectedItem)" -ne "(none)") {
+            $gpTg = "$($gpJob.CbTag.SelectedItem)"
+        }
+        $gpPreview = ((@($pf, $gpTg, $th) | Where-Object { $_ }) -join '_')
         $gpJob.LblGpPreview.Text = if ($gpPreview) { [char]0x2192 + " $gpPreview" } else { "" }
     }
 
@@ -745,7 +749,8 @@ function Enqueue-PJob($pJob, $gpJob) {
         if (-not $gpJob.ChkSkip.IsChecked) {
             $th = ("$($gpJob.TBTheme.SelectedItem)" -replace '[^a-zA-Z0-9]', '')
             $pf = if ($null -ne $gpJob.CbPrefix -and "$($gpJob.CbPrefix.SelectedItem)" -ne "(none)") { "$($gpJob.CbPrefix.SelectedItem)" } else { "" }
-            $newGpFolderName = if ($pf) { "${pf}_${th}" } else { $th }
+            $tg = if ($null -ne $gpJob.CbTag -and "$($gpJob.CbTag.SelectedItem)" -ne "(none)") { "$($gpJob.CbTag.SelectedItem)" } else { "Standard" }
+            $newGpFolderName = ((@($pf, $tg, $th) | Where-Object { $_ }) -join '_')
             $currentLeaf = if ($gpJob.DiGrand) { Split-Path $gpJob.GpPath -Leaf } else { "" }
 
             if ($newGpFolderName -ne '' -and $currentLeaf -ne '' -and $newGpFolderName -ne $currentLeaf) {
@@ -796,6 +801,11 @@ function Start-NextProcess {
     if ($null -ne $gpJob.CbPrefix -and $null -ne $gpJob.CbPrefix.SelectedItem) {
         $pf = $gpJob.CbPrefix.SelectedItem.ToString()
         if ($pf -eq "(none)") { $pf = "" }
+    }
+    $tg = "Standard"
+    if ($null -ne $gpJob.CbTag -and $null -ne $gpJob.CbTag.SelectedItem) {
+        $tg = $gpJob.CbTag.SelectedItem.ToString()
+        if ($tg -eq "(none)") { $tg = "Standard" }
     }
     $oldGrand = if ($gpJob.DiGrand) { $gpJob.DiGrand.FullName } else { "" }
 
@@ -931,7 +941,7 @@ function Start-NextProcess {
         }
 
         # Rename grandparent folder and propagate to ALL jobs
-        $newGpFolderName = if ($pf) { "${pf}_${th}" } else { $th }
+        $newGpFolderName = ((@($pf, $tg, $th) | Where-Object { $_ }) -join '_')
         if (-not $gpJob.ChkSkip.IsChecked -and $newGpFolderName -ne '' -and $oldGrand -ne '' -and $newGpFolderName -ne (Split-Path $oldGrand -Leaf)) {
             $newGrand = Join-Path (Split-Path $oldGrand -Parent) $newGpFolderName
             try {
@@ -1813,7 +1823,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             try {
                 [System.Windows.Input.Mouse]::OverrideCursor = [System.Windows.Input.Cursors]::Wait
                 $dir      = Split-Path $t.Original3mf -Parent
-                $base     = (Split-Path $t.Original3mf -Leaf) -replace '(?i)_?Full\.gcode\.3mf$|_?Full\.3mf$', ''
+                $base     = (Split-Path $t.Original3mf -Leaf) -replace '(?i)_?(Full\.gcode\.3mf|Full\.3mf|Final\.3mf|Nest\.3mf)$', ''
                 $nestFile = Join-Path $dir "${base}_Nest.3mf"
                 if (-not (Test-Path $nestFile)) { [System.Windows.MessageBox]::Show("Nest.3mf not found:`n$nestFile", "Merge Map Error"); return }
                 $preMergePath = Join-Path $env:TEMP "pre_verify_$([guid]::NewGuid().ToString().Substring(0,8)).png"
@@ -2347,7 +2357,7 @@ function Build-GpJob($gpPath, $parentDict) {
     # ── Detect printer prefix ────────────────────────────────────────────────
     # Peel leading qualifier tokens (printer prefix + tags) from the GP folder
     # name; also search anchor file stems, and walk up to the great-grandparent.
-    $gpDetectedPrefix = ""; $gpNameForTheme = $gpName
+    $gpDetectedPrefix = ""; $gpDetectedTag = ""; $gpNameForTheme = $gpName
     if ($gpName -ne "(No Parent Folder)") {
         $gpTokens = [System.Collections.Generic.List[string]]($gpName -split '_' | Where-Object { $_ -ne '' })
         while ($gpTokens.Count -gt 1) {
@@ -2356,6 +2366,7 @@ function Build-GpJob($gpPath, $parentDict) {
                 if ($gpDetectedPrefix -eq '') { $gpDetectedPrefix = $head }
                 $gpTokens.RemoveAt(0)
             } elseif ($script:Tags -icontains $head) {
+                if ($gpDetectedTag -eq '') { $gpDetectedTag = $head }
                 $gpTokens.RemoveAt(0)
             } else { break }
         }
@@ -2404,7 +2415,7 @@ function Build-GpJob($gpPath, $parentDict) {
         if ($detectedTheme) { $gpNameForTheme = $detectedTheme }
     }
 
-    $gpJob = @{ GpPath = $gpPath; DiGrand = $diGrand; Parents = New-Object System.Collections.ArrayList; CbPrefix = $null; GpRenameConfirmed = $false; ReviewMode = $false; HeaderGrid = $null; ThemeBar = $null; BtnModeToggle = $null }
+    $gpJob = @{ GpPath = $gpPath; DiGrand = $diGrand; Parents = New-Object System.Collections.ArrayList; CbPrefix = $null; CbTag = $null; GpRenameConfirmed = $false; ReviewMode = $false; HeaderGrid = $null; ThemeBar = $null; BtnModeToggle = $null }
     $script:jobs.Add($gpJob) | Out-Null
 
     $container = New-Object System.Windows.Controls.Border
@@ -2452,6 +2463,29 @@ function Build-GpJob($gpPath, $parentDict) {
     } else { $cbPrefix.SelectedIndex = 0 }
     $headerStack.Children.Add($cbPrefix) | Out-Null; $gpJob.CbPrefix = $cbPrefix
 
+    # Grandparent tag dropdown
+    $lblGpTag = Create-TextBlock "Tag: " "#E8A135" 14 "Bold"
+    $lblGpTag.Margin = New-Object System.Windows.Thickness(0,0,0,0); $headerStack.Children.Add($lblGpTag) | Out-Null
+    $cbGpTag = New-Object System.Windows.Controls.ComboBox; $cbGpTag.Width = 80
+    $cbGpTag.Background = Get-WpfColor "#2A2C35"; $cbGpTag.Foreground = Get-WpfColor "#FFFFFF"
+    $cbGpTag.BorderBrush = Get-WpfColor "#5A78C4"; $cbGpTag.BorderThickness = New-Object System.Windows.Thickness(1)
+    $cbGpTag.VerticalAlignment = "Center"; $cbGpTag.Margin = New-Object System.Windows.Thickness(5,0,20,0)
+    $cbGpTag.SetResourceReference([System.Windows.FrameworkElement]::StyleProperty, [System.Windows.Controls.ToolBar]::ComboBoxStyleKey)
+    $cbGpTag.Resources[[System.Windows.SystemColors]::WindowBrushKey]          = Get-WpfColor "#2A2C35"
+    $cbGpTag.Resources[[System.Windows.SystemColors]::WindowTextBrushKey]      = Get-WpfColor "#FFFFFF"
+    $cbGpTag.Resources[[System.Windows.SystemColors]::HighlightBrushKey]       = Get-WpfColor "#5A78C4"
+    $cbGpTag.Resources[[System.Windows.SystemColors]::HighlightTextBrushKey]   = Get-WpfColor "#FFFFFF"
+    $cbGpTagItemStyle = New-Object System.Windows.Style([System.Windows.Controls.ComboBoxItem])
+    $cbGpTagItemStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::BackgroundProperty, (Get-WpfColor "#2A2C35"))))
+    $cbGpTagItemStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::ForegroundProperty, (Get-WpfColor "#FFFFFF"))))
+    $cbGpTag.ItemContainerStyle = $cbGpTagItemStyle
+    [void]$cbGpTag.Items.Add("(none)")
+    foreach ($tag in $script:Tags) { [void]$cbGpTag.Items.Add($tag) }
+    if ($gpDetectedTag -ne "" -and $script:Tags -icontains $gpDetectedTag) {
+        $cbGpTag.SelectedItem = $gpDetectedTag
+    } else { $cbGpTag.SelectedIndex = 0 }
+    $headerStack.Children.Add($cbGpTag) | Out-Null; $gpJob.CbTag = $cbGpTag
+
     # Grandparent theme label + dropdown
     $lblGP = Create-TextBlock "Theme: " "#E8A135" 14 "Bold"
     $lblGP.Margin = New-Object System.Windows.Thickness(0,0,0,0); $headerStack.Children.Add($lblGP) | Out-Null
@@ -2482,7 +2516,8 @@ function Build-GpJob($gpPath, $parentDict) {
     # Live preview of the full grandparent folder name (Prefix_Theme or just Theme)
     $lblGpPreview = Create-TextBlock "" "#6B9FD4" 14 "Bold"
     $lblGpPreview.VerticalAlignment = "Center"; $lblGpPreview.Margin = New-Object System.Windows.Thickness(20,0,0,0)
-    $initGpPreview = if ($gpDetectedPrefix -ne "") { "$gpDetectedPrefix`_$gpNameForTheme" } else { $gpNameForTheme }
+    $initGpTag = if ($gpDetectedTag) { $gpDetectedTag } else { "Standard" }
+    $initGpPreview = ((@($gpDetectedPrefix, $initGpTag, $gpNameForTheme) | Where-Object { $_ }) -join '_')
     $lblGpPreview.Text = if ($initGpPreview) { [char]0x2192 + " $initGpPreview" } else { "" }
     $headerStack.Children.Add($lblGpPreview) | Out-Null; $gpJob.LblGpPreview = $lblGpPreview
 
@@ -2531,7 +2566,7 @@ function Build-GpJob($gpPath, $parentDict) {
             if ($tsv.FullName -eq $outTsvPath) { continue }
             $line = Get-Content $tsv.FullName -ErrorAction SilentlyContinue | Select-Object -Last 1
             if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            $key = ($line -split "`t")[0]
+            $cols = $line -split "`t"; $key = if ($cols.Count -ge 3) { $cols[2] } else { $cols[0] }
             $combined[$key] = $line
         }
         if ($combined.Count -eq 0) {
@@ -2692,6 +2727,8 @@ function Build-GpJob($gpPath, $parentDict) {
     $cbTheme.Add_SelectionChanged({ foreach ($p in $this.Tag.Parents) { Update-ParentPreview $p $this.Tag } })
     $cbPrefix.Tag = $gpJob
     $cbPrefix.Add_SelectionChanged({ foreach ($p in $this.Tag.Parents) { Update-ParentPreview $p $this.Tag } })
+    $cbGpTag.Tag = $gpJob
+    $cbGpTag.Add_SelectionChanged({ foreach ($p in $this.Tag.Parents) { Update-ParentPreview $p $this.Tag } })
     $mainStack.Children.Add($container) | Out-Null
 }
 
@@ -2883,41 +2920,66 @@ $window.Add_Drop({
     if (-not $e.Data.GetDataPresent([System.Windows.DataFormats]::FileDrop)) { return }
     $dropped = $e.Data.GetData([System.Windows.DataFormats]::FileDrop)
 
+    $dbgLog = Join-Path $PSScriptRoot "..\launchers\CardQueueEditor_debug.txt"
+    [System.IO.File]::WriteAllText($dbgLog, "[DROP] Started`r`nDropped: $($dropped -join ', ')`r`n")
+
     $lblGlobalTitle.Text = "Scanning dropped folders..."
     [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
 
-    $newGpQueue = Get-AnchorQueue $dropped
+    try {
+        [System.IO.File]::AppendAllText($dbgLog, "[STEP] Calling Get-AnchorQueue`r`n")
+        $newGpQueue = Get-AnchorQueue $dropped
+        [System.IO.File]::AppendAllText($dbgLog, "[STEP] Get-AnchorQueue returned $($newGpQueue.Count) group(s)`r`n")
 
-    if ($newGpQueue.Count -gt 0) {
-        # Remove folders already loaded in the UI
-        foreach ($gpPath in @($newGpQueue.Keys)) {
-            foreach ($parentPath in @($newGpQueue[$gpPath].Keys)) {
-                $exists = $false
-                foreach ($j in $script:jobs) { foreach ($parentJob in $j.Parents) { if ($parentJob.FolderPath -eq $parentPath) { $exists = $true; break } } }
-                if ($exists) { $newGpQueue[$gpPath].Remove($parentPath) }
+        if ($newGpQueue.Count -gt 0) {
+            # Remove folders already loaded in the UI
+            foreach ($gpPath in @($newGpQueue.Keys)) {
+                foreach ($parentPath in @($newGpQueue[$gpPath].Keys)) {
+                    $exists = $false
+                    foreach ($j in $script:jobs) { foreach ($parentJob in $j.Parents) { if ($parentJob.FolderPath -eq $parentPath) { $exists = $true; break } } }
+                    if ($exists) { $newGpQueue[$gpPath].Remove($parentPath) }
+                }
+                if ($newGpQueue[$gpPath].Count -eq 0) { $newGpQueue.Remove($gpPath) }
             }
-            if ($newGpQueue[$gpPath].Count -eq 0) { $newGpQueue.Remove($gpPath) }
+
+            foreach ($gpPath in $newGpQueue.Keys) {
+                $existingGp = $null
+                foreach ($j in $script:jobs) { if ($j.GpPath -eq $gpPath) { $existingGp = $j; break } }
+
+                if ($existingGp) {
+                    # Append to existing Grandparent group
+                    foreach ($pKey in $newGpQueue[$gpPath].Keys) {
+                        [System.IO.File]::AppendAllText($dbgLog, "[STEP] Build-PJob (existing GP): $pKey`r`n")
+                        $pJob = Build-PJob $pKey $newGpQueue[$gpPath][$pKey] $existingGp
+                        $existingGp.Parents.Add($pJob) | Out-Null
+                        [System.IO.File]::AppendAllText($dbgLog, "[STEP] Build-PJob done: $pKey`r`n")
+                    }
+                } else {
+                    [System.IO.File]::AppendAllText($dbgLog, "[STEP] Build-GpJob: $gpPath`r`n")
+                    Build-GpJob $gpPath $newGpQueue[$gpPath]
+                    [System.IO.File]::AppendAllText($dbgLog, "[STEP] Build-GpJob done: $gpPath`r`n")
+                }
+            }
         }
 
-        foreach ($gpPath in $newGpQueue.Keys) {
-            $existingGp = $null
-            foreach ($j in $script:jobs) { if ($j.GpPath -eq $gpPath) { $existingGp = $j; break } }
-
-            if ($existingGp) {
-                # Append to existing Grandparent group
-                foreach ($pKey in $newGpQueue[$gpPath].Keys) {
-                    $pJob = Build-PJob $pKey $newGpQueue[$gpPath][$pKey] $existingGp
-                    $existingGp.Parents.Add($pJob) | Out-Null
-                }
-            } else {
-                # Create a brand new Grandparent group
-                Build-GpJob $gpPath $newGpQueue[$gpPath]
-            }
+        $lblGlobalTitle.Text = "Queue Dashboard ($($script:jobs.Count) Theme(s) found)"
+        if ($script:jobs.Count -gt 0) { Update-GlobalProcessAllStatus }
+        [System.IO.File]::AppendAllText($dbgLog, "[DROP] Complete. Jobs: $($script:jobs.Count)`r`n")
+    } catch {
+        $errMsg = $_.Exception.Message
+        $errPos = $_.InvocationInfo.PositionMessage
+        [System.IO.File]::AppendAllText($dbgLog, "[ERROR] $errMsg`r`nAt: $errPos`r`n")
+        $lblGlobalTitle.Text = "Drop error - log saved next to dropped files"
+        $dlgResult = [System.Windows.MessageBox]::Show(
+            "An error occurred loading files.`n`nLog: $dbgLog`n`nOpen the log now?",
+            "CardQueueEditor Error",
+            [System.Windows.MessageBoxButton]::YesNo,
+            [System.Windows.MessageBoxImage]::Error
+        )
+        if ($dlgResult -eq [System.Windows.MessageBoxResult]::Yes) {
+            Start-Process notepad.exe $dbgLog
         }
     }
-
-    $lblGlobalTitle.Text = "Queue Dashboard ($($script:jobs.Count) Theme(s) found)"
-    if ($script:jobs.Count -gt 0) { Update-GlobalProcessAllStatus }
 })
 
 $btnProcessAll.Add_Click({
