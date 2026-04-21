@@ -27,7 +27,8 @@
       "Bash(powershell -Command '& { $null = [System.Management.Automation.Language.Parser]::ParseFile\\('\\\\''C:/GitRepos/ScriptsAndTools/BambuScripts/.claude/worktrees/practical-hellman/BambuScripts/workers/CardQueueEditorWPF.ps1'\\\\'', [ref]$null, [ref]$errs\\); if \\($errs.Count -eq 0\\) { '\\\\''PARSE OK'\\\\'' } else { $errs | ForEach-Object { $_.Message + '\\\\'' line '\\\\'' + $_.Extent.StartLineNumber } } }')",
       "Bash(cmd /c \"dir C:\\\\GitRepos\\\\ScriptsAndTools\\\\BambuScripts\\\\.claude\\\\worktrees\\\\practical-hellman\\\\BambuScripts\\\\workers\\\\\")",
       "Bash(powershell -Command \"\\(Get-Item 'C:\\\\GitRepos\\\\ScriptsAndTools\\\\BambuScripts\\\\.claude\\\\worktrees\\\\practical-hellman\\\\BambuScripts\\\\workers\\\\CardQueueEditorWPF.ps1'\\).Length\")",
-      "Bash(powershell -Command \"\\(Get-Item 'C:\\\\GitRepos\\\\ScriptsAndTools\\\\BambuScripts\\\\workers\\\\CardQueueEditorWPF.ps1'\\).Length\")"
+      "Bash(powershell -Command \"\\(Get-Item 'C:\\\\GitRepos\\\\ScriptsAndTools\\\\BambuScripts\\\\workers\\\\CardQueueEditorWPF.ps1'\\).Length\")",
+      "PowerShell($e=$null; [System.Management.Automation.Language.Parser]::ParseFile\\('C:\\\\GitRepos\\\\ScriptsAndTools\\\\BambuScripts\\\\.claude\\\\worktrees\\\\practical-hellman\\\\BambuScripts\\\\workers\\\\CardQueueEditorWPF.ps1',[ref]$null,[ref]$e\\); if\\($e\\){\"ERRORS: $\\($e.Count\\)\"; $e|%{\"  Line $\\($_.Extent.StartLineNumber\\): $\\($_.Message\\)\"}}else{\"Parse OK\"})"
     ]
   }
 }

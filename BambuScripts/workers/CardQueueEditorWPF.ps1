@@ -545,6 +545,11 @@ function Validate-PJob($pJob) {
     } else {
         $pJob.BtnApply.Content = "Add to Queue"; $pJob.BtnApply.Background = Get-WpfColor "#4CAF72"; $pJob.BtnApply.IsEnabled = $true
     }
+    # Show Rename Only bypass when colors are unmatched (not a collision) and rename is checked
+    if ($null -ne $pJob.BtnRenameOnly) {
+        $showBypass = (-not $colorsSafe) -and (-not $pJob.HasCollision) -and ([bool]$pJob.ChkRename.IsChecked)
+        $pJob.BtnRenameOnly.Visibility = if ($showBypass) { "Visible" } else { "Collapsed" }
+    }
 }
 
 function Update-ParentPreview($pJob, $gpJob) {
@@ -742,7 +747,9 @@ function Refresh-PJob($pJob, $gpJob) {
 
 function Enqueue-PJob($pJob, $gpJob) {
     if ($pJob.IsQueued -or $pJob.IsDone -or $pJob.HasCollision) { return }
-    foreach ($slot in $pJob.UISlots) { if ($slot.StatusLbl.Text -eq "[UNMATCHED]") { return } }
+    if (-not $pJob.RenameOnlyBypass) {
+        foreach ($slot in $pJob.UISlots) { if ($slot.StatusLbl.Text -eq "[UNMATCHED]") { return } }
+    }
 
     # First plate queued for this grandparent: confirm rename if needed, then lock UI
     if (-not $gpJob.GpRenameConfirmed) {
@@ -839,12 +846,18 @@ function Start-NextProcess {
         }
     }
 
-    $doRename  = [bool]$pJob.ChkRename.IsChecked
-    $doMerge   = [bool]$pJob.ChkMerge.IsChecked
-    $doSlice   = [bool]$pJob.ChkSlice.IsChecked
-    $doExtract = [bool]$pJob.ChkExtract.IsChecked
-    $doImage   = [bool]$pJob.ChkImage.IsChecked
-    $doLogs    = [bool]$pJob.ChkLogs.IsChecked
+    # RenameOnlyBypass: user confirmed rename despite unmatched colors — skip all heavy tasks
+    if ($pJob.RenameOnlyBypass) {
+        $doRename = $true; $doMerge = $false; $doSlice = $false; $doExtract = $false; $doImage = $false; $doLogs = $false
+        $pJob.RenameOnlyBypass = $false
+    } else {
+        $doRename  = [bool]$pJob.ChkRename.IsChecked
+        $doMerge   = [bool]$pJob.ChkMerge.IsChecked
+        $doSlice   = [bool]$pJob.ChkSlice.IsChecked
+        $doExtract = [bool]$pJob.ChkExtract.IsChecked
+        $doImage   = [bool]$pJob.ChkImage.IsChecked
+        $doLogs    = [bool]$pJob.ChkLogs.IsChecked
+    }
 
     $anchorIsZip3mf = $pJob.AnchorFile.Extension -imatch '\.3mf$' -and $pJob.AnchorFile.Name -notmatch '(?i)\.gcode\.3mf$'
 
@@ -1116,7 +1129,8 @@ function Count-3mfObjects([string]$path) {
 function Build-ReviewContent($pJob) {
     $sp = $pJob.ReviewStack
 
-    # --- Print time from *_Data.tsv (col 3 = hours, col 4 = minutes) ---
+    # --- Print time from *_Data.tsv (col 5 = hours, col 6 = minutes) ---
+    # TSV layout: Printer(0), FileType(1), FileName(2), Theme(3), Date(4), H(5), M(6), ...
     $printTimeStr = "n/a"
     $tsvFile = Get-ChildItem -Path $pJob.FolderPath -Filter "*_Data.tsv" -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($tsvFile) {
@@ -1124,10 +1138,10 @@ function Build-ReviewContent($pJob) {
             $tsvLine = Get-Content $tsvFile.FullName -ErrorAction SilentlyContinue | Select-Object -Last 1
             if ($tsvLine) {
                 $cols = $tsvLine -split "`t"
-                if ($cols.Count -ge 5) {
+                if ($cols.Count -ge 7) {
                     $th = 0; $tm = 0
-                    [int]::TryParse($cols[3], [ref]$th) | Out-Null
-                    [int]::TryParse($cols[4], [ref]$tm) | Out-Null
+                    [int]::TryParse($cols[5], [ref]$th) | Out-Null
+                    [int]::TryParse($cols[6], [ref]$tm) | Out-Null
                     $printTimeStr = if ($th -gt 0) { "${th}h ${tm}m" } else { "${tm}m" }
                 }
             }
@@ -1325,23 +1339,46 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             # Plate data found — use it directly; it already represents only what's on the plates
             $UsedSlots = $plateSlots
         } else {
-            # No plate JSON — fall back to scanning model_settings.config and 3dmodel.model
-            if (Test-Path $modSetPath) {
-                try {
-                    [xml]$modXml = [System.IO.File]::ReadAllText($modSetPath, [System.Text.Encoding]::UTF8)
-                    foreach ($node in $modXml.SelectNodes('//metadata[contains(@key, "extruder")]')) {
-                        $val = $node.GetAttribute('value')
-                        if (-not [string]::IsNullOrWhiteSpace($val)) { $UsedSlots.Add($val) | Out-Null }
-                    }
-                } catch {}
-            }
-
+            # No plate JSON — use build item positions to find on-plate objects, then read their extruders.
+            # Bambu Studio stores off-plate objects at negative X; on-plate objects have positive X and Y
+            # within reasonable bed bounds (up to ~450 mm covers all current Bambu models).
+            $onPlateIds = New-Object System.Collections.Generic.HashSet[string]
             $modelFile = Get-ChildItem -Path $tempWork -Filter '3dmodel.model' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($modelFile -and (Test-Path $modelFile.FullName)) {
                 try {
                     $modelContent = [System.IO.File]::ReadAllText($modelFile.FullName, [System.Text.Encoding]::UTF8)
-                    $matMatches = [regex]::Matches($modelContent, '(?i)materialid="(\d+)"')
-                    foreach ($m in $matMatches) { $UsedSlots.Add($m.Groups[1].Value) | Out-Null }
+                    $itemRx = [regex]::Matches($modelContent, '<item\s[^>]*objectid="(\d+)"[^>]*transform="([^"]+)"')
+                    foreach ($m in $itemRx) {
+                        $tfParts = $m.Groups[2].Value -split '\s+'
+                        if ($tfParts.Count -ge 12) {
+                            $tx = 0.0; $ty = 0.0
+                            if ([double]::TryParse($tfParts[9],  [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$tx) -and
+                                [double]::TryParse($tfParts[10], [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$ty)) {
+                                if ($tx -ge 0 -and $ty -ge 0 -and $tx -le 450 -and $ty -le 450) {
+                                    $onPlateIds.Add($m.Groups[1].Value) | Out-Null
+                                }
+                            }
+                        }
+                    }
+                    # If no items parsed (old single-mesh format), also collect any materialid refs
+                    if ($onPlateIds.Count -eq 0) {
+                        $matMatches = [regex]::Matches($modelContent, '(?i)materialid="(\d+)"')
+                        foreach ($mm in $matMatches) { $UsedSlots.Add($mm.Groups[1].Value) | Out-Null }
+                    }
+                } catch {}
+            }
+
+            if (Test-Path $modSetPath) {
+                try {
+                    [xml]$modXml = [System.IO.File]::ReadAllText($modSetPath, [System.Text.Encoding]::UTF8)
+                    foreach ($obj in $modXml.config.object) {
+                        # If we identified on-plate objects, skip any that aren't on the plate
+                        if ($onPlateIds.Count -gt 0 -and -not $onPlateIds.Contains($obj.id)) { continue }
+                        foreach ($node in $obj.SelectNodes('.//metadata[contains(@key,"extruder")]')) {
+                            $val = $node.GetAttribute('value')
+                            if (-not [string]::IsNullOrWhiteSpace($val)) { $UsedSlots.Add($val) | Out-Null }
+                        }
+                    }
                 } catch {}
             }
         }
@@ -1363,9 +1400,11 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         UISlots = New-Object System.Collections.ArrayList
         FileRows = New-Object System.Collections.ArrayList
         IsDone = $false; IsQueued = $false; HasCollision = $false
+        RenameOnlyBypass = $false
         ReviewBuilt = $false
         GcodeImgPath = ""; ReviewCardOverlay = $null; ReviewPanel = $null; ReviewStack = $null
         TasksBox = $null; EditBox = $null; ApplyRow = $null
+        BtnApply = $null; BtnRenameOnly = $null
         BtnRefresh = $null; BtnRemoveP = $null; BtnKeepReview = $null; BtnRevertReview = $null
         ReviewStatusLabel = $null
         _GpJob = $gpJob
@@ -2107,6 +2146,11 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $chkMerge.ToolTip = "Remove Nest.3mf or Revert Merge before merging again"
     }
 
+    # Re-evaluate Rename Only button visibility whenever the Rename checkbox is toggled
+    $chkRename.Tag = $pJob
+    $chkRename.Add_Checked({   Validate-PJob $this.Tag })
+    $chkRename.Add_Unchecked({ Validate-PJob $this.Tag })
+
     # Checkbox interdependencies
     $tasksData = @{ Rename = $chkRename; Merge = $chkMerge; Slice = $chkSlice; Extract = $chkExtract; Image = $chkImage; Logs = $chkLogs; PJob = $pJob; GpJob = $gpJob }
 
@@ -2272,6 +2316,13 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         }
     })
 
+    $btnRenameOnly = New-Object System.Windows.Controls.Button
+    $btnRenameOnly.Content = "Rename Only"; $btnRenameOnly.Background = Get-WpfColor "#5A6A8A"; $btnRenameOnly.Foreground = Get-WpfColor "#FFFFFF"
+    $btnRenameOnly.FontWeight = [System.Windows.FontWeights]::Bold; $btnRenameOnly.Width = 110; $btnRenameOnly.Height = 35; $btnRenameOnly.BorderThickness = 0; $btnRenameOnly.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnRenameOnly.Margin = New-Object System.Windows.Thickness(0,0,10,0); $btnRenameOnly.Visibility = "Collapsed"
+    $btnRenameOnly.ToolTip = "Rename files only, skipping color validation and heavy tasks"
+    $applyRow.Children.Add($btnRenameOnly) | Out-Null; $pJob.BtnRenameOnly = $btnRenameOnly
+
     $btnApply = New-Object System.Windows.Controls.Button
     $btnApply.Content = "Add to Queue"; $btnApply.Background = Get-WpfColor "#4CAF72"; $btnApply.Foreground = Get-WpfColor "#FFFFFF"
     $btnApply.FontWeight = [System.Windows.FontWeights]::Bold; $btnApply.Width = 150; $btnApply.Height = 35; $btnApply.BorderThickness = 0; $btnApply.Cursor = [System.Windows.Input.Cursors]::Hand
@@ -2325,6 +2376,19 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         } else {
             Enqueue-PJob $t.P $t.G
         }
+    })
+
+    $btnRenameOnly.Tag = @{ P = $pJob; G = $gpJob }
+    $btnRenameOnly.Add_Click({
+        $t = $this.Tag
+        $result = [System.Windows.MessageBox]::Show(
+            "Colors are unmatched. This will rename files only`n(merge, slice, extract, and image will be skipped).`n`nContinue?",
+            "Rename Only",
+            [System.Windows.MessageBoxButton]::YesNo,
+            [System.Windows.MessageBoxImage]::Warning)
+        if ($result -ne [System.Windows.MessageBoxResult]::Yes) { return }
+        $t.P.RenameOnlyBypass = $true
+        Enqueue-PJob $t.P $t.G
     })
 
     $btnRevertDone.Tag = @{ P = $pJob; G = $gpJob }
@@ -2639,19 +2703,22 @@ function Build-GpJob($gpPath, $parentDict) {
     $btnThSelAll   = New-Object System.Windows.Controls.Button; $btnThSelAll.Content   = "Select All";   $btnThSelAll.Background   = Get-WpfColor "#2A2C35"; $btnThSelAll.Foreground   = Get-WpfColor "#FFFFFF"; $btnThSelAll.Width   = 85;  $btnThSelAll.Height   = 25; $btnThSelAll.BorderThickness   = 0; $btnThSelAll.Cursor   = [System.Windows.Input.Cursors]::Hand; $btnThSelAll.Margin   = New-Object System.Windows.Thickness(0,0,8,0)
     $btnThDeselAll = New-Object System.Windows.Controls.Button; $btnThDeselAll.Content = "Deselect All"; $btnThDeselAll.Background = Get-WpfColor "#2A2C35"; $btnThDeselAll.Foreground = Get-WpfColor "#FFFFFF"; $btnThDeselAll.Width = 85;  $btnThDeselAll.Height = 25; $btnThDeselAll.BorderThickness = 0; $btnThDeselAll.Cursor = [System.Windows.Input.Cursors]::Hand; $btnThDeselAll.Margin = New-Object System.Windows.Thickness(0,0,20,0)
     $btnThRevert   = New-Object System.Windows.Controls.Button; $btnThRevert.Content   = "Revert Merge"; $btnThRevert.Background   = Get-WpfColor "#D95F5F"; $btnThRevert.Foreground   = Get-WpfColor "#FFFFFF"; $btnThRevert.Width   = 110; $btnThRevert.Height   = 25; $btnThRevert.BorderThickness   = 0; $btnThRevert.Cursor   = [System.Windows.Input.Cursors]::Hand; $btnThRevert.Margin   = New-Object System.Windows.Thickness(0,0,8,0)
-    $btnThProcess  = New-Object System.Windows.Controls.Button; $btnThProcess.Content  = "Process Theme"; $btnThProcess.Background  = Get-WpfColor "#4CAF72"; $btnThProcess.Foreground  = Get-WpfColor "#FFFFFF"; $btnThProcess.Width  = 115; $btnThProcess.Height  = 25; $btnThProcess.BorderThickness  = 0; $btnThProcess.Cursor  = [System.Windows.Input.Cursors]::Hand; $btnThProcess.Margin  = New-Object System.Windows.Thickness(0,0,8,0)
-    $btnThRefresh  = New-Object System.Windows.Controls.Button; $btnThRefresh.Content  = "Refresh Theme"; $btnThRefresh.Background  = Get-WpfColor "#5A78C4"; $btnThRefresh.Foreground  = Get-WpfColor "#FFFFFF"; $btnThRefresh.Width  = 115; $btnThRefresh.Height  = 25; $btnThRefresh.BorderThickness  = 0; $btnThRefresh.Cursor  = [System.Windows.Input.Cursors]::Hand
+    $btnThProcess    = New-Object System.Windows.Controls.Button; $btnThProcess.Content    = "Process Theme";  $btnThProcess.Background    = Get-WpfColor "#4CAF72"; $btnThProcess.Foreground    = Get-WpfColor "#FFFFFF"; $btnThProcess.Width    = 115; $btnThProcess.Height = 25; $btnThProcess.BorderThickness    = 0; $btnThProcess.Cursor    = [System.Windows.Input.Cursors]::Hand; $btnThProcess.Margin    = New-Object System.Windows.Thickness(0,0,8,0)
+    $btnThRenameOnly = New-Object System.Windows.Controls.Button; $btnThRenameOnly.Content = "Rename Theme";   $btnThRenameOnly.Background = Get-WpfColor "#5A6A8A"; $btnThRenameOnly.Foreground = Get-WpfColor "#FFFFFF"; $btnThRenameOnly.Width = 110; $btnThRenameOnly.Height = 25; $btnThRenameOnly.BorderThickness = 0; $btnThRenameOnly.Cursor = [System.Windows.Input.Cursors]::Hand; $btnThRenameOnly.Margin = New-Object System.Windows.Thickness(0,0,8,0)
+    $btnThRenameOnly.ToolTip = "Rename all cards in this theme, skipping color validation and heavy tasks"
+    $btnThRefresh    = New-Object System.Windows.Controls.Button; $btnThRefresh.Content    = "Refresh Theme";  $btnThRefresh.Background    = Get-WpfColor "#5A78C4"; $btnThRefresh.Foreground    = Get-WpfColor "#FFFFFF"; $btnThRefresh.Width    = 115; $btnThRefresh.Height = 25; $btnThRefresh.BorderThickness    = 0; $btnThRefresh.Cursor    = [System.Windows.Input.Cursors]::Hand
 
-    $themeBarStack.Children.Add($chkThRename)  | Out-Null
-    $themeBarStack.Children.Add($chkThMerge)   | Out-Null
-    $themeBarStack.Children.Add($chkThSlice)   | Out-Null
-    $themeBarStack.Children.Add($chkThExtract) | Out-Null
-    $themeBarStack.Children.Add($chkThImage)   | Out-Null
-    $themeBarStack.Children.Add($btnThSelAll)   | Out-Null
-    $themeBarStack.Children.Add($btnThDeselAll) | Out-Null
-    $themeBarStack.Children.Add($btnThRevert)   | Out-Null
-    $themeBarStack.Children.Add($btnThProcess)  | Out-Null
-    $themeBarStack.Children.Add($btnThRefresh)  | Out-Null
+    $themeBarStack.Children.Add($chkThRename)    | Out-Null
+    $themeBarStack.Children.Add($chkThMerge)     | Out-Null
+    $themeBarStack.Children.Add($chkThSlice)     | Out-Null
+    $themeBarStack.Children.Add($chkThExtract)   | Out-Null
+    $themeBarStack.Children.Add($chkThImage)     | Out-Null
+    $themeBarStack.Children.Add($btnThSelAll)    | Out-Null
+    $themeBarStack.Children.Add($btnThDeselAll)  | Out-Null
+    $themeBarStack.Children.Add($btnThRevert)    | Out-Null
+    $themeBarStack.Children.Add($btnThProcess)   | Out-Null
+    $themeBarStack.Children.Add($btnThRenameOnly)| Out-Null
+    $themeBarStack.Children.Add($btnThRefresh)   | Out-Null
     $themeBar.Child = $themeBarStack
     $gpStack.Children.Add($themeBar) | Out-Null
     $gpJob.ThemeBar = $themeBar
@@ -2736,6 +2803,26 @@ function Build-GpJob($gpPath, $parentDict) {
     $btnThProcess.Add_Click({
         $gp = $this.Tag
         foreach ($p in $gp.Parents) { Enqueue-PJob $p $gp }
+        if ($script:activeProcess -eq $null -and $script:processQueue.Count -gt 0) { Start-NextProcess }
+    })
+
+    $btnThRenameOnly.Tag = $gpJob
+    $btnThRenameOnly.Add_Click({
+        $gp = $this.Tag
+        # Count cards that would be renamed (not yet queued/done, no collision)
+        $eligible = @($gp.Parents | Where-Object { -not $_.IsQueued -and -not $_.IsDone -and -not $_.HasCollision })
+        if ($eligible.Count -eq 0) { return }
+        $result = [System.Windows.MessageBox]::Show(
+            "Colors may be unmatched. This will rename files only for all $($eligible.Count) card(s) in this theme`n(merge, slice, extract, and image will be skipped).`n`nContinue?",
+            "Rename Theme Only",
+            [System.Windows.MessageBoxButton]::YesNo,
+            [System.Windows.MessageBoxImage]::Warning)
+        if ($result -ne [System.Windows.MessageBoxResult]::Yes) { return }
+        foreach ($p in $eligible) {
+            $p.RenameOnlyBypass = $true
+            $p.ChkRename.IsChecked = $true
+            Enqueue-PJob $p $gp
+        }
         if ($script:activeProcess -eq $null -and $script:processQueue.Count -gt 0) { Start-NextProcess }
     })
 
