@@ -1339,23 +1339,46 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             # Plate data found — use it directly; it already represents only what's on the plates
             $UsedSlots = $plateSlots
         } else {
-            # No plate JSON — fall back to scanning model_settings.config and 3dmodel.model
-            if (Test-Path $modSetPath) {
-                try {
-                    [xml]$modXml = [System.IO.File]::ReadAllText($modSetPath, [System.Text.Encoding]::UTF8)
-                    foreach ($node in $modXml.SelectNodes('//metadata[contains(@key, "extruder")]')) {
-                        $val = $node.GetAttribute('value')
-                        if (-not [string]::IsNullOrWhiteSpace($val)) { $UsedSlots.Add($val) | Out-Null }
-                    }
-                } catch {}
-            }
-
+            # No plate JSON — use build item positions to find on-plate objects, then read their extruders.
+            # Bambu Studio stores off-plate objects at negative X; on-plate objects have positive X and Y
+            # within reasonable bed bounds (up to ~450 mm covers all current Bambu models).
+            $onPlateIds = New-Object System.Collections.Generic.HashSet[string]
             $modelFile = Get-ChildItem -Path $tempWork -Filter '3dmodel.model' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($modelFile -and (Test-Path $modelFile.FullName)) {
                 try {
                     $modelContent = [System.IO.File]::ReadAllText($modelFile.FullName, [System.Text.Encoding]::UTF8)
-                    $matMatches = [regex]::Matches($modelContent, '(?i)materialid="(\d+)"')
-                    foreach ($m in $matMatches) { $UsedSlots.Add($m.Groups[1].Value) | Out-Null }
+                    $itemRx = [regex]::Matches($modelContent, '<item\s[^>]*objectid="(\d+)"[^>]*transform="([^"]+)"')
+                    foreach ($m in $itemRx) {
+                        $tfParts = $m.Groups[2].Value -split '\s+'
+                        if ($tfParts.Count -ge 12) {
+                            $tx = 0.0; $ty = 0.0
+                            if ([double]::TryParse($tfParts[9],  [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$tx) -and
+                                [double]::TryParse($tfParts[10], [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$ty)) {
+                                if ($tx -ge 0 -and $ty -ge 0 -and $tx -le 450 -and $ty -le 450) {
+                                    $onPlateIds.Add($m.Groups[1].Value) | Out-Null
+                                }
+                            }
+                        }
+                    }
+                    # If no items parsed (old single-mesh format), also collect any materialid refs
+                    if ($onPlateIds.Count -eq 0) {
+                        $matMatches = [regex]::Matches($modelContent, '(?i)materialid="(\d+)"')
+                        foreach ($mm in $matMatches) { $UsedSlots.Add($mm.Groups[1].Value) | Out-Null }
+                    }
+                } catch {}
+            }
+
+            if (Test-Path $modSetPath) {
+                try {
+                    [xml]$modXml = [System.IO.File]::ReadAllText($modSetPath, [System.Text.Encoding]::UTF8)
+                    foreach ($obj in $modXml.config.object) {
+                        # If we identified on-plate objects, skip any that aren't on the plate
+                        if ($onPlateIds.Count -gt 0 -and -not $onPlateIds.Contains($obj.id)) { continue }
+                        foreach ($node in $obj.SelectNodes('.//metadata[contains(@key,"extruder")]')) {
+                            $val = $node.GetAttribute('value')
+                            if (-not [string]::IsNullOrWhiteSpace($val)) { $UsedSlots.Add($val) | Out-Null }
+                        }
+                    }
                 } catch {}
             }
         }
