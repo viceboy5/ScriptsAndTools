@@ -372,18 +372,21 @@ if (-not $SkipExtraction) {
         }
 
         # Always output all 8 filament slots; unused slots get empty strings so columns stay consistent
-        # Columns: Printer, FileType, FileName, Theme, Date, H, M, [8x (grams, color)], ColorSwaps, ObjCount, ModelGrams, SUM, TimeAdd
+        # Columns: Printer, FileType, FileName, Theme, Date, H, M, [8x (grams, color)], ColorSwaps, ObjCount, ModelGrams, TotalGrams, TimeAdd
         $outputValues = @($printerPrefix, $fileTypeLabel, $fileNameClean, $themeOutput, (Get-Date).ToString("M/d/yyyy"), $h, $m)
         for ($i = 1; $i -le 8; $i++) {
             $outputValues += $(if ($filData[$i].g -gt 0) { $filData[$i].g } else { "" })
             $outputValues += $filData[$i].color
         }
 
-        # SUM formula spans all 8 slots: cols I-X (grams cols are numeric; color cols are text, ignored by SUM)
-        # I=slot1g, J=slot1color, K=slot2g ... W=slot8g, X=slot8color
+        # Compute total filament used as a plain number -- avoids a hard-coded column-letter formula
+        # that breaks whenever columns are added or removed.  TSV paste always overwrites every cell
+        # in the range (no way to skip a cell and preserve an existing Sheets formula), so outputting
+        # a computed value here is the most reliable approach.
+        $totalSlotGrams = [math]::Round((1..8 | ForEach-Object { $filData[$_].g } | Measure-Object -Sum).Sum, 2)
         $outputValues += @(
             $actualColorSwaps, $objCount, [math]::Round($modelGrams, 2),
-            "=SUM(INDIRECT(`"I`"&ROW()&`":X`"&ROW()))",
+            $totalSlotGrams,
             $timeAdd
         )
     } catch {
