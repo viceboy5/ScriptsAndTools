@@ -123,10 +123,15 @@ def merge_separate_with_pivot_to_origin(rotate_axes=None, rotation_degrees=-90.0
     # 7) Separate shells
     separated = cmds.polySeparate(transform, constructionHistory=False)
 
-    # 8) Center pivot on each piece
+    # 8) Center pivot and apply Arnold subdivision on each piece
     if separated:
         for piece in separated:
             cmds.xform(piece, cp=True)
+            shapes = cmds.listRelatives(piece, shapes=True, fullPath=True) or []
+            for shape in shapes:
+                if cmds.objectType(shape) == "mesh":
+                    cmds.setAttr("{}.aiSubdivType".format(shape), 1)       # catclark
+                    cmds.setAttr("{}.aiSubdivIterations".format(shape), 2)
         cmds.select(separated, r=True)
 
     print("Finished Pivot/Merge: rotate_axes={}, degrees={}".format(rotate_axes, rotation_degrees))
