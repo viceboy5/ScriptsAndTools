@@ -27,7 +27,6 @@ def harden_edges_by_angle(mesh, angle_threshold=30.0):
     face_count = cmds.polyEvaluate(mesh, face=True)
     face_normals = {}
 
-    # Cache face normals
     for i in range(face_count):
         info = cmds.polyInfo(f"{mesh}.f[{i}]", faceNormals=True)[0]
         face_normals[i] = [float(n) for n in info.split()[2:5]]
@@ -39,7 +38,6 @@ def harden_edges_by_angle(mesh, angle_threshold=30.0):
         edge_id = int(parts[1].replace(":", ""))
         face_ids = [int(p) for p in parts[2:] if p.isdigit()]
 
-        # Skip border / non-manifold edges
         if len(face_ids) != 2:
             continue
 
@@ -58,7 +56,14 @@ def harden_edges_by_angle(mesh, angle_threshold=30.0):
 # ----------------------------------------
 # Pivot / Merge / Separate
 # ----------------------------------------
-def merge_separate_with_pivot_to_origin(axis="y"):
+def merge_separate_with_pivot_to_origin(rotate_axes=None, rotation_degrees=-90.0):
+    """
+    rotate_axes:      list of axis chars to rotate, e.g. ['x'], ['x', 'z'], []
+    rotation_degrees: degrees applied to each checked axis
+    """
+    if rotate_axes is None:
+        rotate_axes = []
+
     sel = cmds.ls(selection=True, long=True)
     if not sel:
         cmds.warning("Select a mesh transform or mesh shape first.")
@@ -77,29 +82,27 @@ def merge_separate_with_pivot_to_origin(axis="y"):
         cmds.warning("Selection is not a mesh transform.")
         return
 
-    # 1) Center pivot
+    # 1) Rotate on selected axes
+    rot_x = rotation_degrees if 'x' in rotate_axes else 0
+    rot_y = rotation_degrees if 'y' in rotate_axes else 0
+    rot_z = rotation_degrees if 'z' in rotate_axes else 0
+    if rot_x or rot_y or rot_z:
+        cmds.xform(transform, relative=True, rotation=(rot_x, rot_y, rot_z), ws=True)
+
+    # 2) Center pivot
     cmds.xform(transform, cp=True)
 
-    # 2) Pivot to bbox min Y or Z
+    # 3) Pivot to bbox min Y (world space floor)
     bbox = cmds.exactWorldBoundingBox(transform)
     minX, minY, minZ, maxX, maxY, maxZ = bbox
     cur_pivot = cmds.xform(transform, q=True, ws=True, rp=True)
-
-    if axis.lower() == "z":
-        new_pivot = [cur_pivot[0], cur_pivot[1], minZ]
-    else:
-        new_pivot = [cur_pivot[0], minY, cur_pivot[2]]
-
+    new_pivot = [cur_pivot[0], minY, cur_pivot[2]]
     cmds.xform(transform, ws=True, rp=new_pivot, sp=new_pivot)
 
-    # 3) Move object so pivot is at origin
+    # 4) Move object so pivot is at origin
     pivot_world = cmds.xform(transform, q=True, ws=True, rp=True)
     offset = [-pivot_world[0], -pivot_world[1], -pivot_world[2]]
     cmds.xform(transform, ws=True, t=offset, r=False)
-
-    # 3b) Rotate X -90 only if axis='z'
-    if axis.lower() == "z":
-        cmds.xform(transform, relative=True, rotation=(-90, 0, 0), ws=True)
 
     # 4) Merge vertices
     verts = cmds.polyListComponentConversion(transform, toVertex=True)
@@ -114,16 +117,31 @@ def merge_separate_with_pivot_to_origin(axis="y"):
     cmds.polySoftEdge(transform, angle=180, constructionHistory=False)
     harden_edges_by_angle(transform, HARDEN_ANGLE_THRESHOLD)
 
-    # 6) Separate shells
+    # 6) Unlock normals before separating
+    cmds.polyNormalPerVertex(transform, unFreezeNormal=True)
+
+    # 7) Separate shells
     separated = cmds.polySeparate(transform, constructionHistory=False)
 
-    # 7) Center pivot on each piece
+    # 8) Center pivot on each piece
     if separated:
         for piece in separated:
             cmds.xform(piece, cp=True)
         cmds.select(separated, r=True)
 
-    print("Finished Pivot/Merge workflow with axis =", axis)
+    print("Finished Pivot/Merge: rotate_axes={}, degrees={}".format(rotate_axes, rotation_degrees))
+
+
+# ----------------------------------------
+# Cluster
+# ----------------------------------------
+def create_cluster():
+    sel = cmds.ls(selection=True)
+    if not sel:
+        cmds.warning("Select objects or components to create a cluster.")
+        return
+    result = cmds.cluster(sel)
+    print("Created cluster: {}".format(result))
 
 
 # ----------------------------------------
@@ -185,27 +203,52 @@ def show_model_prep_ui():
     if cmds.window(window, exists=True):
         cmds.deleteUI(window)
 
-    cmds.window(window, title="Model Prep", sizeable=True, widthHeight=(300, 200))
+    cmds.window(window, title="Model Prep", sizeable=True, widthHeight=(300, 320))
     main_col = cmds.columnLayout(adj=True, rowSpacing=15)
 
     # Pivot / Merge Section
     cmds.frameLayout(label="Pivot / Merge / Separate", collapsable=True, parent=main_col)
     cmds.columnLayout(adj=True, rowSpacing=5)
+
     cmds.button(
-        label="Maintain Orientation (Min Y)",
+        label="Maintain Orientation",
         height=30,
-        command=lambda *_: merge_separate_with_pivot_to_origin(axis="y")
+        command=lambda *_: merge_separate_with_pivot_to_origin()
     )
-    cmds.button(
-        label="Rotate (Min Z)",
-        height=30,
-        command=lambda *_: merge_separate_with_pivot_to_origin(axis="z")
-    )
+
+    cmds.separator(height=8, style='in')
+    cmds.text(label="Rotation Axes:", align='left')
+
+    row = cmds.rowLayout(numberOfColumns=3, columnWidth3=(80, 80, 80))
+    cb_x = cmds.checkBox(label="X", value=True)
+    cb_y = cmds.checkBox(label="Y", value=False)
+    cb_z = cmds.checkBox(label="Z", value=False)
+    cmds.setParent('..')
+
+    cmds.rowLayout(numberOfColumns=2, columnWidth2=(80, 100))
+    cmds.text(label="Degrees:")
+    deg_field = cmds.floatField(value=-90.0, precision=1)
+    cmds.setParent('..')
+
+    def _run_rotate(*_):
+        axes = []
+        if cmds.checkBox(cb_x, q=True, value=True):
+            axes.append('x')
+        if cmds.checkBox(cb_y, q=True, value=True):
+            axes.append('y')
+        if cmds.checkBox(cb_z, q=True, value=True):
+            axes.append('z')
+        deg = cmds.floatField(deg_field, q=True, value=True)
+        merge_separate_with_pivot_to_origin(rotate_axes=axes, rotation_degrees=deg)
+
+    cmds.button(label="Rotate", height=30, command=_run_rotate)
     cmds.setParent("..")
 
     # Cluster Rotate Section
     cmds.frameLayout(label="Cluster Rotate", collapsable=True, parent=main_col)
     cmds.columnLayout(adj=True, rowSpacing=5)
+    cmds.button(label="Create Cluster", height=30, command=lambda *_: create_cluster())
+    cmds.separator(height=8, style='in')
     cmds.button(label="Rotate Left (90° Z)", height=30, command=lambda *_: rotate_left_group())
     cmds.button(label="Rotate Right (-90° Z)", height=30, command=lambda *_: rotate_right_group())
     cmds.setParent("..")
