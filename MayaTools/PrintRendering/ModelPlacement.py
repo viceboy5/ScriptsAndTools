@@ -130,7 +130,7 @@ def merge_separate_with_pivot_to_origin(rotate_axes=None, rotation_degrees=-90.0
             shapes = cmds.listRelatives(piece, shapes=True, fullPath=True) or []
             for shape in shapes:
                 if cmds.objectType(shape) == "mesh":
-                    cmds.setAttr("{}.aiSubdivType".format(shape), 1)       # catclark
+                    cmds.setAttr("{}.aiSubdivType".format(shape), 2)       # linear
                     cmds.setAttr("{}.aiSubdivIterations".format(shape), 2)
         cmds.select(separated, r=True)
 
