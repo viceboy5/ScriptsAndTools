@@ -836,8 +836,8 @@ function Start-NextProcess {
                 $oldHex7 = $oldHex.Substring(0,7)
                 $newHex9 = if ($newHex.Length -eq 7) { $newHex + "FF" } else { $newHex }
                 $newHex7 = $newHex.Substring(0,7)
-                if ($content -match "(?i)$oldHex9") { $content = $content -ireplace [regex]::Escape($oldHex9), $newHex9; $modified = $true }
-                if ($content -match "(?i)$oldHex7") { $content = $content -ireplace [regex]::Escape($oldHex7), $newHex7; $modified = $true }
+                if ($newHex9 -ne $oldHex9 -and $content -match "(?i)$oldHex9") { $content = $content -ireplace [regex]::Escape($oldHex9), $newHex9; $modified = $true }
+                if ($newHex7 -ne $oldHex7 -and $content -match "(?i)$oldHex7") { $content = $content -ireplace [regex]::Escape($oldHex7), $newHex7; $modified = $true }
             }
         }
         if ($modified) {
