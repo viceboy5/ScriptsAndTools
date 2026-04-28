@@ -64,7 +64,10 @@ foreach ($item in $buildItems) {
         if ($fc -ne $majorityFc) { $isTarget = $false }
         
         $nameNode = $settObjById[$id].SelectSingleNode('metadata[@key="name"]')
-        if ($null -ne $nameNode -and $nameNode.GetAttribute('value') -match '(?i)text|version') { $isTarget = $false }
+        if ($null -ne $nameNode) {
+            $nameVal = $nameNode.GetAttribute('value')
+            if ($nameVal -match '(?i)text|version' -and $nameVal -notmatch '(?i)\.(stl|3mf|obj|step|stp)$') { $isTarget = $false }
+        }
     }
     if ($isTarget) { $targetItems += $item }
 }

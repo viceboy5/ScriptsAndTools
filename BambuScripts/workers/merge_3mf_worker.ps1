@@ -187,7 +187,12 @@ foreach ($item in $buildItems) {
         if ($fc -ne $majorityFc) { $isTarget = $false }
 
         $nameNode = $settObjById[$id].SelectSingleNode('metadata[@key="name"]')
-        if ($null -ne $nameNode -and $nameNode.GetAttribute('value') -match '(?i)text|version') { $isTarget = $false }
+        if ($null -ne $nameNode) {
+            $nameVal = $nameNode.GetAttribute('value')
+            # Only treat as a label object if the name looks like a Bambu-injected label,
+            # not a real mesh filename (which would end in .stl, .3mf, .obj, .step, etc.)
+            if ($nameVal -match '(?i)text|version' -and $nameVal -notmatch '(?i)\.(stl|3mf|obj|step|stp)$') { $isTarget = $false }
+        }
     }
     if ($isTarget) { $mergeItems += $item } else { $ignoredItems += $item }
 }
@@ -225,7 +230,12 @@ function Get-MergePlan([int]$total) {
 }
 
 $totalItems = $mergeItems.Count
+if ($totalItems -eq 0) {
+    Write-Error "No mergeable objects found. All $($buildItems.Count) plate items were classified as ignored (text/outlier). Check object names in model_settings.config."
+    exit 1
+}
 $lone       = if ($totalItems % 2 -eq 0) { 2 } else { 1 }
+$lone       = [Math]::Min($lone, $totalItems)
 $mergePlan  = @( Get-MergePlan $totalItems )
 
 $report.Add("Total objects on plate: $($buildItems.Count)")
