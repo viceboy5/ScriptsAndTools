@@ -18,11 +18,12 @@ $script:PrinterPrefixes = @('X1C', 'P2S', 'H2S')
 # Design variant tags — prepended to the character name in filenames (no separator)
 # and shown as "Tag - Character" in card titles/image previews.
 # KC = Keychain.  Add new tags here; both CardQueueEditor and DataExtract pick them up automatically.
-$script:Tags = @('KC', 'Big', 'Huge')
+$script:Tags = @('KC', 'Big', 'Huge', 'High')
 
 # Human-readable File Type label for each tag — used in TSV output column "File Type"
 $script:TagLabels = @{
     'KC'   = 'Keychain'
     'Big'  = 'Big Wig'
     'Huge' = 'Huge Wig'
+    'High' = 'High Res'
 }
