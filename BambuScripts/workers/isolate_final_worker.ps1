@@ -1,6 +1,7 @@
 param(
     [string]$WorkDir,
-    [string]$OutputPath
+    [string]$OutputPath,
+    [string]$BambuPath = "C:\Program Files\Bambu Studio\bambu-studio.exe"
 )
 $ErrorActionPreference = 'Stop'
 
@@ -205,3 +206,17 @@ Get-ChildItem $WorkDir -Recurse -File | ForEach-Object {
     [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $rel) | Out-Null
 }
 $zip.Dispose()
+
+# ── 7. Bambu re-save to clean up stale metadata ──
+if (Test-Path $BambuPath) {
+    $tempOut = $OutputPath + ".resave.tmp.3mf"
+    $logOut  = Join-Path $env:TEMP "bambu_isolate_resave_out.txt"
+    $logErr  = Join-Path $env:TEMP "bambu_isolate_resave_err.txt"
+    $args    = "--debug 3 --no-check --uptodate --allow-newer-file --export-3mf `"$tempOut`" `"$OutputPath`""
+    $proc    = Start-Process -FilePath $BambuPath -ArgumentList $args `
+                             -RedirectStandardOutput $logOut -RedirectStandardError $logErr `
+                             -WindowStyle Hidden -PassThru
+    $proc.WaitForExit()
+    foreach ($log in @($logOut, $logErr)) { if (Test-Path $log) { Remove-Item $log -Force -ErrorAction SilentlyContinue } }
+    if (Test-Path $tempOut) { Move-Item $tempOut $OutputPath -Force }
+}
