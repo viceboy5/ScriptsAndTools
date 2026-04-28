@@ -1,12 +1,13 @@
 param(
-    [string]$InputFile
+    [string]$InputFile,
+    [string]$BambuPath = "C:\Program Files\Bambu Studio\bambu-studio.exe"
 )
 $ErrorActionPreference = 'Stop'
 
 # ════════════════════════════════════════════════════════════════════════════════
 #  ConvertToHighRes.ps1
 #  Copies *Final.3mf files to a High-tag folder structure with renamed files,
-#  then clears VLH (removes layer_heights_profile.txt) and sets layer_height=0.09.
+#  re-saves through Bambu Studio to clean metadata, then sets layer_height=0.09.
 #
 #  Input:  X1C_CalicoCat_Farm_Final.3mf
 #  Output: {base}\X1C_High_Farm\X1C_HighCalicoCat_Farm\X1C_HighCalicoCat_Farm_Final.3mf
@@ -109,7 +110,30 @@ if ([string]::IsNullOrEmpty($baseDir)) {
     exit 0
 }
 
-# ── 3. Process each file ──
+# ── 3. Bambu re-save helper ──
+$bambuAvailable = (Test-Path $BambuPath)
+if (-not $bambuAvailable) {
+    Write-Warning "Bambu Studio not found at '$BambuPath' - metadata cleanup will be skipped."
+}
+
+function Invoke-BambuResave([string]$filePath) {
+    $tempOut  = $filePath + ".resave.tmp.3mf"
+    $logOut   = Join-Path $env:TEMP "bambu_resave_out.txt"
+    $logErr   = Join-Path $env:TEMP "bambu_resave_err.txt"
+    $procArgs = "--debug 3 --no-check --uptodate --allow-newer-file --export-3mf `"$tempOut`" `"$filePath`""
+    $proc = Start-Process -FilePath $BambuPath -ArgumentList $procArgs `
+                          -RedirectStandardOutput $logOut -RedirectStandardError $logErr `
+                          -WindowStyle Hidden -PassThru
+    $proc.WaitForExit()
+    foreach ($log in @($logOut, $logErr)) { if (Test-Path $log) { Remove-Item $log -Force -ErrorAction SilentlyContinue } }
+    if (Test-Path $tempOut) {
+        Move-Item $tempOut $filePath -Force
+        return $true
+    }
+    return $false
+}
+
+# ── 4. Process each file ──
 $errors = 0
 foreach ($f in $files) {
     # Stem without extension: e.g. "X1C_CalicoCat_Farm_Final"
@@ -137,7 +161,14 @@ foreach ($f in $files) {
         New-Item -ItemType Directory -Path $destDir -Force | Out-Null
         Copy-Item -Path $f.FullName -Destination $destFile -Force
 
-        # ── Patch the copied 3MF ──
+        # ── Re-save through Bambu to clean up stale metadata ──
+        if ($bambuAvailable) {
+            Write-Host "    Cleaning metadata via Bambu Studio..." -NoNewline
+            $resaved = Invoke-BambuResave $destFile
+            if ($resaved) { Write-Host " done." } else { Write-Host " skipped (export failed)." }
+        }
+
+        # ── Patch the re-saved 3MF ──
         $zip = [System.IO.Compression.ZipFile]::Open($destFile, 'Update')
         try {
             # Clear VLH: remove layer_heights_profile.txt if present
@@ -152,6 +183,13 @@ foreach ($f in $files) {
                 $reader.Close()
 
                 $patched = $content -replace '"layer_height"\s*:\s*"[^"]*"', '"layer_height": "0.09"'
+
+                # Tell Bambu that layer_height differs from the base profile.
+                # different_settings_to_system[0] is a semicolon list of overridden print settings.
+                # Without layer_height in this list Bambu ignores the patched value and loads the profile default.
+                if ($patched -notmatch '(?s)"different_settings_to_system"[^"]*"[^"]*layer_height') {
+                    $patched = $patched -replace '(ironing_flow;)(min_bead_width)', '$1layer_height;$2'
+                }
 
                 if ($patched -ne $content) {
                     $cfgEntry.Delete()
