@@ -244,6 +244,10 @@ def main():
         row_h_prelim  = (CANVAS_SIZE - MARGIN - swatch_top_prelim) / n
         effective_box = min(int(CANVAS_SIZE * 0.40),
                             max(int(CANVAS_SIZE * 0.07), int(row_h_prelim) - 4))
+        # Cap at the 4-slot size so swatches never grow larger than they are with 4 colors
+        row_h_4slot   = (CANVAS_SIZE - MARGIN - swatch_top_prelim) / 4
+        max_box_4slot = min(int(CANVAS_SIZE * 0.40), max(int(CANVAS_SIZE * 0.07), int(row_h_4slot) - 4))
+        effective_box = min(effective_box, max_box_4slot)
     else:
         effective_box = COLOR_BOX_SIZE
     box_x      = CANVAS_SIZE - MARGIN - effective_box
@@ -337,6 +341,10 @@ def main():
         row_h = (CANVAS_SIZE - MARGIN - swatch_top_y) / n
         # Clamp effective_box to actual row height (in case title was taller than estimate)
         effective_box = min(effective_box, max(int(CANVAS_SIZE * 0.07), int(row_h) - 4))
+        # Cap at the 4-slot size so swatches never grow larger than they are with 4 colors
+        row_h_4slot   = (CANVAS_SIZE - MARGIN - swatch_top_y) / 4
+        max_box_4slot = min(int(CANVAS_SIZE * 0.40), max(int(CANVAS_SIZE * 0.07), int(row_h_4slot) - 4))
+        effective_box = min(effective_box, max_box_4slot)
         box_x      = CANVAS_SIZE - MARGIN - effective_box
         right_edge = box_x - int(CANVAS_SIZE * 0.02)
     else:
