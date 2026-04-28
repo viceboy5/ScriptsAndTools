@@ -28,7 +28,7 @@ $colorCsvPath = Join-Path $scriptDir "..\libraries\FilamentLibrary.csv"
 $LibraryNames = @{}
 $NameToHex = @{}
 if (Test-Path $colorCsvPath) {
-    $csvLines = Get-Content -Path $colorCsvPath
+    $csvLines = [System.IO.File]::ReadAllLines($colorCsvPath)
     foreach ($line in $csvLines) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         $parts = $line -split ','
@@ -174,7 +174,6 @@ public class GcodeAnalyzer {
 "@
 
 if (-not ("GcodeAnalyzer" -as [type])) { Add-Type -TypeDefinition $csharpCode -Language CSharp }
-Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 # ---------------------------------------------------------------------------------
@@ -250,7 +249,7 @@ if (-not $SkipExtraction) {
         $totalGrams = 0.0; $totalMeters = 0.0; $objCount = 0
 
         # --- 3. Extract Metadata (XML) ---
-        $configEntry = $zipArchive.Entries | Where-Object { $_.FullName -replace '\\', '/' -match "Metadata/slice_info\.config$" }
+        $configEntry = $zipArchive.GetEntry("Metadata/slice_info.config")
         if ($configEntry) {
             $configStream = $configEntry.Open()
             $configReader = [System.IO.StreamReader]::new($configStream)
@@ -488,12 +487,7 @@ if ($GenerateImage) {
 
                 $pyLog = Join-Path $env:TEMP "python_error.log"
                 # Call Python to build the image
-                $proc = Start-Process -FilePath "py.exe" -ArgumentList $pyArgsStr -NoNewWindow -PassThru -RedirectStandardError $pyLog
-                # Poll instead of -Wait so the GUI stays responsive during Python's collision detection
-                while (-not $proc.HasExited) {
-                    [System.Windows.Forms.Application]::DoEvents()
-                    Start-Sleep -Milliseconds 100
-                }
+                Start-Process -FilePath "py.exe" -ArgumentList $pyArgsStr -NoNewWindow -Wait -RedirectStandardError $pyLog
 
                 if (Test-Path $expectedPng) {
                     Write-Host "[DONE]" -ForegroundColor Green
