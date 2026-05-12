@@ -9,7 +9,7 @@ $script:GpThemes = @(
     'Halloween25', 'Christmas25', 'Valentines26',
     'RTC', 'Artemis', 'Punch', 'SixSeven', 'GlobalSoccer', 'Summer', 'Jungle',
     'Halloween26', 'MothersDay', 'SciFi', 'Sports', 'KidsCreations', 'Careers',
-    'Maverik', 'KPop', 'GirlScouts', 'Bluey', 'Hersheys', 'Wicked'
+    'Maverik', 'KPop', 'GirlScouts', 'Bluey', 'Hersheys', 'Wicked', 'Geppettos'
 )
 
 # Printer model prefixes used in folder/file naming (e.g. "X1C_Fantasy")
