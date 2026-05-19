@@ -59,6 +59,84 @@ function Is-IdentityRot([double[]]$r) {
             [math]::Abs($r[1]) -lt $eps -and [math]::Abs($r[2]) -lt $eps -and [math]::Abs($r[3]) -lt $eps -and
             [math]::Abs($r[5]) -lt $eps -and [math]::Abs($r[6]) -lt $eps -and [math]::Abs($r[7]) -lt $eps)
 }
+# Rotate a 3-vector by a 3x3 rotation matrix (row-vector convention: v' = v * R)
+function Rotate-Vec([double[]]$v, [double[]]$r) {
+    $x = $v[0]*$r[0]+$v[1]*$r[3]+$v[2]*$r[6]
+    $y = $v[0]*$r[1]+$v[1]*$r[4]+$v[2]*$r[7]
+    $z = $v[0]*$r[2]+$v[1]*$r[5]+$v[2]*$r[8]
+    return [double[]]($x, $y, $z)
+}
+# Mean of the translation parts of all identity-rotation component transforms
+function Get-CompCentroid($txList) {
+    $sx = 0.0; $sy = 0.0; $sz = 0.0; $cn = 0
+    foreach ($s in $txList) {
+        if ([string]::IsNullOrWhiteSpace($s)) { continue }
+        $tx = Parse-Tx $s
+        if (Is-IdentityRot (Get-TxRot $tx)) { $sx += $tx[9]; $sy += $tx[10]; $sz += $tx[11]; $cn++ }
+    }
+    if ($cn -eq 0) { return [double[]](0,0,0) }
+    $cx = $sx/$cn; $cy = $sy/$cn; $cz = $sz/$cn
+    return [double[]]($cx, $cy, $cz)
+}
+# Extract the uniform scale factor embedded in a 3x3 rotation+scale matrix.
+# Scale = norm of the first row (all rows should be equal for uniform scale).
+function Get-RowScale([double[]]$r) {
+    $s = [Math]::Sqrt($r[0]*$r[0] + $r[1]*$r[1] + $r[2]*$r[2])
+    if ($s -lt 1e-9) { return 1.0 }
+    return $s
+}
+
+# Apply rotation correction (left-multiply), scale correction, and translation delta.
+# R_out = sRatio * (rCorr * R_src)   where sRatio = scaleFinal / scaleSrc
+# t_out = t_src + tDelta * R_src  (tDelta rotated by original source rotation)
+function Apply-TxCorrection([double[]]$tx, [double[]]$rCorr, [double[]]$tDelta, [double]$sRatio = 1.0) {
+    $rSrc = Get-TxRot $tx
+    $rNew = Mul-3x3 $rCorr $rSrc
+    if ([Math]::Abs($sRatio - 1.0) -gt 1e-6) {
+        for ($ri = 0; $ri -lt 9; $ri++) { $rNew[$ri] *= $sRatio }
+    }
+    $dRot = Rotate-Vec $tDelta $rSrc
+    $t0 = $tx[9]  + $dRot[0]
+    $t1 = $tx[10] + $dRot[1]
+    $t2 = $tx[11] + $dRot[2]
+    return [double[]](
+        $rNew[0],$rNew[1],$rNew[2], $rNew[3],$rNew[4],$rNew[5], $rNew[6],$rNew[7],$rNew[8],
+        $t0, $t1, $t2)
+}
+# Extract the tilt-only component of a rotation matrix, stripping any Z-axis (yaw) rotation.
+# Uses Rodrigues formula: finds shortest rotation that maps [0,0,1] to R*[0,0,1].
+# Row-vector convention: [0,0,1] maps to R's third row = [R[6],R[7],R[8]].
+# Because Z rotation leaves the Z direction unchanged, this always gives the tilt
+# regardless of how much yaw the user may have added on top.
+function Get-TiltOnlyCorrection([double[]]$r) {
+    $vx = $r[6]; $vy = $r[7]; $vz = $r[8]
+    $vlen = [Math]::Sqrt($vx*$vx + $vy*$vy + $vz*$vz)
+    if ($vlen -gt 1e-9) { $vx /= $vlen; $vy /= $vlen; $vz /= $vlen }
+
+    # Z already points straight up - no tilt, return identity
+    if ([Math]::Abs($vx) -lt 1e-6 -and [Math]::Abs($vy) -lt 1e-6 -and $vz -gt 0.9999) {
+        return [double[]](1,0,0, 0,1,0, 0,0,1)
+    }
+    # Z points straight down - 180 deg flip around X
+    if ([Math]::Abs($vx) -lt 1e-6 -and [Math]::Abs($vy) -lt 1e-6 -and $vz -lt -0.9999) {
+        return [double[]](1,0,0, 0,-1,0, 0,0,-1)
+    }
+
+    # Rodrigues axis = cross([0,0,1], v) = [-vy, vx, 0]
+    $n0 = -$vy; $n1 = $vx
+    $nlen = [Math]::Sqrt($n0*$n0 + $n1*$n1)
+    $n0 /= $nlen; $n1 /= $nlen
+
+    $cosA = [Math]::Max(-1.0, [Math]::Min(1.0, $vz))
+    $sinA = [Math]::Sqrt(1.0 - $cosA*$cosA)
+    $t    = 1.0 - $cosA
+
+    # Row-vector Rodrigues matrix = R_col^T
+    $m00 = $cosA + $t*$n0*$n0;   $m01 = $t*$n0*$n1;          $m02 = -$sinA*$n1
+    $m10 = $t*$n0*$n1;            $m11 = $cosA + $t*$n1*$n1;  $m12 =  $sinA*$n0
+    $m20 = $sinA*$n1;             $m21 = -$sinA*$n0;           $m22 =  $cosA
+    return [double[]]($m00,$m01,$m02, $m10,$m11,$m12, $m20,$m21,$m22)
+}
 function Save-Xml([xml]$doc, [string]$path) {
     $ws = New-Object System.Xml.XmlWriterSettings
     $ws.Encoding = New-Object System.Text.UTF8Encoding($false); $ws.Indent = $true
@@ -209,14 +287,31 @@ $n = $sourceTransforms.Count
 Write-Host "Found $n instance transform(s) to replicate."
 if ($n -eq 0) { Write-Error "No valid transforms found in source file."; exit 1 }
 
-# Grab the component[0] rotation from the source template assembly.
-# Used later to detect if the Final master was re-oriented by Bambu Studio.
-$srcTemplateCompRot = $null
+# Grab the component transforms from the source template assembly.
+$srcTemplateCompTransforms = [System.Collections.Generic.List[string]]::new()
 $srcTemplateObj = $srcModel.SelectSingleNode('//m:resources/m:object[m:components/m:component]', $srcXns)
 if ($null -ne $srcTemplateObj) {
-    $srcComp0 = $srcTemplateObj.SelectSingleNode('m:components/m:component', $srcXns)
-    if ($null -ne $srcComp0) {
-        $srcTemplateCompRot = Get-TxRot (Parse-Tx $srcComp0.GetAttribute('transform'))
+    foreach ($srcComp in $srcTemplateObj.SelectNodes('m:components/m:component', $srcXns)) {
+        $srcTemplateCompTransforms.Add($srcComp.GetAttribute('transform')) | Out-Null
+    }
+}
+# Centroid of source template's identity-rotation components (used to correct re-centering offset).
+$centroidSrc = Get-CompCentroid $srcTemplateCompTransforms
+
+# Mean Z translation across all source build items (used to compute Z correction).
+$srcMeanZ = 0.0
+foreach ($st in $sourceTransforms) { $srcMeanZ += (Parse-Tx $st)[11] }
+if ($sourceTransforms.Count -gt 0) { $srcMeanZ /= $sourceTransforms.Count }
+
+# Extract source plate metadata (preserves filament_maps, filament_volume_maps, etc.)
+$srcPlateMeta = [ordered]@{}
+if ($null -ne $srcSettingsText) {
+    [xml]$srcSettingsForMeta = $srcSettingsText
+    $srcPlateNode = $srcSettingsForMeta.SelectSingleNode('//plate')
+    if ($null -ne $srcPlateNode) {
+        foreach ($m in $srcPlateNode.SelectNodes('metadata')) {
+            $srcPlateMeta[$m.GetAttribute('key')] = $m.GetAttribute('value')
+        }
     }
 }
 
@@ -271,23 +366,62 @@ try {
         }
     }
 
-    # ── Detect orientation mismatch between Final master and source template ──────
-    # When Bambu Studio re-orients an object (e.g. after adding a modifier) it bakes
-    # a rotation into ALL existing component transforms.  The source plate transforms
-    # were designed for the ORIGINAL orientation, so we must undo the difference.
-    $rotCorrection = [double[]](1,0,0, 0,1,0, 0,0,1)   # identity = no correction
-    $masterComp0 = $masterObj.SelectSingleNode('m:components/m:component', $xns)
-    if ($null -ne $masterComp0 -and $null -ne $srcTemplateCompRot) {
-        $finalCompRot = Get-TxRot (Parse-Tx $masterComp0.GetAttribute('transform'))
-        # R_correction_inv = Transpose(R_final) * R_src_template
-        # Applying this to each plate transform un-bakes the Final rotation
-        # and re-expresses the transform in the source template's frame.
-        $candidate = Mul-3x3 (Transpose-3x3 $finalCompRot) $srcTemplateCompRot
-        if (-not (Is-IdentityRot $candidate)) {
-            $rotCorrection = $candidate
-            Write-Host "Orientation correction applied (Final master was re-oriented vs source template)."
+    # ── Collect Final master component transforms (for debug output) ──────────────
+    $masterCompTransforms = [System.Collections.Generic.List[string]]::new()
+    foreach ($mc in $masterObj.SelectNodes('m:components/m:component', $xns)) {
+        $masterCompTransforms.Add($mc.GetAttribute('transform')) | Out-Null
+    }
+
+    # ── Derive rotation correction from the Final master's build item transform ─────
+    # The Final's build item rotation captures how Bambu oriented the assembly on
+    # the editing plate relative to the "natural" local frame of the geometry.
+    # Source plate transforms assume the original (Nest/Full) orientation.
+    # Left-multiplying each source rotation by R_final_build re-aligns the clones
+    # so they sit on the plate the same way the source instances did.
+    # If the Final's build item is identity (no reorientation), no correction is needed.
+    $finalBuildRot = Get-TxRot (Parse-Tx $masterItem.GetAttribute('transform'))
+    if (Is-IdentityRot $finalBuildRot) {
+        $rotCorrection = [double[]](1,0,0, 0,1,0, 0,0,1)
+        Write-Host "Final master build item is identity - no rotation correction needed."
+    } else {
+        # Strip any Z-axis (yaw) rotation the user may have added to the Final.
+        # Only the tilt component (pitch/roll - how geometry sits flat) should be
+        # propagated to the clones.  Z rotation would rotate all nest positions
+        # around the origin, spreading objects off-plate.
+        $rotCorrection = Get-TiltOnlyCorrection $finalBuildRot
+        if (Is-IdentityRot $rotCorrection) {
+            Write-Host "Rotation correction: Final has Z-only rotation - tilt is identity, no correction applied."
+        } else {
+            Write-Host "Rotation correction: tilt-only component extracted from Final build item (Z yaw stripped)."
         }
     }
+
+    # ── Extract scale from Final build item ───────────────────────────────────
+    # Bambu embeds the model's print scale in the build item rotation matrix.
+    # If the user scaled the model in the Final, scaleFinal != scaleSrc, and each
+    # clone's rotation matrix must be rescaled so geometry and Z position match.
+    $scaleFinal = Get-RowScale $finalBuildRot
+    Write-Host ("Scale from Final build item: {0:F4}" -f $scaleFinal)
+
+    # ── Compute centroid-based translation delta ───────────────────────────────
+    # When Bambu re-saves an edited Final it re-centers the geometry (centroid moves
+    # to near the local origin), but the source plate translations assume the original
+    # (un-centered) local frame.  delta = centroid_src - centroid_final * rotCorrection
+    # is added to each clone translation (rotated by R_src) to compensate.
+    $centroidFinal    = Get-CompCentroid $masterCompTransforms
+    $centroidFinalRot = Rotate-Vec $centroidFinal $rotCorrection
+    $td0 = $centroidSrc[0]-$centroidFinalRot[0]
+    $td1 = $centroidSrc[1]-$centroidFinalRot[1]
+    # Z: centroid-based delta is unreliable (component origins != bottom face).
+    # Use (Final build item Z) - (mean source Z) so objects sit correctly on the plate.
+    $finalBuildZ = (Parse-Tx $masterItem.GetAttribute('transform'))[11]
+    $td2 = $finalBuildZ - $srcMeanZ
+    $tDelta = [double[]]($td0, $td1, $td2)
+    Write-Host ("Centroid correction: src=({0:F2},{1:F2},{2:F2}) final=({3:F2},{4:F2},{5:F2}) delta=({6:F2},{7:F2},{8:F2})" -f `
+        $centroidSrc[0],$centroidSrc[1],$centroidSrc[2], `
+        $centroidFinal[0],$centroidFinal[1],$centroidFinal[2], `
+        $tDelta[0],$tDelta[1],$tDelta[2])
+    Write-Host ("  Z correction: finalBuildZ={0:F4} srcMeanZ={1:F4} td2={2:F4}" -f $finalBuildZ,$srcMeanZ,$td2)
 
     # ── Snapshot component UUIDs base from the master ──────────────────────────
     # We'll regenerate UUIDs per-clone to avoid duplicates
@@ -366,15 +500,15 @@ try {
 
         $resourcesNode.AppendChild($clone) | Out-Null
 
-        # Build item with this transform (apply orientation correction if needed)
+        # Build item with corrected transform (rotation + centroid offset)
         $newItem = $xml.CreateElement('item', $nsCore)
         $newItem.SetAttribute('objectid', $newId)
         $tx = $sourceTransforms[$i]
         if (-not [string]::IsNullOrWhiteSpace($tx)) {
-            if (-not (Is-IdentityRot $rotCorrection)) {
-                $corrected = Apply-RotCorrection (Parse-Tx $tx) $rotCorrection
-                $tx = ($corrected | ForEach-Object { ([double]$_).ToString('G9') }) -join ' '
-            }
+            $srcScale = Get-RowScale (Get-TxRot (Parse-Tx $tx))
+            $sRatio   = if ($srcScale -gt 1e-9) { $scaleFinal / $srcScale } else { 1.0 }
+            $corrected = Apply-TxCorrection (Parse-Tx $tx) $rotCorrection $tDelta $sRatio
+            $tx = ($corrected | ForEach-Object { ([double]$_).ToString('G9') }) -join ' '
             $newItem.SetAttribute('transform', $tx)
         }
         $newItem.SetAttribute('UUID', $nsProd, ($i.ToString("x8") + "-b1ec-4553-aec9-835e5b724bb4")) | Out-Null
@@ -413,23 +547,27 @@ try {
         $newAssemble = $settings.CreateElement('assemble')
         $configNode.AppendChild($newAssemble) | Out-Null
 
-        # Copy plate metadata from the source settings (preserves filament_map_mode,
-        # locked, thumbnail paths, etc.).  Fall back to hardcoded defaults if missing.
+        # Copy plate metadata from the source Nest/Full settings (preserves filament_maps,
+        # filament_volume_maps, filament_map_mode, locked, etc.).
+        # Override thumbnail/id keys with standard plate-1 names.
         $newPlate = $settings.CreateElement('plate')
-        $srcPlateNode = $settings.SelectSingleNode('//plate')   # original (now removed) — use Final's
-        # Re-read original Final plate metadata from the pre-edit XML snapshot
-        $stdPlateMeta = [ordered]@{
+        $overridePlateMeta = [ordered]@{
             'plater_id'              = '1'
-            'plater_name'            = ''
-            'locked'                 = 'false'
-            'filament_map_mode'      = 'Auto For Flush'
-            'filament_maps'          = '1 1 1 1'
             'thumbnail_file'         = 'Metadata/plate_1.png'
             'thumbnail_no_light_file'= 'Metadata/plate_no_light_1.png'
             'top_file'               = 'Metadata/top_1.png'
             'pick_file'              = 'Metadata/pick_1.png'
         }
-        foreach ($kv in $stdPlateMeta.GetEnumerator()) {
+        # Merge: start from source, then apply overrides
+        $mergedPlateMeta = [ordered]@{}
+        foreach ($kv in $srcPlateMeta.GetEnumerator()) { $mergedPlateMeta[$kv.Key] = $kv.Value }
+        foreach ($kv in $overridePlateMeta.GetEnumerator()) { $mergedPlateMeta[$kv.Key] = $kv.Value }
+        # Ensure plater_id is first
+        $orderedPlateMeta = [ordered]@{ 'plater_id' = '1' }
+        foreach ($kv in $mergedPlateMeta.GetEnumerator()) {
+            if ($kv.Key -ne 'plater_id') { $orderedPlateMeta[$kv.Key] = $kv.Value }
+        }
+        foreach ($kv in $orderedPlateMeta.GetEnumerator()) {
             $m = $settings.CreateElement('metadata')
             $m.SetAttribute('key',   $kv.Key)
             $m.SetAttribute('value', $kv.Value)
@@ -439,12 +577,10 @@ try {
 
         for ($i = 0; $i -lt $n; $i++) {
             $newId = $newObjIds[$i]
-            $tx    = $sourceTransforms[$i]
-            # Apply same orientation correction as the build item
-            if (-not (Is-IdentityRot $rotCorrection)) {
-                $corrected = Apply-RotCorrection (Parse-Tx $tx) $rotCorrection
-                $tx = ($corrected | ForEach-Object { ([double]$_).ToString('G9') }) -join ' '
-            }
+            $srcScale = Get-RowScale (Get-TxRot (Parse-Tx $sourceTransforms[$i]))
+            $sRatio   = if ($srcScale -gt 1e-9) { $scaleFinal / $srcScale } else { 1.0 }
+            $corrected = Apply-TxCorrection (Parse-Tx $sourceTransforms[$i]) $rotCorrection $tDelta $sRatio
+            $tx = ($corrected | ForEach-Object { ([double]$_).ToString('G9') }) -join ' '
 
             # Clone master settings entry with new ID
             if ($null -ne $masterSettObj) {
@@ -558,8 +694,50 @@ try {
     }
 
     $metaDir = Join-Path $workDir "Metadata"
-    foreach ($pat in @("plate_*.png","pick_*.png","plate_*.json")) {
+    foreach ($pat in @("plate_*.png","pick_*.png")) {
         Get-ChildItem $metaDir -Filter $pat -ErrorAction SilentlyContinue | Remove-Item -Force
+    }
+
+    # Read plate_1.json and wipe tower coords from the source (Nest/Full) zip into memory.
+    # Both are re-injected after the Bambu resave step, which strips plate_1.json and
+    # overwrites project_settings.config with the Final's (wrong) wipe tower coordinates.
+    $plate1JsonBytes  = $null
+    $srcWipeTowerX    = $null
+    $srcWipeTowerY    = $null
+    $srcZipForPlate = [System.IO.Compression.ZipFile]::OpenRead($TransformSourcePath)
+    try {
+        # plate_1.json
+        $plate1Entry = $srcZipForPlate.Entries | Where-Object { $_.FullName -eq 'Metadata/plate_1.json' } | Select-Object -First 1
+        if ($null -ne $plate1Entry) {
+            $ms = New-Object System.IO.MemoryStream
+            $plate1Stream = $plate1Entry.Open()
+            try { $plate1Stream.CopyTo($ms) } finally { $plate1Stream.Dispose() }
+            $plate1JsonBytes = $ms.ToArray()
+            $ms.Dispose()
+            Write-Host "plate_1.json read from source ($($plate1JsonBytes.Length) bytes)."
+        } else {
+            Write-Host "WARNING: plate_1.json not found in source - wipe tower position may be wrong."
+        }
+
+        # wipe_tower_x / wipe_tower_y from project_settings.config
+        $projEntry = $srcZipForPlate.Entries | Where-Object { $_.FullName -eq 'Metadata/project_settings.config' } | Select-Object -First 1
+        if ($null -ne $projEntry) {
+            $srProj = New-Object System.IO.StreamReader($projEntry.Open())
+            $projText = $srProj.ReadToEnd(); $srProj.Dispose()
+            $xm = [regex]::Match($projText, '"wipe_tower_x"\s*:\s*\[([^\]]*)\]')
+            $ym = [regex]::Match($projText, '"wipe_tower_y"\s*:\s*\[([^\]]*)\]')
+            if ($xm.Success) { $srcWipeTowerX = $xm.Groups[1].Value.Trim() }
+            if ($ym.Success) { $srcWipeTowerY = $ym.Groups[1].Value.Trim() }
+            if ($null -ne $srcWipeTowerX) {
+                Write-Host "Wipe tower coords from source: x=[$srcWipeTowerX] y=[$srcWipeTowerY]"
+            }
+        }
+    } finally { $srcZipForPlate.Dispose() }
+
+    # Also write to workdir so it lands in the initial pack (Step 7).
+    # Step 8 may strip it; the re-inject below handles that case.
+    if ($null -ne $plate1JsonBytes) {
+        [System.IO.File]::WriteAllBytes((Join-Path $metaDir "plate_1.json"), $plate1JsonBytes)
     }
 
     # ════════════════════════════════════════════════════════════════════════════
@@ -582,6 +760,71 @@ try {
     Write-Host "Output: $OutputPath"
 
     # ════════════════════════════════════════════════════════════════════════════
+    #  DEBUG - Write transform debug file alongside output
+    # ════════════════════════════════════════════════════════════════════════════
+    $debugPath = $OutputPath -replace '\.3mf$', '_debug.txt'
+    $dbLines   = [System.Collections.Generic.List[string]]::new()
+    $dbLines.Add("RenestFromFinal Debug Output")
+    $dbLines.Add("Generated : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
+    $dbLines.Add("Final     : $FinalPath")
+    $dbLines.Add("Source    : $TransformSourcePath")
+    $dbLines.Add("Output    : $OutputPath")
+    $dbLines.Add("")
+
+    $dbLines.Add("======================================")
+    $dbLines.Add("FINAL.3MF - Master Build Item")
+    $dbLines.Add("======================================")
+    $dbLines.Add("  Object ID   : $masterId")
+    $masterBuildTx = $masterItem.GetAttribute('transform')
+    $dbLines.Add("  Build TX    : $(if ([string]::IsNullOrWhiteSpace($masterBuildTx)) { '(identity/none)' } else { $masterBuildTx })")
+    $dbLines.Add("  Build ROT   : $($finalBuildRot -join ' ')")
+    $dbLines.Add("  Correction  : $(if (Is-IdentityRot $rotCorrection) { 'none (identity)' } else { 'applied (left-multiply source rot by Final build ROT)' })")
+    $dbLines.Add("")
+
+    $dbLines.Add("FINAL.3MF - Master Object Component Transforms")
+    $dbLines.Add("  ($($masterCompTransforms.Count) components)")
+    for ($ci = 0; $ci -lt $masterCompTransforms.Count; $ci++) {
+        $v = $masterCompTransforms[$ci]
+        $dbLines.Add("  comp[$ci] TX : $(if ([string]::IsNullOrWhiteSpace($v)) { '(identity/none)' } else { $v })")
+    }
+    $dbLines.Add("")
+
+    $dbLines.Add("SOURCE - Template Object Component Transforms")
+    $dbLines.Add("  ($($srcTemplateCompTransforms.Count) components)")
+    for ($ci = 0; $ci -lt $srcTemplateCompTransforms.Count; $ci++) {
+        $v = $srcTemplateCompTransforms[$ci]
+        $dbLines.Add("  comp[$ci] TX : $(if ([string]::IsNullOrWhiteSpace($v)) { '(identity/none)' } else { $v })")
+    }
+    $dbLines.Add("")
+
+    $dbLines.Add("======================================")
+    $dbLines.Add("CENTROID CORRECTION")
+    $dbLines.Add("======================================")
+    $dbLines.Add("  centroid src   : $($centroidSrc[0].ToString('F3')) $($centroidSrc[1].ToString('F3')) $($centroidSrc[2].ToString('F3'))")
+    $dbLines.Add("  centroid final : $($centroidFinal[0].ToString('F3')) $($centroidFinal[1].ToString('F3')) $($centroidFinal[2].ToString('F3'))")
+    $dbLines.Add("  tDelta         : $($tDelta[0].ToString('F3')) $($tDelta[1].ToString('F3')) $($tDelta[2].ToString('F3'))")
+    $dbLines.Add("")
+    $dbLines.Add("======================================")
+    $dbLines.Add("SOURCE vs APPLIED TRANSFORMS  ($n total, first 5 shown)")
+    $dbLines.Add("======================================")
+    $maxShow = [Math]::Min($n, 5)
+    for ($i = 0; $i -lt $maxShow; $i++) {
+        $v = $sourceTransforms[$i]
+        $dbLines.Add("  [$i] src : $(if ([string]::IsNullOrWhiteSpace($v)) { '(identity/none)' } else { $v })")
+        if (-not [string]::IsNullOrWhiteSpace($v)) {
+            $dbSrcScale = Get-RowScale (Get-TxRot (Parse-Tx $v))
+            $dbSRatio   = if ($dbSrcScale -gt 1e-9) { $scaleFinal / $dbSrcScale } else { 1.0 }
+            $cv = Apply-TxCorrection (Parse-Tx $v) $rotCorrection $tDelta $dbSRatio
+            $cvStr = ($cv | ForEach-Object { ([double]$_).ToString('G9') }) -join ' '
+            $dbLines.Add("  [$i] out : $cvStr")
+        }
+    }
+    if ($n -gt $maxShow) { $dbLines.Add("  ... ($($n - $maxShow) more not shown)") }
+
+    [System.IO.File]::WriteAllLines($debugPath, $dbLines, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "Debug file : $debugPath"
+
+    # ════════════════════════════════════════════════════════════════════════════
     #  STEP 8 — Optional Bambu resave (cleans stale metadata, generates thumbnails)
     # ════════════════════════════════════════════════════════════════════════════
     if (Test-Path $BambuPath) {
@@ -597,6 +840,43 @@ try {
         foreach ($log in @($logOut, $logErr)) { if (Test-Path $log) { Remove-Item $log -Force -ErrorAction SilentlyContinue } }
         if (Test-Path $tempResave) { Move-Item $tempResave $OutputPath -Force; Write-Host " done." }
         else { Write-Host " skipped (export produced no output)." }
+    }
+
+    # Re-inject plate_1.json and fix wipe tower coords after pack/resave.
+    # Bambu resave strips plate_1.json and overwrites project_settings.config with
+    # the Final's wipe tower position; we restore both from the source here.
+    if ($null -ne $plate1JsonBytes -or $null -ne $srcWipeTowerX) {
+        $outZip = [System.IO.Compression.ZipFile]::Open($OutputPath, 'Update')
+        try {
+            # Inject plate_1.json
+            if ($null -ne $plate1JsonBytes) {
+                $existing = $outZip.Entries | Where-Object { $_.FullName -eq 'Metadata/plate_1.json' } | Select-Object -First 1
+                if ($null -ne $existing) { $existing.Delete() }
+                $newEntry    = $outZip.CreateEntry('Metadata/plate_1.json')
+                $entryStream = $newEntry.Open()
+                try { $entryStream.Write($plate1JsonBytes, 0, $plate1JsonBytes.Length) }
+                finally { $entryStream.Dispose() }
+                Write-Host "plate_1.json injected into output (wipe tower bbox preserved)."
+            }
+
+            # Patch wipe_tower_x / wipe_tower_y in project_settings.config
+            if ($null -ne $srcWipeTowerX) {
+                $projE = $outZip.Entries | Where-Object { $_.FullName -eq 'Metadata/project_settings.config' } | Select-Object -First 1
+                if ($null -ne $projE) {
+                    $srOut = New-Object System.IO.StreamReader($projE.Open())
+                    $projOut = $srOut.ReadToEnd(); $srOut.Dispose()
+                    $projOut = [regex]::Replace($projOut, '("wipe_tower_x"\s*:\s*\[)[^\]]*(\])', "`$1$srcWipeTowerX`$2")
+                    $projOut = [regex]::Replace($projOut, '("wipe_tower_y"\s*:\s*\[)[^\]]*(\])', "`$1$srcWipeTowerY`$2")
+                    $projE.Delete()
+                    $newProj     = $outZip.CreateEntry('Metadata/project_settings.config')
+                    $projStream  = $newProj.Open()
+                    $projBytes   = [System.Text.Encoding]::UTF8.GetBytes($projOut)
+                    try { $projStream.Write($projBytes, 0, $projBytes.Length) }
+                    finally { $projStream.Dispose() }
+                    Write-Host "project_settings.config patched: wipe_tower x=[$srcWipeTowerX] y=[$srcWipeTowerY]"
+                }
+            }
+        } finally { $outZip.Dispose() }
     }
 
     Write-Host "Done! $n instances written to: $OutputPath"
