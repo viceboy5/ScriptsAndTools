@@ -2,7 +2,8 @@ param(
     [string]$FinalPath,                # The edited Final.3mf (single master object)
     [string]$TransformSourcePath = "", # Nest.3mf or Full.3mf to read plate transforms from
     [string]$OutputPath          = "", # Defaults to <stem>_Renest.3mf next to Final
-    [string]$BambuPath           = "C:\Program Files\Bambu Studio\bambu-studio.exe"
+    [string]$BambuPath           = "C:\Program Files\Bambu Studio\bambu-studio.exe",
+    [switch]$NoConfirm                 # Skip the Y/N prompt (used when caller batches multiple files)
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName 'System.IO.Compression.FileSystem'
@@ -211,10 +212,14 @@ Write-Host ""
 Write-Host "  The edited master object from Final will be cloned once per"
 Write-Host "  transform found in the source plate, then saved to Output."
 Write-Host ""
-$confirm = (Read-Host "  Proceed? [Y/N]").Trim()
-if ($confirm -notmatch '^[Yy]') {
-    Write-Host "Cancelled."
-    exit 0
+if (-not $NoConfirm) {
+    $confirm = (Read-Host "  Proceed? [Y/N]").Trim()
+    if ($confirm -notmatch '^[Yy]') {
+        Write-Host "Cancelled."
+        exit 0
+    }
+} else {
+    Write-Host "  (NoConfirm - proceeding automatically)"
 }
 Write-Host ""
 
@@ -380,19 +385,51 @@ try {
     # so they sit on the plate the same way the source instances did.
     # If the Final's build item is identity (no reorientation), no correction is needed.
     $finalBuildRot = Get-TxRot (Parse-Tx $masterItem.GetAttribute('transform'))
+    $compsMatch    = $false   # initialised here; set inside else block if applicable
     if (Is-IdentityRot $finalBuildRot) {
         $rotCorrection = [double[]](1,0,0, 0,1,0, 0,0,1)
         Write-Host "Final master build item is identity - no rotation correction needed."
     } else {
-        # Strip any Z-axis (yaw) rotation the user may have added to the Final.
-        # Only the tilt component (pitch/roll - how geometry sits flat) should be
-        # propagated to the clones.  Z rotation would rotate all nest positions
-        # around the origin, spreading objects off-plate.
-        $rotCorrection = Get-TiltOnlyCorrection $finalBuildRot
-        if (Is-IdentityRot $rotCorrection) {
-            Write-Host "Rotation correction: Final has Z-only rotation - tilt is identity, no correction applied."
+        # Before applying any correction, check whether the Final's component transforms
+        # are identical to the source template's component transforms.
+        #
+        # When the Final was saved directly from a plate (e.g. the user exported one
+        # instance from the Nest for editing), its build item rotation is the same
+        # rotation that is already baked into the source build items.  The component-
+        # level geometry is in exactly the same local frame the source transforms
+        # expect.  Applying a correction in this case would double-rotate every clone.
+        #
+        # Only apply a correction when the Final was genuinely re-oriented relative to
+        # the source (component transforms differ), meaning the user edited it in a
+        # different orientation and Bambu changed the local frame.
+        $compsMatch = ($masterCompTransforms.Count -gt 0 -and
+                       $srcTemplateCompTransforms.Count -gt 0 -and
+                       $masterCompTransforms.Count -eq $srcTemplateCompTransforms.Count)
+        if ($compsMatch) {
+            $cmpEps = 1e-3
+            for ($ci = 0; $ci -lt $masterCompTransforms.Count -and $compsMatch; $ci++) {
+                $mTx = Parse-Tx $masterCompTransforms[$ci]
+                $sTx = Parse-Tx $srcTemplateCompTransforms[$ci]
+                for ($ti = 0; $ti -lt 12 -and $compsMatch; $ti++) {
+                    if ([Math]::Abs($mTx[$ti] - $sTx[$ti]) -gt $cmpEps) { $compsMatch = $false }
+                }
+            }
+        }
+
+        if ($compsMatch) {
+            $rotCorrection = [double[]](1,0,0, 0,1,0, 0,0,1)
+            Write-Host "Component transforms match source template - Final saved from plate orientation, no rotation correction needed."
         } else {
-            Write-Host "Rotation correction: tilt-only component extracted from Final build item (Z yaw stripped)."
+            # Strip any Z-axis (yaw) rotation the user may have added to the Final.
+            # Only the tilt component (pitch/roll - how geometry sits flat) should be
+            # propagated to the clones.  Z rotation would rotate all nest positions
+            # around the origin, spreading objects off-plate.
+            $rotCorrection = Get-TiltOnlyCorrection $finalBuildRot
+            if (Is-IdentityRot $rotCorrection) {
+                Write-Host "Rotation correction: Final has Z-only rotation - tilt is identity, no correction applied."
+            } else {
+                Write-Host "Rotation correction: tilt-only component extracted from Final build item (Z yaw stripped)."
+            }
         }
     }
 
@@ -778,7 +815,8 @@ try {
     $masterBuildTx = $masterItem.GetAttribute('transform')
     $dbLines.Add("  Build TX    : $(if ([string]::IsNullOrWhiteSpace($masterBuildTx)) { '(identity/none)' } else { $masterBuildTx })")
     $dbLines.Add("  Build ROT   : $($finalBuildRot -join ' ')")
-    $dbLines.Add("  Correction  : $(if (Is-IdentityRot $rotCorrection) { 'none (identity)' } else { 'applied (left-multiply source rot by Final build ROT)' })")
+    $dbLines.Add("  Comp match  : $(if ($compsMatch) { 'YES - same local frame as source, correction bypassed' } else { 'NO - geometry re-oriented vs source' })")
+    $dbLines.Add("  Correction  : $(if (Is-IdentityRot $rotCorrection) { 'none (identity)' } else { 'applied (left-multiply source rot by tilt-only component of Final build ROT)' })")
     $dbLines.Add("")
 
     $dbLines.Add("FINAL.3MF - Master Object Component Transforms")
