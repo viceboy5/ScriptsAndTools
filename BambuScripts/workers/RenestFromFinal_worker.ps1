@@ -402,28 +402,33 @@ try {
         # Only apply a correction when the Final was genuinely re-oriented relative to
         # the source (component transforms differ), meaning the user edited it in a
         # different orientation and Bambu changed the local frame.
-        $compsMatch = ($masterCompTransforms.Count -gt 0 -and
-                       $srcTemplateCompTransforms.Count -gt 0 -and
-                       $masterCompTransforms.Count -eq $srcTemplateCompTransforms.Count)
-        if ($compsMatch) {
-            $cmpEps = 1e-3
-            for ($ci = 0; $ci -lt $masterCompTransforms.Count -and $compsMatch; $ci++) {
-                $mTx = Parse-Tx $masterCompTransforms[$ci]
-                $sTx = Parse-Tx $srcTemplateCompTransforms[$ci]
-                for ($ti = 0; $ti -lt 12 -and $compsMatch; $ti++) {
-                    if ([Math]::Abs($mTx[$ti] - $sTx[$ti]) -gt $cmpEps) { $compsMatch = $false }
-                }
+        # Check if the Final's build rotation matches any source plate item rotation.
+        # If the user exported the Final directly from the nest (or the Final is otherwise
+        # in the same plate orientation), its build rotation will appear in the source
+        # build items.  In that case the geometry is already in the expected frame and
+        # applying a correction would double-rotate every clone.
+        # Translation-only design edits (component positions changing) do NOT affect this
+        # check, making it robust against the previous component-transform comparison which
+        # could misfire when parts were repositioned without re-orienting the assembly.
+        $rotMatchesSource = $false
+        $rotEps = 1e-3
+        foreach ($txStr in $sourceTransforms) {
+            if ([string]::IsNullOrWhiteSpace($txStr)) { continue }
+            $srcItemRot = Get-TxRot (Parse-Tx $txStr)
+            $match = $true
+            for ($ri = 0; $ri -lt 9 -and $match; $ri++) {
+                if ([Math]::Abs($finalBuildRot[$ri] - $srcItemRot[$ri]) -gt $rotEps) { $match = $false }
             }
+            if ($match) { $rotMatchesSource = $true; break }
         }
 
-        if ($compsMatch) {
+        if ($rotMatchesSource) {
             $rotCorrection = [double[]](1,0,0, 0,1,0, 0,0,1)
-            Write-Host "Component transforms match source template - Final saved from plate orientation, no rotation correction needed."
+            Write-Host "Final rotation matches a source plate item - same orientation, no correction needed."
         } else {
-            # Strip any Z-axis (yaw) rotation the user may have added to the Final.
-            # Only the tilt component (pitch/roll - how geometry sits flat) should be
-            # propagated to the clones.  Z rotation would rotate all nest positions
-            # around the origin, spreading objects off-plate.
+            # Final has a rotation not present in the source plate items.
+            # The user re-oriented the assembly for editing; extract the tilt component
+            # (strip Z yaw to avoid spinning the nest positions) and propagate it.
             $rotCorrection = Get-TiltOnlyCorrection $finalBuildRot
             if (Is-IdentityRot $rotCorrection) {
                 Write-Host "Rotation correction: Final has Z-only rotation - tilt is identity, no correction applied."
@@ -815,7 +820,7 @@ try {
     $masterBuildTx = $masterItem.GetAttribute('transform')
     $dbLines.Add("  Build TX    : $(if ([string]::IsNullOrWhiteSpace($masterBuildTx)) { '(identity/none)' } else { $masterBuildTx })")
     $dbLines.Add("  Build ROT   : $($finalBuildRot -join ' ')")
-    $dbLines.Add("  Comp match  : $(if ($compsMatch) { 'YES - same local frame as source, correction bypassed' } else { 'NO - geometry re-oriented vs source' })")
+    $dbLines.Add("  Rot match   : $(if ($rotMatchesSource) { 'YES - Final rotation found in source plate items, no correction needed' } else { 'NO - Final rotation not in source plate, tilt correction applied' })")
     $dbLines.Add("  Correction  : $(if (Is-IdentityRot $rotCorrection) { 'none (identity)' } else { 'applied (left-multiply source rot by tilt-only component of Final build ROT)' })")
     $dbLines.Add("")
 
