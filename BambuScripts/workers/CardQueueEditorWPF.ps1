@@ -17,8 +17,9 @@ $scriptDir = $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($scriptDir)) { $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition }
 if ([string]::IsNullOrWhiteSpace($scriptDir)) { $scriptDir = [System.Environment]::CurrentDirectory }
 $colorCsvPath = Join-Path $scriptDir "..\libraries\FilamentLibrary.csv"
+$namesLibPath  = Join-Path $scriptDir "..\libraries\NamesLibrary.ps1"
 
-$LibraryColors = [ordered]@{}
+$script:LibraryColors = [ordered]@{}
 $HexToName = @{}
 if (Test-Path $colorCsvPath) {
     $csvLines = Get-Content -Path $colorCsvPath
@@ -33,7 +34,7 @@ if (Test-Path $colorCsvPath) {
                 $g = [int]$parts[2].Replace('"','').Trim()
                 $b = [int]$parts[3].Replace('"','').Trim()
                 $hex = "#{0:X2}{1:X2}{2:X2}FF" -f $r, $g, $b
-                $LibraryColors[$name] = $hex
+                $script:LibraryColors[$name] = $hex
                 $HexToName[$hex] = $name
                 $HexToName[$hex.Substring(0,7)] = $name
             } catch { continue }
@@ -268,6 +269,34 @@ function Load-WpfImage([string]$path) {
         $ms.Close(); $ms.Dispose()
         return $bmp
     } catch { return $null }
+}
+
+# --- HSV / RGB helpers (used by Libraries filament picker) ---
+function Hsv-To-Rgb([double]$h,[double]$s,[double]$v) {
+    $h = (($h % 360) + 360) % 360
+    if ($s -lt 1e-9) { $c=[int]([Math]::Round($v*255)); return [int[]]($c,$c,$c) }
+    $hi=[int]($h/60)%6; $f=$h/60-[int]($h/60)
+    $p=$v*(1-$s); $q=$v*(1-$f*$s); $t=$v*(1-(1-$f)*$s)
+    $rgb=switch($hi){0{@($v,$t,$p)}1{@($q,$v,$p)}2{@($p,$v,$t)}3{@($p,$q,$v)}4{@($t,$p,$v)}5{@($v,$p,$q)}}
+    return [int[]]([Math]::Max(0,[Math]::Min(255,[int][Math]::Round($rgb[0]*255))),
+                   [Math]::Max(0,[Math]::Min(255,[int][Math]::Round($rgb[1]*255))),
+                   [Math]::Max(0,[Math]::Min(255,[int][Math]::Round($rgb[2]*255))))
+}
+function Rgb-To-Hsv([int]$r,[int]$g,[int]$b) {
+    $rf=$r/255.0;$gf=$g/255.0;$bf=$b/255.0
+    $max=[Math]::Max($rf,[Math]::Max($gf,$bf)); $min=[Math]::Min($rf,[Math]::Min($gf,$bf))
+    $d=$max-$min; $v=$max; $s=if($max-gt 1e-9){$d/$max}else{0.0}; $h=0.0
+    if($d-gt 1e-9){
+        if($max-eq $rf){$h=60*(($gf-$bf)/$d%6)}
+        elseif($max-eq $gf){$h=60*(($bf-$rf)/$d+2)}
+        else{$h=60*(($rf-$gf)/$d+4)}
+    }
+    if($h-lt 0){$h+=360}
+    return [double[]]($h,$s,$v)
+}
+function HsvPure-HexAt([double]$h) {
+    $rgb=Hsv-To-Rgb $h 1.0 1.0
+    return "#{0:X2}{1:X2}{2:X2}" -f $rgb[0],$rgb[1],$rgb[2]
 }
 
 function Extract-3mfPickImage([string]$mfPath, [string]$outDir, [string]$prefix = "") {
@@ -537,6 +566,8 @@ $btnProcessAll  = $window.FindName("BtnProcessAll")
 $btnBrowse      = $window.FindName("BtnBrowse") # <--- ADD THIS LINE BACK
 $mainStack      = $window.FindName("MainStack")
 $topModeBar     = $window.FindName("TopModeBar")
+$scrollViewer   = $mainStack.Parent   # ScrollViewer wrapping MainStack
+$script:LibrariesPanel = $null        # built later by Build-LibrariesPanel
 
 # Global workspace mode: "FilePr" | "Editing" | "Review"
 $script:GlobalMode = "FilePr"
@@ -878,8 +909,8 @@ function Start-NextProcess {
         $modified = $false
         foreach ($slot in $pJob.UISlots) {
             $selName = $slot.Combo.Text
-            if ($LibraryColors.Contains($selName)) {
-                $newHex = $LibraryColors[$selName].ToUpper(); $oldHex = $slot.OldHex.ToUpper()
+            if ($script:LibraryColors.Contains($selName)) {
+                $newHex = $script:LibraryColors[$selName].ToUpper(); $oldHex = $slot.OldHex.ToUpper()
                 $oldHex9 = if ($oldHex.Length -eq 7) { $oldHex + "FF" } else { $oldHex }
                 $oldHex7 = $oldHex.Substring(0,7)
                 $newHex9 = if ($newHex.Length -eq 7) { $newHex + "FF" } else { $newHex }
@@ -1351,6 +1382,29 @@ function Apply-GpReviewMode($gpJob, [bool]$enter) {
 # $mode : "FilePr" | "Editing" | "Review"
 function Set-GlobalMode([string]$mode) {
     $script:GlobalMode = $mode
+    # Libraries mode: swap to the libraries panel and skip all card iteration
+    $isLibraries = ($mode -eq "Libraries")
+    if ($null -ne $scrollViewer)              { $scrollViewer.Visibility              = if ($isLibraries) { "Collapsed" } else { "Visible" } }
+    if ($null -ne $script:LibrariesPanel)     { $script:LibrariesPanel.Visibility     = if ($isLibraries) { "Visible"   } else { "Collapsed" } }
+    if ($isLibraries) {
+        # Update top-bar button styles then return — no card panels to iterate
+        if ($null -ne $script:BtnModeFilePr) {
+            $activeStyle   = @{ bg = "#3A5080"; fg = "#FFFFFF" }
+            $inactiveStyle = @{ bg = "#252630"; fg = "#7A7D90" }
+            $libStyle      = @{ bg = "#5A3A80"; fg = "#FFFFFF" }
+            foreach ($pair in @(
+                @{ Btn=$script:BtnModeFilePr;   Active=($false); Style=$inactiveStyle },
+                @{ Btn=$script:BtnModeEditing;  Active=($false); Style=$inactiveStyle },
+                @{ Btn=$script:BtnModeReview;   Active=($false); Style=$inactiveStyle },
+                @{ Btn=$script:BtnModeLibraries;Active=($true);  Style=$libStyle }
+            )) {
+                $pair.Btn.Background = Get-WpfColor $pair.Style.bg
+                $pair.Btn.Foreground = Get-WpfColor $pair.Style.fg
+                $pair.Btn.IsEnabled  = -not $pair.Active
+            }
+        }
+        return
+    }
     $enterReview = ($mode -eq "Review")
     foreach ($gpJob in $script:jobs) {
         if ($enterReview -and -not $gpJob.ReviewMode) {
@@ -1378,18 +1432,21 @@ function Set-GlobalMode([string]$mode) {
     }
     # Update top-bar button styles
     if ($null -ne $script:BtnModeFilePr -and $null -ne $script:BtnModeEditing -and $null -ne $script:BtnModeReview) {
-        $activeStyle   = @{ bg = "#3A5080"; fg = "#FFFFFF"; bdr = 0 }
-        $inactiveStyle = @{ bg = "#252630"; fg = "#7A7D90"; bdr = 0 }
-        $reviewActive  = @{ bg = "#7A5A2A"; fg = "#FFFFFF"; bdr = 0 }
+        $activeStyle   = @{ bg = "#3A5080"; fg = "#FFFFFF" }
+        $inactiveStyle = @{ bg = "#252630"; fg = "#7A7D90" }
+        $reviewActive  = @{ bg = "#7A5A2A"; fg = "#FFFFFF" }
+        $libActive     = @{ bg = "#5A3A80"; fg = "#FFFFFF" }
         foreach ($pair in @(
-            @{ Btn=$script:BtnModeFilePr;  Active=($mode -eq "FilePr");  Style=$activeStyle },
-            @{ Btn=$script:BtnModeEditing; Active=($mode -eq "Editing"); Style=$activeStyle },
-            @{ Btn=$script:BtnModeReview;  Active=($mode -eq "Review");  Style=$reviewActive }
+            @{ Btn=$script:BtnModeFilePr;   Active=($mode -eq "FilePr");   Style=$activeStyle  },
+            @{ Btn=$script:BtnModeEditing;  Active=($mode -eq "Editing");  Style=$activeStyle  },
+            @{ Btn=$script:BtnModeReview;   Active=($mode -eq "Review");   Style=$reviewActive },
+            @{ Btn=$script:BtnModeLibraries;Active=($mode -eq "Libraries");Style=$libActive    }
         )) {
+            if ($null -eq $pair.Btn) { continue }
             $s = if ($pair.Active) { $pair.Style } else { $inactiveStyle }
-            $pair.Btn.Background      = Get-WpfColor $s.bg
-            $pair.Btn.Foreground      = Get-WpfColor $s.fg
-            $pair.Btn.IsEnabled       = -not $pair.Active
+            $pair.Btn.Background = Get-WpfColor $s.bg
+            $pair.Btn.Foreground = Get-WpfColor $s.fg
+            $pair.Btn.IsEnabled  = -not $pair.Active
         }
     }
 }
@@ -1722,7 +1779,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $combo.IsTextSearchEnabled = $false  # We handle filtering ourselves
         $combo.MinWidth = $comboMinW; $combo.MaxWidth = 210 # Safe limits so it doesn't hit the image
         $combo.Width = [System.Double]::NaN # Tells WPF to Auto-size dynamically!
-        $allColorKeys = @($LibraryColors.Keys | Sort-Object)
+        $allColorKeys = @($script:LibraryColors.Keys | Sort-Object)
         $colorCollection = New-Object System.Collections.ObjectModel.ObservableCollection[string]
         foreach ($k in $allColorKeys) { $colorCollection.Add($k) | Out-Null }
         $combo.ItemsSource = $colorCollection
@@ -1825,7 +1882,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             if ($data.Filtering) { return }
             $data.Filtering = $true
             $data.ComboView.Filter = $null   # Just clear the predicate — collection itself never changes
-            if ($LibraryColors.Contains($s.Text)) { $data.TypedText = $s.Text; $data.Confirmed = $true }
+            if ($script:LibraryColors.Contains($s.Text)) { $data.TypedText = $s.Text; $data.Confirmed = $true }
             $data.Filtering = $false
             # TextChanged already updated status when the item text was set
         })
@@ -1856,8 +1913,8 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             }
 
             # Status + swatch always update (typing, navigation preview, Tab/Enter accept, mouse click)
-            if ($LibraryColors.Contains($typed)) {
-                $newHex = $LibraryColors[$typed]
+            if ($script:LibraryColors.Contains($typed)) {
+                $newHex = $script:LibraryColors[$typed]
                 $data.Swatch.Background = Get-WpfColor $newHex
                 try {
                     $rv = [Convert]::ToInt32($newHex.Substring(1,2), 16)
@@ -1869,7 +1926,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             }
             if ($typed -eq $data.OrigName -and $data.OrigName) {
                 $data.StatusLbl.Text = "[MATCHED]"; $data.StatusLbl.Foreground = Get-WpfColor "#4CAF72"
-            } elseif ($LibraryColors.Contains($typed)) {
+            } elseif ($script:LibraryColors.Contains($typed)) {
                 $data.StatusLbl.Text = "[CHANGED]"; $data.StatusLbl.Foreground = Get-WpfColor "#E8A135"
             } else {
                 $data.StatusLbl.Text = "[UNMATCHED]"; $data.StatusLbl.Foreground = Get-WpfColor "#D95F5F"
@@ -3625,8 +3682,8 @@ $script:queueTimer.Add_Tick({
                         # Verify color slots
                         foreach ($slot in $pJob.UISlots) {
                             $selectedName = $slot.Combo.Text
-                            if ($LibraryColors.Contains($selectedName)) {
-                                $verifiedHex = $LibraryColors[$selectedName]
+                            if ($script:LibraryColors.Contains($selectedName)) {
+                                $verifiedHex = $script:LibraryColors[$selectedName]
                                 $slot.SwatchBorder.Background = Get-WpfColor $verifiedHex
                                 $slot.StatusLbl.Text = "[VERIFIED]"; $slot.StatusLbl.Foreground = Get-WpfColor "#4CAF72"
                             }
@@ -3872,6 +3929,881 @@ $window.Add_Closed({
 })
 
 # ── Global workspace mode buttons (File Prep | Editing | Review) ─────────────
+# ════════════════════════════════════════════════════════════════════════════════
+#  LIBRARIES PANEL
+# ════════════════════════════════════════════════════════════════════════════════
+function Save-FilamentLibrary {
+    try {
+        $lines = [System.Collections.Generic.List[string]]::new()
+        $lines.Add("N/A,,,,,,,")
+        foreach ($kv in $script:LibraryColors.GetEnumerator()) {
+            $hex = $kv.Value  # #RRGGBBFF or #RRGGBB
+            $r = [Convert]::ToInt32($hex.Substring(1,2),16)
+            $g = [Convert]::ToInt32($hex.Substring(3,2),16)
+            $b = [Convert]::ToInt32($hex.Substring(5,2),16)
+            $lines.Add("$($kv.Key),$r,$g,$b,,,,")
+        }
+        [System.IO.File]::WriteAllLines($colorCsvPath, $lines, (New-Object System.Text.UTF8Encoding($false)))
+        # Refresh $HexToName
+        $script:HexToNameLib = @{}
+        foreach ($kv in $script:LibraryColors.GetEnumerator()) {
+            $hex9 = $kv.Value
+            $hex7 = $hex9.Substring(0,7)
+            $HexToName[$hex9] = $kv.Key; $HexToName[$hex7] = $kv.Key
+        }
+        return $true
+    } catch { return $false }
+}
+function Save-NamesLibrary {
+    try {
+        $sb = [System.Text.StringBuilder]::new()
+        [void]$sb.AppendLine("# --- Shared configuration for BambuScripts -----------------------------------")
+        [void]$sb.AppendLine("# Single source of truth for grandparent theme names and printer prefixes.")
+        [void]$sb.AppendLine("# Dot-source this file from any worker script that needs these values:")
+        [void]$sb.AppendLine("#   . (Join-Path `$PSScriptRoot `"..\libraries\NamesLibrary.ps1`")")
+        [void]$sb.AppendLine("")
+        # Themes — wrap every 6 to match original style
+        [void]$sb.AppendLine("`$script:GpThemes = @(")
+        $chunk = [System.Collections.Generic.List[string]]::new()
+        foreach ($t in $script:GpThemes) {
+            $chunk.Add("'$t'")
+            if ($chunk.Count -eq 6) {
+                [void]$sb.AppendLine("    " + ($chunk -join ', ') + ",")
+                $chunk.Clear()
+            }
+        }
+        if ($chunk.Count -gt 0) { [void]$sb.AppendLine("    " + ($chunk -join ', ')) }
+        [void]$sb.AppendLine(")")
+        [void]$sb.AppendLine("")
+        # Printer prefixes
+        [void]$sb.AppendLine("`$script:PrinterPrefixes = @(" + (($script:PrinterPrefixes | ForEach-Object{"'$_'"}) -join ', ') + ")")
+        [void]$sb.AppendLine("")
+        # Tags
+        [void]$sb.AppendLine("`$script:Tags = @(" + (($script:Tags | ForEach-Object{"'$_'"}) -join ', ') + ")")
+        [void]$sb.AppendLine("")
+        # TagLabels
+        [void]$sb.AppendLine("`$script:TagLabels = @{")
+        foreach ($kv in $script:TagLabels.GetEnumerator()) {
+            [void]$sb.AppendLine("    '$($kv.Key)'   = '$($kv.Value)'")
+        }
+        [void]$sb.AppendLine("}")
+        [System.IO.File]::WriteAllText($namesLibPath, $sb.ToString(), (New-Object System.Text.UTF8Encoding($false)))
+        return $true
+    } catch { return $false }
+}
+
+# ── Script-scope nav state (used by Set-NavSection after Build-LibrariesPanel returns) ──
+$script:LibNavState  = @{ NavSecs = $null; NavBtns = $null }
+$script:TagEditState = @{ TagBox = $null; LblBox = $null; SelectedTag = ""; AddBtn = $null; DirtyTags = @{} }
+
+function Set-NavSection([string]$name) {
+    $navSecs = $script:LibNavState.NavSecs; $navBtns = $script:LibNavState.NavBtns
+    if ($null -eq $navSecs -or $null -eq $navBtns) { return }
+    foreach ($kv in $navSecs.GetEnumerator()) { $kv.Value.Visibility = if ($kv.Key -eq $name) { "Visible" } else { "Collapsed" } }
+    foreach ($kv in $navBtns.GetEnumerator()) {
+        $kv.Value.Background = if ($kv.Key -eq $name) { Get-WpfColor "#252630" } else { Get-WpfColor "#1C1D23" }
+        $kv.Value.Foreground = if ($kv.Key -eq $name) { Get-WpfColor "#FFFFFF" } else { Get-WpfColor "#C0C4D0" }
+    }
+}
+
+function Update-PickerFromHsv($st) {
+    if ($st.Updating) { return }; $st.Updating = $true
+    try {
+        $rgb = Hsv-To-Rgb $st.H $st.S $st.V
+        $r = $rgb[0]; $g = $rgb[1]; $b = $rgb[2]
+        $hex6 = "#{0:X2}{1:X2}{2:X2}" -f $r,$g,$b
+        $st.Swatch.Background = Get-WpfColor $hex6
+        $st.RBox.Text = $r; $st.GBox.Text = $g; $st.BBox.Text = $b
+        $st.HexBox.Text = $hex6
+        # Hue bar indicator
+        $hw = $st.HueCanvas.ActualWidth
+        if ($hw -gt 0) {
+            $hx = $st.H / 360.0 * $hw - 2
+            [System.Windows.Controls.Canvas]::SetLeft($st.HueIndicator, [Math]::Max(0,$hx))
+            $st.HueIndicator.Height = $st.HueCanvas.ActualHeight
+        }
+        # SV square hue stop
+        $pRgb = Hsv-To-Rgb $st.H 1.0 1.0
+        $st.SvHueStop.Color = [System.Windows.Media.Color]::FromRgb($pRgb[0],$pRgb[1],$pRgb[2])
+        # SV indicator + ensure rects are sized (SizeChanged may not have fired yet)
+        $sw = $st.SvCanvas.ActualWidth; $sh = $st.SvCanvas.ActualHeight
+        if ($sw -gt 0 -and $sh -gt 0) {
+            if ($null -ne $st.SvColorRect -and ($st.SvColorRect.Width -ne $sw -or $st.SvColorRect.Height -ne $sh)) {
+                $st.SvColorRect.Width = $sw; $st.SvColorRect.Height = $sh
+            }
+            if ($null -ne $st.SvDarkRect -and ($st.SvDarkRect.Width -ne $sw -or $st.SvDarkRect.Height -ne $sh)) {
+                $st.SvDarkRect.Width = $sw; $st.SvDarkRect.Height = $sh
+            }
+            [System.Windows.Controls.Canvas]::SetLeft($st.SvDot, $st.S * $sw - 6)
+            [System.Windows.Controls.Canvas]::SetTop($st.SvDot,  (1-$st.V) * $sh - 6)
+        }
+    } finally { $st.Updating = $false }
+}
+
+function Update-PickerFromRgb($st) {
+    $rV=0;$gV=0;$bV=0
+    [int]::TryParse($st.RBox.Text,[ref]$rV)|Out-Null
+    [int]::TryParse($st.GBox.Text,[ref]$gV)|Out-Null
+    [int]::TryParse($st.BBox.Text,[ref]$bV)|Out-Null
+    $rV=[Math]::Max(0,[Math]::Min(255,$rV)); $gV=[Math]::Max(0,[Math]::Min(255,$gV)); $bV=[Math]::Max(0,[Math]::Min(255,$bV))
+    $hsv = Rgb-To-Hsv $rV $gV $bV
+    $st.H=$hsv[0]; $st.S=$hsv[1]; $st.V=$hsv[2]
+    Update-PickerFromHsv $st
+}
+
+function Load-FilamentEntry([string]$entryName, $st) {
+    $hex9 = $script:LibraryColors[$entryName]
+    if (-not $hex9) { return }
+    $r=[Convert]::ToInt32($hex9.Substring(1,2),16)
+    $g=[Convert]::ToInt32($hex9.Substring(3,2),16)
+    $b=[Convert]::ToInt32($hex9.Substring(5,2),16)
+    $st.NameBox.Text = $entryName; $st.EditingName = $entryName
+    # Suppress TextChanged cascade while batch-setting all three boxes
+    $st.Updating = $true
+    $st.RBox.Text = "$r"; $st.GBox.Text = "$g"; $st.BBox.Text = "$b"
+    $st.Updating = $false
+    Update-PickerFromRgb $st   # single clean update with all three values present
+    $st.StatusLbl.Text = "Loaded: $entryName"; $st.StatusLbl.Foreground = Get-WpfColor "#555868"
+}
+
+function Rebuild-FilamentList($st) {
+    $st.FilamentStack.Children.Clear()
+    foreach ($kv in $script:LibraryColors.GetEnumerator()) {
+        $eName = $kv.Key; $eHex = $kv.Value
+        $row = New-Object System.Windows.Controls.Border
+        $row.Padding = New-Object System.Windows.Thickness(8,5,8,5)
+        $row.BorderBrush = Get-WpfColor "#23242E"; $row.BorderThickness = New-Object System.Windows.Thickness(0,0,0,1)
+        $row.Cursor = [System.Windows.Input.Cursors]::Hand
+        $row.Background = Get-WpfColor "#0D0E10"
+
+        $rowStack = New-Object System.Windows.Controls.StackPanel; $rowStack.Orientation = "Horizontal"
+        $swatch = New-Object System.Windows.Controls.Border
+        $swatch.Width = 18; $swatch.Height = 18; $swatch.CornerRadius = New-Object System.Windows.CornerRadius(3)
+        $swatch.Background = Get-WpfColor ($eHex.Substring(0,7))
+        $swatch.Margin = New-Object System.Windows.Thickness(0,0,8,0); $swatch.VerticalAlignment = "Center"
+        $rowStack.Children.Add($swatch) | Out-Null
+        $nameTb = New-Object System.Windows.Controls.TextBlock; $nameTb.Text = $eName
+        $nameTb.Foreground = Get-WpfColor "#C0C4D0"; $nameTb.FontSize = 11; $nameTb.VerticalAlignment = "Center"
+        $rowStack.Children.Add($nameTb) | Out-Null
+        $row.Child = $rowStack
+
+        $capturedName = $eName; $capturedState = $st
+        $row.Add_MouseEnter({ $this.Background = Get-WpfColor "#1A1C24" })
+        $row.Add_MouseLeave({ $this.Background = Get-WpfColor "#0D0E10" })
+        $row.Add_MouseLeftButtonDown({
+            Load-FilamentEntry $capturedName $capturedState
+        }.GetNewClosure())
+        $st.FilamentStack.Children.Add($row) | Out-Null
+    }
+}
+
+function Rebuild-TagsList($stack) {
+    # Remove all rows except the header (index 0)
+    while ($stack.Children.Count -gt 1) { $stack.Children.RemoveAt(1) }
+    # Capture $script: variables as locals — $script: scope is NOT reliably accessible
+    # inside .GetNewClosure() closures running on the WPF dispatcher thread.
+    $tes       = $script:TagEditState
+    $tagLabels = $script:TagLabels
+    foreach ($tag in $script:Tags) {
+        $lbl = if ($tagLabels.ContainsKey($tag)) { $tagLabels[$tag] } else { "" }
+        $row = New-Object System.Windows.Controls.Grid; $row.Margin = New-Object System.Windows.Thickness(0,1,0,1)
+        $row.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = [System.Windows.GridLength]::new(80) })) | Out-Null
+        $row.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition)) | Out-Null
+        $isDirty = $tes.DirtyTags.ContainsKey($tag)
+        $fgTag = if ($isDirty) { Get-WpfColor "#E8903A" } else { Get-WpfColor "#E0E3EC" }
+        $fgLbl = if ($isDirty) { Get-WpfColor "#C07030" } else { Get-WpfColor "#C0C4D0" }
+        $tbTag = New-Object System.Windows.Controls.TextBlock; $tbTag.Text=$tag; $tbTag.Foreground=$fgTag; $tbTag.FontSize=12; $tbTag.VerticalAlignment="Center"; [System.Windows.Controls.Grid]::SetColumn($tbTag,0)
+        $tbLbl = New-Object System.Windows.Controls.TextBlock; $tbLbl.Text=$lbl; $tbLbl.Foreground=$fgLbl; $tbLbl.FontSize=12; $tbLbl.VerticalAlignment="Center"; [System.Windows.Controls.Grid]::SetColumn($tbLbl,1)
+        $row.Children.Add($tbTag)|Out-Null; $row.Children.Add($tbLbl)|Out-Null
+        $row.Cursor = [System.Windows.Input.Cursors]::Hand
+        # Capture loop variables and stack explicitly — never rely on $this.Tag inside closures
+        $capturedTag   = $tag
+        $capturedStack = $stack
+        $capturedRow   = $row
+        $row.Add_MouseEnter({
+            if ($capturedTag -ne $tes.SelectedTag) { $capturedRow.Background = Get-WpfColor "#252630" }
+        }.GetNewClosure())
+        $row.Add_MouseLeave({
+            if ($capturedTag -ne $tes.SelectedTag) { $capturedRow.Background = $null }
+        }.GetNewClosure())
+        $row.Add_MouseLeftButtonDown({
+            # Clear selection highlight on all sibling rows
+            foreach ($sib in $capturedStack.Children) {
+                if ($sib -is [System.Windows.FrameworkElement] -and $null -ne $sib.Tag -and
+                    $sib.Tag -is [string] -and $sib.Tag -ne "header") {
+                    $sib.Background = $null
+                }
+            }
+            $capturedRow.Background = Get-WpfColor "#2A3A5A"
+            $tes.SelectedTag = $capturedTag
+            if ($null -ne $tes.TagBox) {
+                $tes.TagBox.Text = $capturedTag
+                $tes.LblBox.Text = if ($tagLabels.ContainsKey($capturedTag)) { $tagLabels[$capturedTag] } else { "" }
+            }
+            if ($null -ne $tes.AddBtn) { $tes.AddBtn.Content = "Edit" }
+        }.GetNewClosure())
+        # Use a simple string tag so sibling-clear loop works without hashtable method calls
+        $row.Tag = $capturedTag
+        $stack.Children.Add($row) | Out-Null
+    }
+}
+
+function Build-LibrariesPanel {
+    # ── Root panel: overlaps the ScrollViewer in Grid Row 1 ───────────────────
+    $outerGrid = $window.Content
+    $root = New-Object System.Windows.Controls.Grid
+    $root.Background = Get-WpfColor "#0D0E10"
+    $root.Visibility = "Collapsed"
+    [System.Windows.Controls.Grid]::SetRow($root, 1)
+    $outerGrid.Children.Add($root) | Out-Null
+
+    $root.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = [System.Windows.GridLength]::new(170) })) | Out-Null
+    $root.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition)) | Out-Null
+
+    # ── Left nav sidebar ──────────────────────────────────────────────────────
+    $sidebar = New-Object System.Windows.Controls.Border
+    $sidebar.Background = Get-WpfColor "#1C1D23"
+    $sidebar.BorderBrush = Get-WpfColor "#2A2C38"; $sidebar.BorderThickness = New-Object System.Windows.Thickness(0,0,1,0)
+    [System.Windows.Controls.Grid]::SetColumn($sidebar, 0)
+    $root.Children.Add($sidebar) | Out-Null
+
+    $sideStack = New-Object System.Windows.Controls.StackPanel
+    $sideStack.Margin = New-Object System.Windows.Thickness(0,12,0,0)
+    $sidebar.Child = $sideStack
+
+    $libHdr = New-Object System.Windows.Controls.TextBlock
+    $libHdr.Text = "LIBRARIES"; $libHdr.FontSize = 10; $libHdr.FontWeight = [System.Windows.FontWeights]::Bold
+    $libHdr.Foreground = Get-WpfColor "#555868"; $libHdr.Margin = New-Object System.Windows.Thickness(14,0,0,10)
+    $sideStack.Children.Add($libHdr) | Out-Null
+
+    function New-NavBtn([string]$label) {
+        $b = New-Object System.Windows.Controls.Button
+        $b.Content = $label; $b.Height = 34; $b.FontSize = 12
+        $b.Background = Get-WpfColor "#1C1D23"; $b.Foreground = Get-WpfColor "#C0C4D0"
+        $b.BorderThickness = 0; $b.Cursor = [System.Windows.Input.Cursors]::Hand
+        $b.HorizontalContentAlignment = "Left"
+        $b.Padding = New-Object System.Windows.Thickness(14,0,0,0)
+        return $b
+    }
+    $btnNavFilaments = New-NavBtn "Filaments"
+    $btnNavNaming    = New-NavBtn "Naming Conventions"
+    $sideStack.Children.Add($btnNavFilaments) | Out-Null
+    $sideStack.Children.Add($btnNavNaming)    | Out-Null
+
+    # ── Content area ──────────────────────────────────────────────────────────
+    $contentGrid = New-Object System.Windows.Controls.Grid
+    [System.Windows.Controls.Grid]::SetColumn($contentGrid, 1)
+    $root.Children.Add($contentGrid) | Out-Null
+
+    # Two overlapping section panels — show one at a time
+    $secFilaments = New-Object System.Windows.Controls.Grid; $secFilaments.Background = Get-WpfColor "#0D0E10"; $secFilaments.Visibility = "Visible"
+    $secNaming    = New-Object System.Windows.Controls.Grid; $secNaming.Background    = Get-WpfColor "#0D0E10"; $secNaming.Visibility    = "Collapsed"
+    $contentGrid.Children.Add($secFilaments) | Out-Null
+    $contentGrid.Children.Add($secNaming)    | Out-Null
+
+    # Nav button click logic — populate script-scope LibNavState so Set-NavSection works after this function returns
+    $navBtns = @{ Filaments=$btnNavFilaments; "Naming Conventions"=$btnNavNaming }
+    $navSecs = @{ Filaments=$secFilaments;    "Naming Conventions"=$secNaming }
+    $script:LibNavState.NavBtns = $navBtns
+    $script:LibNavState.NavSecs = $navSecs
+    Set-NavSection "Filaments"
+    $btnNavFilaments.Add_Click({ Set-NavSection "Filaments"           })
+    $btnNavNaming.Add_Click({    Set-NavSection "Naming Conventions"  })
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  FILAMENTS SECTION
+    # ══════════════════════════════════════════════════════════════════════════
+    $secFilaments.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = [System.Windows.GridLength]::new(260) })) | Out-Null
+    $secFilaments.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition)) | Out-Null
+
+    # ── Filament list (left) ──────────────────────────────────────────────────
+    $listBorder = New-Object System.Windows.Controls.Border
+    $listBorder.BorderBrush = Get-WpfColor "#2A2C38"; $listBorder.BorderThickness = New-Object System.Windows.Thickness(0,0,1,0)
+    [System.Windows.Controls.Grid]::SetColumn($listBorder, 0)
+    $secFilaments.Children.Add($listBorder) | Out-Null
+
+    $listDock = New-Object System.Windows.Controls.DockPanel
+    $listBorder.Child = $listDock
+
+    # Bottom: Add New button
+    $listFooter = New-Object System.Windows.Controls.Border
+    $listFooter.Background = Get-WpfColor "#1C1D23"; $listFooter.BorderBrush = Get-WpfColor "#2A2C38"
+    $listFooter.BorderThickness = New-Object System.Windows.Thickness(0,1,0,0); $listFooter.Padding = New-Object System.Windows.Thickness(8,6,8,6)
+    [System.Windows.Controls.DockPanel]::SetDock($listFooter, "Bottom")
+    $listDock.Children.Add($listFooter) | Out-Null
+
+    $btnAddNew = New-Object System.Windows.Controls.Button
+    $btnAddNew.Content = "+ Add New Filament"; $btnAddNew.Height = 28; $btnAddNew.FontSize = 11
+    $btnAddNew.Background = Get-WpfColor "#2E5A42"; $btnAddNew.Foreground = Get-WpfColor "#FFFFFF"
+    $btnAddNew.BorderThickness = 0; $btnAddNew.Cursor = [System.Windows.Input.Cursors]::Hand
+    $listFooter.Child = $btnAddNew
+
+    $listScroll = New-Object System.Windows.Controls.ScrollViewer
+    $listScroll.VerticalScrollBarVisibility = "Auto"
+    $listScroll.HorizontalScrollBarVisibility = "Disabled"
+    $listDock.Children.Add($listScroll) | Out-Null
+
+    $filamentStack = New-Object System.Windows.Controls.StackPanel
+    $listScroll.Content = $filamentStack
+
+    # ── Edit panel (right) ────────────────────────────────────────────────────
+    $editScroll = New-Object System.Windows.Controls.ScrollViewer
+    $editScroll.VerticalScrollBarVisibility = "Auto"; $editScroll.HorizontalScrollBarVisibility = "Disabled"
+    $editScroll.Padding = New-Object System.Windows.Thickness(20,16,20,20)
+    [System.Windows.Controls.Grid]::SetColumn($editScroll, 1)
+    $secFilaments.Children.Add($editScroll) | Out-Null
+
+    $editStack = New-Object System.Windows.Controls.StackPanel
+    $editScroll.Content = $editStack
+
+    $editHdr = New-Object System.Windows.Controls.TextBlock
+    $editHdr.Text = "Edit Filament"; $editHdr.FontSize = 14; $editHdr.FontWeight = [System.Windows.FontWeights]::Bold
+    $editHdr.Foreground = Get-WpfColor "#C8CFDD"; $editHdr.Margin = New-Object System.Windows.Thickness(0,0,0,14)
+    $editStack.Children.Add($editHdr) | Out-Null
+
+    # Name field
+    $nameLbl = New-Object System.Windows.Controls.TextBlock; $nameLbl.Text = "Name"
+    $nameLbl.Foreground = Get-WpfColor "#888A9A"; $nameLbl.FontSize = 11; $nameLbl.Margin = New-Object System.Windows.Thickness(0,0,0,4)
+    $editStack.Children.Add($nameLbl) | Out-Null
+    $tbName = New-Object System.Windows.Controls.TextBox; $tbName.Height = 28; $tbName.FontSize = 12
+    $tbName.Background = Get-WpfColor "#1C1D23"; $tbName.Foreground = Get-WpfColor "#E0E3EC"
+    $tbName.BorderBrush = Get-WpfColor "#3A3C4A"; $tbName.BorderThickness = New-Object System.Windows.Thickness(1)
+    $tbName.Padding = New-Object System.Windows.Thickness(6,0,6,0); $tbName.Margin = New-Object System.Windows.Thickness(0,0,0,14)
+    $editStack.Children.Add($tbName) | Out-Null
+
+    # Color swatch
+    $swatchBorder = New-Object System.Windows.Controls.Border
+    $swatchBorder.Height = 48; $swatchBorder.CornerRadius = New-Object System.Windows.CornerRadius(4)
+    $swatchBorder.Background = Get-WpfColor "#FF0000"; $swatchBorder.Margin = New-Object System.Windows.Thickness(0,0,0,14)
+    $editStack.Children.Add($swatchBorder) | Out-Null
+
+    # Hue bar  ── rainbow gradient Canvas + indicator
+    $hueLbl = New-Object System.Windows.Controls.TextBlock; $hueLbl.Text = "Hue"
+    $hueLbl.Foreground = Get-WpfColor "#888A9A"; $hueLbl.FontSize = 11; $hueLbl.Margin = New-Object System.Windows.Thickness(0,0,0,4)
+    $editStack.Children.Add($hueLbl) | Out-Null
+
+    $hueOuter = New-Object System.Windows.Controls.Border
+    $hueOuter.Height = 24; $hueOuter.CornerRadius = New-Object System.Windows.CornerRadius(4)
+    $hueOuter.Margin = New-Object System.Windows.Thickness(0,0,0,10); $hueOuter.ClipToBounds = $true
+    $editStack.Children.Add($hueOuter) | Out-Null
+
+    $hueCanvas = New-Object System.Windows.Controls.Canvas
+    $hueOuter.Child = $hueCanvas
+
+    $hueBrush = New-Object System.Windows.Media.LinearGradientBrush
+    $hueBrush.StartPoint = [System.Windows.Point]::new(0,0.5); $hueBrush.EndPoint = [System.Windows.Point]::new(1,0.5)
+    foreach ($pair in @(@(0,"#FF0000"),@(0.167,"#FFFF00"),@(0.333,"#00FF00"),@(0.5,"#00FFFF"),@(0.667,"#0000FF"),@(0.833,"#FF00FF"),@(1,"#FF0000"))) {
+        $gs = New-Object System.Windows.Media.GradientStop
+        $gs.Color  = [System.Windows.Media.ColorConverter]::ConvertFromString($pair[1])
+        $gs.Offset = $pair[0]
+        $hueBrush.GradientStops.Add($gs) | Out-Null
+    }
+    $hueRect = New-Object System.Windows.Shapes.Rectangle
+    $hueRect.Fill = $hueBrush; $hueRect.Height = 24
+    [System.Windows.Controls.Canvas]::SetLeft($hueRect, 0); [System.Windows.Controls.Canvas]::SetTop($hueRect, 0)
+    $hueCanvas.Children.Add($hueRect) | Out-Null
+
+    # Hue position indicator (thin white rect with dark border)
+    $hueInd = New-Object System.Windows.Controls.Border
+    $hueInd.Width = 4; $hueInd.Background = Get-WpfColor "#FFFFFF"
+    $hueInd.BorderBrush = Get-WpfColor "#000000"; $hueInd.BorderThickness = New-Object System.Windows.Thickness(1)
+    [System.Windows.Controls.Canvas]::SetTop($hueInd, 0)
+    $hueCanvas.Children.Add($hueInd) | Out-Null
+
+    # Hue canvas needs to stretch — bind Width via SizeChanged and Loaded
+    $sizeHueRect = { if ($hueCanvas.ActualWidth -gt 0) { $hueRect.Width = $hueCanvas.ActualWidth } }.GetNewClosure()
+    $hueCanvas.Add_SizeChanged($sizeHueRect)
+    $hueCanvas.Add_Loaded($sizeHueRect)
+
+    # SV (saturation/value) square
+    $svLbl = New-Object System.Windows.Controls.TextBlock; $svLbl.Text = "Saturation / Brightness"
+    $svLbl.Foreground = Get-WpfColor "#888A9A"; $svLbl.FontSize = 11; $svLbl.Margin = New-Object System.Windows.Thickness(0,0,0,4)
+    $editStack.Children.Add($svLbl) | Out-Null
+
+    $svOuter = New-Object System.Windows.Controls.Border
+    $svOuter.Height = 200; $svOuter.CornerRadius = New-Object System.Windows.CornerRadius(4)
+    $svOuter.Margin = New-Object System.Windows.Thickness(0,0,0,14); $svOuter.ClipToBounds = $true
+    $editStack.Children.Add($svOuter) | Out-Null
+
+    $svCanvas = New-Object System.Windows.Controls.Canvas
+    $svOuter.Child = $svCanvas
+
+    # Layer 1: horizontal white→hue gradient
+    $svHueBrush = New-Object System.Windows.Media.LinearGradientBrush
+    $svHueBrush.StartPoint = [System.Windows.Point]::new(0,0.5); $svHueBrush.EndPoint = [System.Windows.Point]::new(1,0.5)
+    $svStopWhite = New-Object System.Windows.Media.GradientStop; $svStopWhite.Color = [System.Windows.Media.Colors]::White; $svStopWhite.Offset = 0
+    $svStopHue   = New-Object System.Windows.Media.GradientStop; $svStopHue.Color   = [System.Windows.Media.Colors]::Red;   $svStopHue.Offset   = 1
+    $svHueBrush.GradientStops.Add($svStopWhite) | Out-Null; $svHueBrush.GradientStops.Add($svStopHue) | Out-Null
+    $svColorRect = New-Object System.Windows.Shapes.Rectangle; $svColorRect.Fill = $svHueBrush
+    [System.Windows.Controls.Canvas]::SetLeft($svColorRect,0); [System.Windows.Controls.Canvas]::SetTop($svColorRect,0)
+    $svCanvas.Children.Add($svColorRect) | Out-Null
+
+    # Layer 2: vertical transparent→black gradient
+    $svDarkBrush = New-Object System.Windows.Media.LinearGradientBrush
+    $svDarkBrush.StartPoint = [System.Windows.Point]::new(0.5,0); $svDarkBrush.EndPoint = [System.Windows.Point]::new(0.5,1)
+    $svStopTrans = New-Object System.Windows.Media.GradientStop; $svStopTrans.Color = [System.Windows.Media.Color]::FromArgb(0,0,0,0); $svStopTrans.Offset = 0
+    $svStopBlack = New-Object System.Windows.Media.GradientStop; $svStopBlack.Color = [System.Windows.Media.Colors]::Black; $svStopBlack.Offset = 1
+    $svDarkBrush.GradientStops.Add($svStopTrans) | Out-Null; $svDarkBrush.GradientStops.Add($svStopBlack) | Out-Null
+    $svDarkRect = New-Object System.Windows.Shapes.Rectangle; $svDarkRect.Fill = $svDarkBrush
+    [System.Windows.Controls.Canvas]::SetLeft($svDarkRect,0); [System.Windows.Controls.Canvas]::SetTop($svDarkRect,0)
+    $svCanvas.Children.Add($svDarkRect) | Out-Null
+
+    # Crosshair indicator
+    $svDot = New-Object System.Windows.Shapes.Ellipse
+    $svDot.Width = 12; $svDot.Height = 12
+    $svDot.Stroke = Get-WpfColor "#FFFFFF"; $svDot.StrokeThickness = 2
+    $svDot.Fill = [System.Windows.Media.Brushes]::Transparent
+    $svDot.IsHitTestVisible = $false
+    $svCanvas.Children.Add($svDot) | Out-Null
+
+    # Size the gradient rects whenever the canvas renders or resizes
+    $sizeSvRects = {
+        $w = $svCanvas.ActualWidth; $h = $svCanvas.ActualHeight
+        if ($w -gt 0 -and $h -gt 0) {
+            $svColorRect.Width = $w; $svColorRect.Height = $h
+            $svDarkRect.Width  = $w; $svDarkRect.Height  = $h
+        }
+    }.GetNewClosure()
+    $svCanvas.Add_SizeChanged($sizeSvRects)
+    $svCanvas.Add_Loaded($sizeSvRects)
+
+    # RGB boxes
+    $rgbLbl = New-Object System.Windows.Controls.TextBlock; $rgbLbl.Text = "R / G / B  (0-255)"
+    $rgbLbl.Foreground = Get-WpfColor "#888A9A"; $rgbLbl.FontSize = 11; $rgbLbl.Margin = New-Object System.Windows.Thickness(0,0,0,4)
+    $editStack.Children.Add($rgbLbl) | Out-Null
+
+    $rgbGrid = New-Object System.Windows.Controls.Grid; $rgbGrid.Margin = New-Object System.Windows.Thickness(0,0,0,10)
+    foreach ($w in @(4,1,4,1,4)) { $rgbGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = if($w-eq 1){[System.Windows.GridLength]::new(8)}else{[System.Windows.GridLength]::new(1,[System.Windows.GridUnitType]::Star)} })) | Out-Null }
+    $editStack.Children.Add($rgbGrid) | Out-Null
+
+    function New-RgbBox {
+        $tb = New-Object System.Windows.Controls.TextBox; $tb.Height = 30; $tb.FontSize = 13; $tb.TextAlignment = "Center"
+        $tb.Background = Get-WpfColor "#1C1D23"; $tb.Foreground = Get-WpfColor "#E0E3EC"
+        $tb.BorderBrush = Get-WpfColor "#3A3C4A"; $tb.BorderThickness = New-Object System.Windows.Thickness(1)
+        return $tb
+    }
+    $tbR = New-RgbBox; $tbG = New-RgbBox; $tbB = New-RgbBox
+    [System.Windows.Controls.Grid]::SetColumn($tbR,0); [System.Windows.Controls.Grid]::SetColumn($tbG,2); [System.Windows.Controls.Grid]::SetColumn($tbB,4)
+    $rgbGrid.Children.Add($tbR) | Out-Null; $rgbGrid.Children.Add($tbG) | Out-Null; $rgbGrid.Children.Add($tbB) | Out-Null
+
+    $hexLbl = New-Object System.Windows.Controls.TextBlock; $hexLbl.Text = "Hex"
+    $hexLbl.Foreground = Get-WpfColor "#888A9A"; $hexLbl.FontSize = 11; $hexLbl.Margin = New-Object System.Windows.Thickness(0,0,0,4)
+    $editStack.Children.Add($hexLbl) | Out-Null
+    $tbHex = New-Object System.Windows.Controls.TextBox; $tbHex.Height = 28; $tbHex.FontSize = 12
+    $tbHex.Background = Get-WpfColor "#1C1D23"; $tbHex.Foreground = Get-WpfColor "#888A9A"
+    $tbHex.BorderBrush = Get-WpfColor "#2A2C38"; $tbHex.BorderThickness = New-Object System.Windows.Thickness(1)
+    $tbHex.Padding = New-Object System.Windows.Thickness(6,0,6,0); $tbHex.IsReadOnly = $true
+    $tbHex.Margin = New-Object System.Windows.Thickness(0,0,0,18)
+    $editStack.Children.Add($tbHex) | Out-Null
+
+    # Save / Delete buttons
+    $saveBtnGrid = New-Object System.Windows.Controls.Grid; $saveBtnGrid.Margin = New-Object System.Windows.Thickness(0,0,0,8)
+    $saveBtnGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition)) | Out-Null
+    $saveBtnGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = [System.Windows.GridLength]::new(10) })) | Out-Null
+    $saveBtnGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition)) | Out-Null
+    $editStack.Children.Add($saveBtnGrid) | Out-Null
+
+    $btnSaveFilament = New-Object System.Windows.Controls.Button; $btnSaveFilament.Content = "Save / Update"
+    $btnSaveFilament.Height = 32; $btnSaveFilament.FontSize = 12; $btnSaveFilament.FontWeight = [System.Windows.FontWeights]::Bold
+    $btnSaveFilament.Background = Get-WpfColor "#3A5080"; $btnSaveFilament.Foreground = Get-WpfColor "#FFFFFF"
+    $btnSaveFilament.BorderThickness = 0; $btnSaveFilament.Cursor = [System.Windows.Input.Cursors]::Hand
+    [System.Windows.Controls.Grid]::SetColumn($btnSaveFilament, 0); $saveBtnGrid.Children.Add($btnSaveFilament) | Out-Null
+
+    $btnDelFilament = New-Object System.Windows.Controls.Button; $btnDelFilament.Content = "Delete"
+    $btnDelFilament.Height = 32; $btnDelFilament.FontSize = 12
+    $btnDelFilament.Background = Get-WpfColor "#6B2828"; $btnDelFilament.Foreground = Get-WpfColor "#FFFFFF"
+    $btnDelFilament.BorderThickness = 0; $btnDelFilament.Cursor = [System.Windows.Input.Cursors]::Hand
+    [System.Windows.Controls.Grid]::SetColumn($btnDelFilament, 2); $saveBtnGrid.Children.Add($btnDelFilament) | Out-Null
+
+    $libStatusLbl = New-Object System.Windows.Controls.TextBlock
+    $libStatusLbl.FontSize = 11; $libStatusLbl.Foreground = Get-WpfColor "#555868"
+    $libStatusLbl.Margin = New-Object System.Windows.Thickness(0,4,0,0)
+    $editStack.Children.Add($libStatusLbl) | Out-Null
+
+    # ── Shared picker state ───────────────────────────────────────────────────
+    $pickerState = @{
+        H = 0.0; S = 1.0; V = 1.0
+        Updating = $false
+        EditingName = ""     # name of the entry currently loaded ("" = new)
+        HueCanvas = $hueCanvas; HueIndicator = $hueInd
+        SvCanvas  = $svCanvas;  SvDot = $svDot; SvHueStop = $svStopHue
+        SvColorRect = $svColorRect; SvDarkRect = $svDarkRect
+        Swatch    = $swatchBorder
+        RBox = $tbR; GBox = $tbG; BBox = $tbB; HexBox = $tbHex
+        NameBox = $tbName
+        FilamentStack = $filamentStack
+        StatusLbl = $libStatusLbl
+        SaveBtn = $btnSaveFilament; DelBtn = $btnDelFilament
+    }
+
+    # ── Hue canvas mouse events ───────────────────────────────────────────────
+    # Use captured $pickerState directly — $this.Tag retrieval via WPF DependencyProperty
+    # is unreliable inside .GetNewClosure() closures on the WPF dispatcher thread.
+    $hueCanvas.Add_MouseLeftButtonDown({
+        $this.CaptureMouse()
+        $w = $this.ActualWidth; if ($w -le 0) { return }
+        $pickerState.H = [Math]::Max(0,[Math]::Min(359.9, $_.GetPosition($this).X / $w * 360))
+        Update-PickerFromHsv $pickerState
+    }.GetNewClosure())
+    $hueCanvas.Add_MouseMove({
+        if (-not $this.IsMouseCaptured) { return }
+        $w = $this.ActualWidth; if ($w -le 0) { return }
+        $pickerState.H = [Math]::Max(0,[Math]::Min(359.9, $_.GetPosition($this).X / $w * 360))
+        Update-PickerFromHsv $pickerState
+    }.GetNewClosure())
+    $hueCanvas.Add_MouseLeftButtonUp({ $this.ReleaseMouseCapture() })
+
+    # ── SV canvas mouse events ────────────────────────────────────────────────
+    $svCanvas.Add_MouseLeftButtonDown({
+        $this.CaptureMouse()
+        $w = $this.ActualWidth; $h = $this.ActualHeight; if ($w -le 0 -or $h -le 0) { return }
+        $p = $_.GetPosition($this)
+        $pickerState.S = [Math]::Max(0,[Math]::Min(1, $p.X / $w))
+        $pickerState.V = [Math]::Max(0,[Math]::Min(1, 1 - $p.Y / $h))
+        Update-PickerFromHsv $pickerState
+    }.GetNewClosure())
+    $svCanvas.Add_MouseMove({
+        if (-not $this.IsMouseCaptured) { return }
+        $w = $this.ActualWidth; $h = $this.ActualHeight; if ($w -le 0 -or $h -le 0) { return }
+        $p = $_.GetPosition($this)
+        $pickerState.S = [Math]::Max(0,[Math]::Min(1, $p.X / $w))
+        $pickerState.V = [Math]::Max(0,[Math]::Min(1, 1 - $p.Y / $h))
+        Update-PickerFromHsv $pickerState
+    }.GetNewClosure())
+    $svCanvas.Add_MouseLeftButtonUp({ $this.ReleaseMouseCapture() })
+
+    # ── RGB box TextChanged ───────────────────────────────────────────────────
+    foreach ($box in @($tbR,$tbG,$tbB)) {
+        $box.Add_TextChanged({
+            if ($pickerState.Updating) { return }
+            Update-PickerFromRgb $pickerState
+        }.GetNewClosure())
+    }
+
+    # ── Save / Update ─────────────────────────────────────────────────────────
+    $btnSaveFilament.Add_Click({
+        $nm = $pickerState.NameBox.Text.Trim()
+        if ([string]::IsNullOrWhiteSpace($nm)) { $pickerState.StatusLbl.Text = "Name required."; return }
+        $rV=0;$gV=0;$bV=0
+        [int]::TryParse($pickerState.RBox.Text,[ref]$rV)|Out-Null
+        [int]::TryParse($pickerState.GBox.Text,[ref]$gV)|Out-Null
+        [int]::TryParse($pickerState.BBox.Text,[ref]$bV)|Out-Null
+        $rV=[Math]::Max(0,[Math]::Min(255,$rV));$gV=[Math]::Max(0,[Math]::Min(255,$gV));$bV=[Math]::Max(0,[Math]::Min(255,$bV))
+        $hex9 = "#{0:X2}{1:X2}{2:X2}FF" -f $rV,$gV,$bV
+        if ($pickerState.EditingName -and $pickerState.EditingName -ne $nm -and $script:LibraryColors.Contains($pickerState.EditingName)) {
+            $script:LibraryColors.Remove($pickerState.EditingName) | Out-Null
+            $HexToName.Remove($script:LibraryColors[$pickerState.EditingName]) | Out-Null
+        }
+        $script:LibraryColors[$nm] = $hex9; $HexToName[$hex9] = $nm; $HexToName[$hex9.Substring(0,7)] = $nm
+        $pickerState.EditingName = $nm
+        if (Save-FilamentLibrary) {
+            $pickerState.StatusLbl.Text = "Saved."; $pickerState.StatusLbl.Foreground = Get-WpfColor "#4CAF72"
+        } else {
+            $pickerState.StatusLbl.Text = "Save failed!"; $pickerState.StatusLbl.Foreground = Get-WpfColor "#D95F5F"
+        }
+        Rebuild-FilamentList $pickerState
+    }.GetNewClosure())
+
+    # ── Delete ────────────────────────────────────────────────────────────────
+    $btnDelFilament.Add_Click({
+        $nm = $pickerState.EditingName
+        if ([string]::IsNullOrWhiteSpace($nm) -or -not $script:LibraryColors.Contains($nm)) {
+            $pickerState.StatusLbl.Text = "Nothing selected to delete."; return
+        }
+        $script:LibraryColors.Remove($nm) | Out-Null
+        if (Save-FilamentLibrary) {
+            $pickerState.EditingName = ""; $pickerState.NameBox.Text = ""
+            $pickerState.RBox.Text="0"; $pickerState.GBox.Text="0"; $pickerState.BBox.Text="0"
+            $pickerState.StatusLbl.Text = "Deleted: $nm"; $pickerState.StatusLbl.Foreground = Get-WpfColor "#E8A135"
+        } else {
+            $pickerState.StatusLbl.Text = "Delete (save) failed!"; $pickerState.StatusLbl.Foreground = Get-WpfColor "#D95F5F"
+        }
+        Rebuild-FilamentList $pickerState
+    }.GetNewClosure())
+
+    # ── Add New button ────────────────────────────────────────────────────────
+    $btnAddNew.Add_Click({
+        $pickerState.EditingName = ""
+        $pickerState.NameBox.Text = "New Filament"
+        $pickerState.RBox.Text="128"; $pickerState.GBox.Text="128"; $pickerState.BBox.Text="128"
+        Update-PickerFromRgb $pickerState
+        $pickerState.StatusLbl.Text = "New entry - fill in name and color then Save."
+        $pickerState.StatusLbl.Foreground = Get-WpfColor "#888A9A"
+    }.GetNewClosure())
+
+    # Initial list build
+    Rebuild-FilamentList $pickerState
+    if ($script:LibraryColors.Count -gt 0) {
+        $firstName = @($script:LibraryColors.Keys)[0]
+        Load-FilamentEntry $firstName $pickerState
+    }
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  NAMING CONVENTIONS SECTION — Themes | Printer Prefixes | Tags & Labels
+    # ══════════════════════════════════════════════════════════════════════════
+    foreach ($w in @(240, 16, 240, 16, 1)) {
+        $cd = New-Object System.Windows.Controls.ColumnDefinition
+        $cd.Width = if ($w -eq 1) { [System.Windows.GridLength]::new(1,[System.Windows.GridUnitType]::Star) } `
+                    else          { [System.Windows.GridLength]::new($w) }
+        $secNaming.ColumnDefinitions.Add($cd) | Out-Null
+    }
+
+    function Build-NameListSection($parentGrid, [string]$title, [scriptblock]$getItems, [scriptblock]$setItems, [scriptblock]$onSave, [int]$col = 0) {
+        $g = New-Object System.Windows.Controls.Grid; $g.Margin = New-Object System.Windows.Thickness(20,16,20,16)
+        $g.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{ Height = "Auto" })) | Out-Null
+        $g.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition)) | Out-Null
+        $g.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{ Height = "Auto" })) | Out-Null
+        $g.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{ Height = "Auto" })) | Out-Null
+        [System.Windows.Controls.Grid]::SetColumn($g, $col); $parentGrid.Children.Add($g) | Out-Null
+
+        $hdr = New-Object System.Windows.Controls.TextBlock; $hdr.Text = $title
+        $hdr.FontSize = 14; $hdr.FontWeight = [System.Windows.FontWeights]::Bold
+        $hdr.Foreground = Get-WpfColor "#C8CFDD"; $hdr.Margin = New-Object System.Windows.Thickness(0,0,0,10)
+        [System.Windows.Controls.Grid]::SetRow($hdr, 0); $g.Children.Add($hdr) | Out-Null
+
+        $sv = New-Object System.Windows.Controls.ScrollViewer; $sv.VerticalScrollBarVisibility = "Auto"
+        $sv.HorizontalScrollBarVisibility = "Disabled"
+        $sv.Background = Get-WpfColor "#1C1D23"
+        $sv.BorderBrush = Get-WpfColor "#2A2C38"; $sv.BorderThickness = New-Object System.Windows.Thickness(1)
+        [System.Windows.Controls.Grid]::SetRow($sv, 1); $g.Children.Add($sv) | Out-Null
+
+        $listBox = New-Object System.Windows.Controls.ListBox
+        $listBox.Background = Get-WpfColor "#1C1D23"; $listBox.Foreground = Get-WpfColor "#C0C4D0"
+        $listBox.BorderThickness = 0; $listBox.FontSize = 12; $listBox.Padding = New-Object System.Windows.Thickness(4)
+        foreach ($item in (& $getItems)) {
+            $lbi = New-Object System.Windows.Controls.ListBoxItem
+            $lbi.Content = $item; $lbi.Foreground = Get-WpfColor "#C0C4D0"; $lbi.Tag = "clean"
+            $listBox.Items.Add($lbi) | Out-Null
+        }
+        $sv.Content = $listBox
+
+        # Add row
+        $addGrid = New-Object System.Windows.Controls.Grid; $addGrid.Margin = New-Object System.Windows.Thickness(0,8,0,6)
+        $addGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition)) | Out-Null
+        $addGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = [System.Windows.GridLength]::new(8) })) | Out-Null
+        $addGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = [System.Windows.GridLength]::new(70) })) | Out-Null
+        [System.Windows.Controls.Grid]::SetRow($addGrid, 2); $g.Children.Add($addGrid) | Out-Null
+
+        $tbNew = New-Object System.Windows.Controls.TextBox; $tbNew.Height = 28; $tbNew.FontSize = 12; $tbNew.Padding = New-Object System.Windows.Thickness(6,0,6,0)
+        $tbNew.Background = Get-WpfColor "#1C1D23"; $tbNew.Foreground = Get-WpfColor "#E0E3EC"
+        $tbNew.BorderBrush = Get-WpfColor "#3A3C4A"; $tbNew.BorderThickness = New-Object System.Windows.Thickness(1)
+        [System.Windows.Controls.Grid]::SetColumn($tbNew, 0); $addGrid.Children.Add($tbNew) | Out-Null
+
+        $btnAdd = New-Object System.Windows.Controls.Button; $btnAdd.Content = "Add"; $btnAdd.Height = 28; $btnAdd.FontSize = 11
+        $btnAdd.Background = Get-WpfColor "#2E5A42"; $btnAdd.Foreground = Get-WpfColor "#FFFFFF"
+        $btnAdd.BorderThickness = 0; $btnAdd.Cursor = [System.Windows.Input.Cursors]::Hand
+        [System.Windows.Controls.Grid]::SetColumn($btnAdd, 2); $addGrid.Children.Add($btnAdd) | Out-Null
+
+        # Delete + Save row
+        $actionGrid = New-Object System.Windows.Controls.Grid
+        $actionGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition)) | Out-Null
+        $actionGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = [System.Windows.GridLength]::new(8) })) | Out-Null
+        $actionGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition)) | Out-Null
+        [System.Windows.Controls.Grid]::SetRow($actionGrid, 3); $g.Children.Add($actionGrid) | Out-Null
+
+        $btnDel = New-Object System.Windows.Controls.Button; $btnDel.Content = "Delete Selected"; $btnDel.Height = 28; $btnDel.FontSize = 11
+        $btnDel.Background = Get-WpfColor "#6B2828"; $btnDel.Foreground = Get-WpfColor "#FFFFFF"
+        $btnDel.BorderThickness = 0; $btnDel.Cursor = [System.Windows.Input.Cursors]::Hand
+        [System.Windows.Controls.Grid]::SetColumn($btnDel, 0); $actionGrid.Children.Add($btnDel) | Out-Null
+
+        $btnSave = New-Object System.Windows.Controls.Button; $btnSave.Content = "Save Changes"; $btnSave.Height = 28; $btnSave.FontSize = 11; $btnSave.FontWeight = [System.Windows.FontWeights]::Bold
+        $btnSave.Background = Get-WpfColor "#3A5080"; $btnSave.Foreground = Get-WpfColor "#FFFFFF"
+        $btnSave.BorderThickness = 0; $btnSave.Cursor = [System.Windows.Input.Cursors]::Hand
+        [System.Windows.Controls.Grid]::SetColumn($btnSave, 2); $actionGrid.Children.Add($btnSave) | Out-Null
+
+        # Wire up events
+        # Click list item → populate text box + switch button to "Edit"
+        $listBox.Tag = @{ TextBox=$tbNew; AddBtn=$btnAdd }
+        $listBox.Add_SelectionChanged({
+            $t = $this.Tag
+            if ($null -ne $this.SelectedItem) {
+                $t.TextBox.Text = "$($this.SelectedItem.Content)"
+                $t.AddBtn.Content = "Edit"
+            } else {
+                $t.AddBtn.Content = "Add"
+            }
+        }.GetNewClosure())
+
+        $btnAdd.Tag = @{ Box=$tbNew; List=$listBox; Btn=$btnAdd }
+        $btnAdd.Add_Click({
+            $t = $this.Tag; $v = $t.Box.Text.Trim(); if ([string]::IsNullOrWhiteSpace($v)) { return }
+            $sel = $t.List.SelectedItem   # a ListBoxItem or $null
+            if ($null -ne $sel -and "$($sel.Content)" -ne $v) {
+                # Rename in place — mark dirty
+                $sel.Content = $v
+                $sel.Foreground = Get-WpfColor "#E8903A"
+                $sel.Tag = "dirty"
+            } elseif ($null -eq $sel -or "$($sel.Content)" -ne $v) {
+                # Check for duplicate content
+                $dup = $false
+                foreach ($lbi in $t.List.Items) { if ("$($lbi.Content)" -eq $v) { $dup = $true; break } }
+                if (-not $dup) {
+                    $lbi = New-Object System.Windows.Controls.ListBoxItem
+                    $lbi.Content = $v; $lbi.Foreground = Get-WpfColor "#E8903A"; $lbi.Tag = "dirty"
+                    $t.List.Items.Add($lbi) | Out-Null
+                    $t.List.SelectedItem = $lbi
+                }
+            }
+            $t.Box.Text = ""
+            $t.Btn.Content = "Add"
+            $t.List.SelectedItem = $null
+        }.GetNewClosure())
+
+        $btnDel.Tag = $listBox
+        $btnDel.Add_Click({
+            $lb = $this.Tag
+            if ($null -ne $lb.SelectedItem) { $lb.Items.Remove($lb.SelectedItem) }
+        }.GetNewClosure())
+
+        $btnSave.Tag = @{ List=$listBox; SetItems=$setItems; OnSave=$onSave; Sv=$sv }
+        $btnSave.Add_Click({
+            $t = $this.Tag
+            $items = @($t.List.Items | ForEach-Object { "$($_.Content)" })
+            & $t.SetItems $items
+            $ok = & $t.OnSave
+            if ($ok) {
+                # Clear dirty highlights
+                foreach ($lbi in $t.List.Items) { $lbi.Foreground = Get-WpfColor "#C0C4D0"; $lbi.Tag = "clean" }
+                $t.Sv.BorderBrush = Get-WpfColor "#4CAF72"
+            } else {
+                $t.Sv.BorderBrush = Get-WpfColor "#D95F5F"
+            }
+        }.GetNewClosure())
+
+        return $listBox
+    }
+
+    # Themes — column 0
+    Build-NameListSection $secNaming "Themes" `
+        { $script:GpThemes } `
+        { param($v) $script:GpThemes = $v } `
+        { Save-NamesLibrary } 0 | Out-Null
+
+    # Printer Prefixes — column 2
+    Build-NameListSection $secNaming "Printer Prefixes" `
+        { $script:PrinterPrefixes } `
+        { param($v) $script:PrinterPrefixes = $v } `
+        { Save-NamesLibrary } 2 | Out-Null
+
+    # Tags & Labels — column 4
+    $tagsContainer = New-Object System.Windows.Controls.Grid; $tagsContainer.Margin = New-Object System.Windows.Thickness(0,16,20,16)
+    $tagsContainer.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{ Height = "Auto" })) | Out-Null
+    $tagsContainer.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition)) | Out-Null
+    $tagsContainer.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{ Height = "Auto" })) | Out-Null
+    $tagsContainer.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{ Height = "Auto" })) | Out-Null
+    [System.Windows.Controls.Grid]::SetColumn($tagsContainer, 4); $secNaming.Children.Add($tagsContainer) | Out-Null
+
+    $tagsHdr = New-Object System.Windows.Controls.TextBlock; $tagsHdr.Text = "Tags & Labels"
+    $tagsHdr.FontSize = 14; $tagsHdr.FontWeight = [System.Windows.FontWeights]::Bold
+    $tagsHdr.Foreground = Get-WpfColor "#C8CFDD"; $tagsHdr.Margin = New-Object System.Windows.Thickness(0,0,0,10)
+    [System.Windows.Controls.Grid]::SetRow($tagsHdr, 0); $tagsContainer.Children.Add($tagsHdr) | Out-Null
+
+    $tagsSv = New-Object System.Windows.Controls.ScrollViewer; $tagsSv.VerticalScrollBarVisibility = "Auto"
+    $tagsSv.Background = Get-WpfColor "#1C1D23"; $tagsSv.BorderBrush = Get-WpfColor "#2A2C38"; $tagsSv.BorderThickness = New-Object System.Windows.Thickness(1)
+    [System.Windows.Controls.Grid]::SetRow($tagsSv, 1); $tagsContainer.Children.Add($tagsSv) | Out-Null
+
+    $tagsListStack = New-Object System.Windows.Controls.StackPanel; $tagsListStack.Margin = New-Object System.Windows.Thickness(4)
+    $tagsSv.Content = $tagsListStack
+
+    # Header row
+    $tagsColHdr = New-Object System.Windows.Controls.Grid; $tagsColHdr.Margin = New-Object System.Windows.Thickness(0,0,0,2)
+    $tagsColHdr.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = [System.Windows.GridLength]::new(80) })) | Out-Null
+    $tagsColHdr.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition)) | Out-Null
+    $th1 = New-Object System.Windows.Controls.TextBlock; $th1.Text="Tag";   $th1.Foreground=Get-WpfColor "#555868"; $th1.FontSize=11; [System.Windows.Controls.Grid]::SetColumn($th1,0)
+    $th2 = New-Object System.Windows.Controls.TextBlock; $th2.Text="Label"; $th2.Foreground=Get-WpfColor "#555868"; $th2.FontSize=11; [System.Windows.Controls.Grid]::SetColumn($th2,1)
+    $tagsColHdr.Children.Add($th1)|Out-Null; $tagsColHdr.Children.Add($th2)|Out-Null
+    $tagsListStack.Children.Add($tagsColHdr) | Out-Null
+
+    Rebuild-TagsList $tagsListStack
+
+    # Add row for tags
+    $tagsAddGrid = New-Object System.Windows.Controls.Grid; $tagsAddGrid.Margin = New-Object System.Windows.Thickness(0,8,0,6)
+    $tagsAddGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = [System.Windows.GridLength]::new(80) })) | Out-Null
+    $tagsAddGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = [System.Windows.GridLength]::new(8) })) | Out-Null
+    $tagsAddGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition)) | Out-Null
+    $tagsAddGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = [System.Windows.GridLength]::new(8) })) | Out-Null
+    $tagsAddGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = [System.Windows.GridLength]::new(60) })) | Out-Null
+    [System.Windows.Controls.Grid]::SetRow($tagsAddGrid,2); $tagsContainer.Children.Add($tagsAddGrid) | Out-Null
+
+    function New-TagInput {
+        $tb = New-Object System.Windows.Controls.TextBox; $tb.Height=28; $tb.FontSize=12; $tb.Padding=New-Object System.Windows.Thickness(6,0,6,0)
+        $tb.Background=Get-WpfColor "#1C1D23"; $tb.Foreground=Get-WpfColor "#E0E3EC"
+        $tb.BorderBrush=Get-WpfColor "#3A3C4A"; $tb.BorderThickness=New-Object System.Windows.Thickness(1)
+        return $tb
+    }
+    $tbTagName = New-TagInput; [System.Windows.Controls.Grid]::SetColumn($tbTagName,0); $tagsAddGrid.Children.Add($tbTagName)|Out-Null
+    $tbTagLbl  = New-TagInput; [System.Windows.Controls.Grid]::SetColumn($tbTagLbl, 2); $tagsAddGrid.Children.Add($tbTagLbl)|Out-Null
+    $btnAddTag = New-Object System.Windows.Controls.Button; $btnAddTag.Content="Add"; $btnAddTag.Height=28; $btnAddTag.FontSize=11
+    $btnAddTag.Background=Get-WpfColor "#2E5A42"; $btnAddTag.Foreground=Get-WpfColor "#FFFFFF"; $btnAddTag.BorderThickness=0; $btnAddTag.Cursor=[System.Windows.Input.Cursors]::Hand
+    [System.Windows.Controls.Grid]::SetColumn($btnAddTag,4); $tagsAddGrid.Children.Add($btnAddTag)|Out-Null
+    # Register inputs so Rebuild-TagsList click handlers can populate them
+    $script:TagEditState.TagBox = $tbTagName
+    $script:TagEditState.LblBox = $tbTagLbl
+    $script:TagEditState.AddBtn = $btnAddTag
+
+    $tagsActGrid = New-Object System.Windows.Controls.Grid
+    $tagsActGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition)) | Out-Null
+    $tagsActGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = [System.Windows.GridLength]::new(8) })) | Out-Null
+    $tagsActGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition)) | Out-Null
+    [System.Windows.Controls.Grid]::SetRow($tagsActGrid,3); $tagsContainer.Children.Add($tagsActGrid) | Out-Null
+
+    $btnDelTag  = New-Object System.Windows.Controls.Button; $btnDelTag.Content="Delete Selected"; $btnDelTag.Height=28; $btnDelTag.FontSize=11
+    $btnDelTag.Background=Get-WpfColor "#6B2828"; $btnDelTag.Foreground=Get-WpfColor "#FFFFFF"; $btnDelTag.BorderThickness=0; $btnDelTag.Cursor=[System.Windows.Input.Cursors]::Hand
+    [System.Windows.Controls.Grid]::SetColumn($btnDelTag,0); $tagsActGrid.Children.Add($btnDelTag)|Out-Null
+
+    $btnSaveTags = New-Object System.Windows.Controls.Button; $btnSaveTags.Content="Save Changes"; $btnSaveTags.Height=28; $btnSaveTags.FontSize=11; $btnSaveTags.FontWeight=[System.Windows.FontWeights]::Bold
+    $btnSaveTags.Background=Get-WpfColor "#3A5080"; $btnSaveTags.Foreground=Get-WpfColor "#FFFFFF"; $btnSaveTags.BorderThickness=0; $btnSaveTags.Cursor=[System.Windows.Input.Cursors]::Hand
+    [System.Windows.Controls.Grid]::SetColumn($btnSaveTags,2); $tagsActGrid.Children.Add($btnSaveTags)|Out-Null
+
+    # Capture stack directly — avoids $this.Tag retrieval inside closures
+    $capturedTagsStack = $tagsListStack
+    $btnAddTag.Add_Click({
+        $tes = $script:TagEditState
+        $tn = $tes.TagBox.Text.Trim(); $tl = $tes.LblBox.Text.Trim()
+        if ([string]::IsNullOrWhiteSpace($tn)) { return }
+        $oldSel = $tes.SelectedTag
+        if (-not [string]::IsNullOrWhiteSpace($oldSel) -and $oldSel -ne $tn -and ($script:Tags -contains $oldSel)) {
+            $script:Tags = @($script:Tags | ForEach-Object { if ($_ -eq $oldSel) { $tn } else { $_ } })
+            $script:TagLabels.Remove($oldSel) | Out-Null
+            $tes.DirtyTags.Remove($oldSel) | Out-Null
+        } elseif (-not ($script:Tags -contains $tn)) {
+            $script:Tags += $tn
+        }
+        $script:TagLabels[$tn] = $tl
+        $tes.DirtyTags[$tn] = $true
+        $tes.SelectedTag = ""
+        $tes.TagBox.Text = ""; $tes.LblBox.Text = ""
+        if ($null -ne $tes.AddBtn) { $tes.AddBtn.Content = "Add" }
+        Rebuild-TagsList $capturedTagsStack
+    }.GetNewClosure())
+
+    $btnDelTag.Add_Click({
+        $tes = $script:TagEditState
+        $tn = $tes.SelectedTag
+        if ([string]::IsNullOrWhiteSpace($tn)) { return }
+        $script:Tags = @($script:Tags | Where-Object { $_ -ne $tn })
+        $script:TagLabels.Remove($tn) | Out-Null
+        $tes.DirtyTags.Remove($tn) | Out-Null
+        $tes.SelectedTag = ""
+        $tes.TagBox.Text = ""; $tes.LblBox.Text = ""
+        if ($null -ne $tes.AddBtn) { $tes.AddBtn.Content = "Add" }
+        Rebuild-TagsList $capturedTagsStack
+    }.GetNewClosure())
+
+    $btnSaveTags.Add_Click({
+        if (Save-NamesLibrary) {
+            $script:TagEditState.DirtyTags = @{}
+            $this.Background = Get-WpfColor "#4CAF72"
+            Rebuild-TagsList $capturedTagsStack
+        } else {
+            $this.Background = Get-WpfColor "#D95F5F"
+        }
+    }.GetNewClosure())
+
+    $script:LibrariesPanel = $root
+    return $root
+}
+
 function New-ModeButton([string]$label, [int]$width, [string]$bg, [string]$fg, [bool]$active) {
     $b = New-Object System.Windows.Controls.Button
     $b.Content = $label; $b.Width = $width; $b.Height = 30
@@ -3883,16 +4815,44 @@ function New-ModeButton([string]$label, [int]$width, [string]$bg, [string]$fg, [
     return $b
 }
 
-$script:BtnModeFilePr  = New-ModeButton "File Prep" 85  "#3A5080" "#FFFFFF" $true
-$script:BtnModeEditing = New-ModeButton "Editing"   75  "#252630" "#7A7D90" $false
-$script:BtnModeReview  = New-ModeButton "Review"    70  "#252630" "#7A7D90" $false
+$script:BtnModeFilePr   = New-ModeButton "File Prep" 85  "#3A5080" "#FFFFFF" $true
+$script:BtnModeEditing  = New-ModeButton "Editing"   75  "#252630" "#7A7D90" $false
+$script:BtnModeReview   = New-ModeButton "Review"    70  "#252630" "#7A7D90" $false
+$script:BtnModeLibraries = New-ModeButton "Libraries" 80  "#252630" "#7A7D90" $false
 
-$script:BtnModeFilePr.Add_Click({  Set-GlobalMode "FilePr"  })
-$script:BtnModeEditing.Add_Click({ Set-GlobalMode "Editing" })
-$script:BtnModeReview.Add_Click({  Set-GlobalMode "Review"  })
+$script:BtnModeFilePr.Add_Click({   Set-GlobalMode "FilePr"   })
+$script:BtnModeEditing.Add_Click({  Set-GlobalMode "Editing"  })
+$script:BtnModeReview.Add_Click({   Set-GlobalMode "Review"   })
+$script:BtnModeLibraries.Add_Click({ Set-GlobalMode "Libraries" })
 
-$topModeBar.Children.Add($script:BtnModeFilePr)  | Out-Null
-$topModeBar.Children.Add($script:BtnModeEditing) | Out-Null
-$topModeBar.Children.Add($script:BtnModeReview)  | Out-Null
+$topModeBar.Children.Add($script:BtnModeFilePr)    | Out-Null
+$topModeBar.Children.Add($script:BtnModeEditing)   | Out-Null
+$topModeBar.Children.Add($script:BtnModeReview)    | Out-Null
+
+# ── Libraries button sits LEFT of the Browse button in the center column ──
+# Navigate up from BtnBrowse: StackPanel → header Grid (col 1)
+$browseStack  = $btnBrowse.Parent            # vertical StackPanel (Browse + hint text)
+$headerGrid   = $browseStack.Parent          # the Grid inside the header Border
+
+# Pull the browse stack out, wrap it with the Libraries button in a horizontal SP
+$headerGrid.Children.Remove($browseStack) | Out-Null
+
+$centerWrap = New-Object System.Windows.Controls.StackPanel
+$centerWrap.Orientation = "Horizontal"
+$centerWrap.HorizontalAlignment = "Center"
+$centerWrap.VerticalAlignment   = "Center"
+[System.Windows.Controls.Grid]::SetColumn($centerWrap, 1)
+
+$script:BtnModeLibraries.Margin = New-Object System.Windows.Thickness(0,0,12,0)
+$script:BtnModeLibraries.VerticalAlignment = "Center"
+$centerWrap.Children.Add($script:BtnModeLibraries) | Out-Null
+
+$browseStack.VerticalAlignment = "Center"
+$centerWrap.Children.Add($browseStack) | Out-Null
+
+$headerGrid.Children.Add($centerWrap) | Out-Null
+
+# Build the Libraries panel (attaches itself to the window's root Grid)
+Build-LibrariesPanel | Out-Null
 
 $window.ShowDialog() | Out-Null
