@@ -440,6 +440,8 @@ $script:jobs = New-Object System.Collections.ArrayList
 $script:processQueue = New-Object System.Collections.Queue
 $script:activeProcess = $null
 $script:activeProcessJob = $null
+$script:editQueue = New-Object System.Collections.Queue
+$script:editActiveJob = $null
 . (Join-Path $PSScriptRoot "..\libraries\NamesLibrary.ps1")
 $script:AdjPresets = @('Common','RARE','EPIC','LEGENDARY','Default')
 
@@ -818,7 +820,27 @@ function Enqueue-PJob($pJob, $gpJob) {
     $pJob.CardStatusLabel.Text = "[ PREPARING ]"; $pJob.ProcessingOverlay.Visibility = "Visible"
     $pJob.PickStatusLabel.Text = "[ PREPARING ]"; $pJob.PickProcessingOverlay.Visibility = "Visible"
 
-    $script:processQueue.Enqueue(@{ PJob = $pJob; GpJob = $gpJob })
+    $script:processQueue.Enqueue(@{ PJob = $pJob; GpJob = $gpJob; SliceOnly = $false })
+}
+
+# Slice-only enqueue — bypasses color matching and rename-confirm checks (used by Editing mode)
+function Enqueue-SliceOnlyJob($pJob, $gpJob) {
+    if ($pJob.IsQueued -or $pJob.IsDone) { return }
+    $pJob.SliceOnlyBypass    = $true
+    $gpJob.GpRenameConfirmed = $true   # skip rename confirm dialog
+    $pJob.IsQueued = $true
+    # Show status in editing panel
+    if ($null -ne $pJob.RenestStatusLbl) {
+        $pJob.RenestStatusLbl.Text = "Export GCode queued..."; $pJob.RenestStatusLbl.Foreground = Get-WpfColor "#E8A135"
+    }
+    if ($null -ne $pJob.LblEdQueueStatus) {
+        $pJob.LblEdQueueStatus.Text = "Export queued"; $pJob.LblEdQueueStatus.Foreground = Get-WpfColor "#E8A135"
+    }
+    # Show processing overlays on the card image area (visible even in Editing mode)
+    $pJob.CardStatusLabel.Text = "[ PREPARING ]"; $pJob.ProcessingOverlay.Visibility = "Visible"
+    $pJob.PickStatusLabel.Text = "[ PREPARING ]"; $pJob.PickProcessingOverlay.Visibility = "Visible"
+    # Tag SliceOnly=true so the job-finished handler knows to skip KEEP/REVERT and leave card reusable
+    $script:processQueue.Enqueue(@{ PJob = $pJob; GpJob = $gpJob; SliceOnly = $true })
 }
 
 function Start-NextProcess {
@@ -876,6 +898,11 @@ function Start-NextProcess {
     if ($pJob.RenameOnlyBypass) {
         $doRename = $true; $doMerge = $false; $doSlice = $false; $doExtract = $false; $doImage = $false; $doLogs = $false
         $pJob.RenameOnlyBypass = $false
+    } elseif ($pJob.SliceOnlyBypass) {
+        # Editing mode slice-only — no rename, no merge, just slice using the current anchor
+        $doRename = $false; $doMerge = $false; $doSlice = $true; $doExtract = $false; $doImage = $false; $doLogs = $false
+        $pJob.SliceOnlyBypass = $false
+        $pJob.ProcessedAnchorPath = $pJob.AnchorFile.FullName
     } else {
         $doRename  = [bool]$pJob.ChkRename.IsChecked
         $doMerge   = [bool]$pJob.ChkMerge.IsChecked
@@ -1080,7 +1107,12 @@ function Start-NextProcess {
     if ($doSlice) {
         [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value 'SLICING... 0%' -Force")
         [void]$sb.AppendLine("Start-Sleep -Seconds 3")
-        [void]$sb.AppendLine("& `"$scriptDir\Slice_worker.ps1`" -InputPath `"$anchorPath`" -IsolatedPath `"$finalPath`" -StatusFile `"$statusFile`"")
+        if ($jobWrapper.SliceOnly) {
+            # Editing-mode slice: no isolated Final.3mf gcode needed
+            [void]$sb.AppendLine("& `"$scriptDir\Slice_worker.ps1`" -InputPath `"$anchorPath`" -StatusFile `"$statusFile`"")
+        } else {
+            [void]$sb.AppendLine("& `"$scriptDir\Slice_worker.ps1`" -InputPath `"$anchorPath`" -IsolatedPath `"$finalPath`" -StatusFile `"$statusFile`"")
+        }
     } elseif ($doExtract -or $doImage) {
         [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value 'RE-SLICING FINAL FOR DATA...' -Force")
         [void]$sb.AppendLine("if (-not (Test-Path `"$finalPath`") -and (Test-Path `"$nestPath`")) {")
@@ -1326,8 +1358,11 @@ function Set-GlobalMode([string]$mode) {
         } elseif (-not $enterReview -and $gpJob.ReviewMode) {
             Apply-GpReviewMode $gpJob $false
         }
-        # For non-review modes, flip the tab panels on every card
+        # For non-review modes, flip the tab panels on every card and the group task bars
         if (-not $enterReview) {
+            if ($null -ne $gpJob.ThemeBar)        { $gpJob.ThemeBar.Visibility        = if ($mode -eq "Editing") { "Collapsed" } else { "Visible"   } }
+            if ($null -ne $gpJob.EditingThemeBar) { $gpJob.EditingThemeBar.Visibility = if ($mode -eq "Editing") { "Visible"   } else { "Collapsed" } }
+            if ($null -ne $gpJob.RenameGroup)     { $gpJob.RenameGroup.Visibility     = if ($mode -eq "Editing") { "Collapsed" } else { "Visible"   } }
             foreach ($pj in $gpJob.Parents) {
                 if ($null -ne $pj.FilePrepPanel) {
                     $pj.FilePrepPanel.Visibility = if ($mode -eq "Editing") { "Collapsed" } else { "Visible" }
@@ -1335,6 +1370,9 @@ function Set-GlobalMode([string]$mode) {
                 if ($null -ne $pj.EditingPanel) {
                     $pj.EditingPanel.Visibility  = if ($mode -eq "Editing") { "Visible" } else { "Collapsed" }
                 }
+                # Edit overlays: show in Editing mode, hide in FilePr/Review
+                if ($null -ne $pj.RnOvLeft)  { $pj.RnOvLeft.Visibility  = if ($mode -eq "Editing") { "Visible" } else { "Collapsed" } }
+                if ($null -ne $pj.RnOvRight) { $pj.RnOvRight.Visibility = if ($mode -eq "Editing") { "Visible" } else { "Collapsed" } }
             }
         }
     }
@@ -1468,7 +1506,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         UISlots = New-Object System.Collections.ArrayList
         FileRows = New-Object System.Collections.ArrayList
         IsDone = $false; IsQueued = $false; HasCollision = $false
-        RenameOnlyBypass = $false
+        RenameOnlyBypass = $false; SliceOnlyBypass = $false
         ReviewBuilt = $false
         GcodeImgPath = ""; ReviewCardOverlay = $null; ReviewPanel = $null; ReviewStack = $null
         TasksBox = $null; EditBox = $null; ApplyRow = $null
@@ -1479,6 +1517,10 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         FilePrepPanel = $null; EditingPanel = $null
         MainTabFilePrepBtn = $null; MainTabEditingBtn = $null
         RnOvLeft = $null; RnOvRight = $null; RnImgLeft = $null; RnImgRight = $null
+        RnLblLeft = $null; RnLblRight = $null
+        ChkEdReNest = $null
+        BtnEdQueue = $null; LblEdQueueStatus = $null
+        EdIsQueued = $false
         _GpJob = $gpJob
     }
 
@@ -2434,10 +2476,43 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     # Add new sub-tab buttons/panels here as more editing tools are introduced.
     # ══════════════════════════════════════════════════════════════════════════
 
+    # ── Per-card editing queue row ─────────────────────────────────────────────
+    $edQueueRow = New-Object System.Windows.Controls.Border
+    $edQueueRow.Background = Get-WpfColor "#1A1C24"
+    $edQueueRow.BorderBrush = Get-WpfColor "#2A2C38"; $edQueueRow.BorderThickness = New-Object System.Windows.Thickness(0,0,0,1)
+    $edQueueRow.Padding = New-Object System.Windows.Thickness(0,6,0,6)
+    $edQueueRow.Margin = New-Object System.Windows.Thickness(0,4,0,4)
+    $edQRowStack = New-Object System.Windows.Controls.StackPanel; $edQRowStack.Orientation = "Horizontal"
+
+    $chkEdReNest = New-Object System.Windows.Controls.CheckBox; $chkEdReNest.Content = "Re-Nest"
+    $chkEdReNest.IsChecked = $true; $chkEdReNest.Foreground = Get-WpfColor "#C8CFDD"
+    $chkEdReNest.VerticalAlignment = "Center"; $chkEdReNest.Margin = New-Object System.Windows.Thickness(0,0,16,0)
+
+    $btnEdQueue = New-Object System.Windows.Controls.Button; $btnEdQueue.Content = "Queue"
+    $btnEdQueue.Height = 26; $btnEdQueue.Width = 70; $btnEdQueue.FontSize = 11
+    $btnEdQueue.FontWeight = [System.Windows.FontWeights]::Bold
+    $btnEdQueue.Background = Get-WpfColor "#3A5080"; $btnEdQueue.Foreground = Get-WpfColor "#FFFFFF"
+    $btnEdQueue.BorderThickness = 0; $btnEdQueue.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnEdQueue.Margin = New-Object System.Windows.Thickness(0,0,10,0)
+
+    $lblEdQueueStatus = New-Object System.Windows.Controls.TextBlock
+    $lblEdQueueStatus.FontSize = 11; $lblEdQueueStatus.VerticalAlignment = "Center"
+    $lblEdQueueStatus.Foreground = Get-WpfColor "#555868"
+
+    $edQRowStack.Children.Add($chkEdReNest)     | Out-Null
+    $edQRowStack.Children.Add($btnEdQueue)       | Out-Null
+    $edQRowStack.Children.Add($lblEdQueueStatus) | Out-Null
+    $edQueueRow.Child = $edQRowStack
+    $editingPanel.Children.Add($edQueueRow) | Out-Null
+
+    $pJob.ChkEdReNest      = $chkEdReNest
+    $pJob.BtnEdQueue       = $btnEdQueue
+    $pJob.LblEdQueueStatus = $lblEdQueueStatus
+
     # Sub-tab strip inside the Editing panel
     $feTabStrip = New-Object System.Windows.Controls.StackPanel
     $feTabStrip.Orientation = "Horizontal"
-    $feTabStrip.Margin = New-Object System.Windows.Thickness(0,8,0,0)
+    $feTabStrip.Margin = New-Object System.Windows.Thickness(0,4,0,0)
     $editingPanel.Children.Add($feTabStrip) | Out-Null
 
     # Content area (sub-panels swap in/out here as sub-tabs are selected)
@@ -2535,7 +2610,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $reviewBtnRow = New-Object System.Windows.Controls.StackPanel
     $reviewBtnRow.Orientation = "Horizontal"
     $btnReplaceSource = New-Object System.Windows.Controls.Button
-    $btnReplaceSource.Content = "Replace Source"; $btnReplaceSource.Height = 30; $btnReplaceSource.Width = 130
+    $btnReplaceSource.Content = "Replace and Export GCode"; $btnReplaceSource.Height = 30; $btnReplaceSource.Width = 190
     $btnReplaceSource.FontWeight = [System.Windows.FontWeights]::Bold; $btnReplaceSource.FontSize = 11
     $btnReplaceSource.Background = Get-WpfColor "#2E5A42"; $btnReplaceSource.Foreground = Get-WpfColor "#FFFFFF"
     $btnReplaceSource.BorderThickness = 0; $btnReplaceSource.Cursor = [System.Windows.Input.Cursors]::Hand
@@ -2547,7 +2622,23 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnDiscardRenest.FontSize = 11; $btnDiscardRenest.Background = Get-WpfColor "#3A2020"
     $btnDiscardRenest.Foreground = Get-WpfColor "#CC8888"; $btnDiscardRenest.BorderThickness = 0
     $btnDiscardRenest.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnDiscardRenest.Margin = New-Object System.Windows.Thickness(0,0,8,0)
     $reviewBtnRow.Children.Add($btnDiscardRenest) | Out-Null
+
+    $btnOpenDebug = New-Object System.Windows.Controls.Button
+    $btnOpenDebug.Content = "Open Debug"; $btnOpenDebug.Height = 30; $btnOpenDebug.Width = 90
+    $btnOpenDebug.FontSize = 11; $btnOpenDebug.Background = Get-WpfColor "#2A2C38"
+    $btnOpenDebug.Foreground = Get-WpfColor "#7AAABB"; $btnOpenDebug.BorderThickness = 0
+    $btnOpenDebug.Cursor = [System.Windows.Input.Cursors]::Hand
+    $reviewBtnRow.Children.Add($btnOpenDebug) | Out-Null
+
+    $btnSaveDebug = New-Object System.Windows.Controls.Button
+    $btnSaveDebug.Content = "Save Debug"; $btnSaveDebug.Height = 30; $btnSaveDebug.Width = 85
+    $btnSaveDebug.FontSize = 11; $btnSaveDebug.Background = Get-WpfColor "#2A2C38"
+    $btnSaveDebug.Foreground = Get-WpfColor "#888A9A"; $btnSaveDebug.BorderThickness = 0
+    $btnSaveDebug.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnSaveDebug.Margin = New-Object System.Windows.Thickness(6,0,0,0)
+    $reviewBtnRow.Children.Add($btnSaveDebug) | Out-Null
 
     $panelReviewInner.Children.Add($reviewBtnRow) | Out-Null
     $borderReview.Child = $panelReviewInner
@@ -2586,22 +2677,25 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
     # Shared state for all three buttons
     $renestTag = @{
-        P            = $pJob
-        WorkerPath   = (Join-Path $scriptDir "..\workers\RenestFromFinal_worker.ps1")
-        FinalPath    = if ($null -ne $feRenestFinal)  { $feRenestFinal.FullName }  else { "" }
-        SourcePath   = if ($null -ne $feRenestSource) { $feRenestSource.FullName } else { "" }
-        RenestPath   = ""
-        BtnRun       = $btnRunRenest
-        LblStatus    = $lblRenestStatus
-        BorderReview = $borderReview
-        LogOut       = ""
-        LogErr       = ""
-        Proc         = $null
-        Timer        = $null
+        P             = $pJob
+        WorkerPath    = (Join-Path $scriptDir "..\workers\RenestFromFinal_worker.ps1")
+        FinalPath     = if ($null -ne $feRenestFinal)  { $feRenestFinal.FullName }  else { "" }
+        SourcePath    = if ($null -ne $feRenestSource) { $feRenestSource.FullName } else { "" }
+        RenestPath    = ""
+        BtnRun        = $btnRunRenest
+        LblStatus     = $lblRenestStatus
+        BorderReview  = $borderReview
+        LogOut        = ""
+        LogErr        = ""
+        Proc          = $null
+        Timer         = $null
+        DebugTempPath = ""
     }
     $btnRunRenest.Tag     = $renestTag
     $btnReplaceSource.Tag = $renestTag
     $btnDiscardRenest.Tag = $renestTag
+    $btnOpenDebug.Tag     = $renestTag
+    $btnSaveDebug.Tag     = $renestTag
 
     $btnRunRenest.Add_Click({
         $t = $this.Tag
@@ -2641,11 +2735,11 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         }
         try {
             Move-Item -LiteralPath $t.RenestPath -Destination $t.SourcePath -Force
-            $t.LblStatus.Text = "Source replaced!"; $t.LblStatus.Foreground = Get-WpfColor "#4CAF72"
             $t.BorderReview.Visibility = "Collapsed"
-            try { $t.P.RnOvLeft.Visibility = "Collapsed"; $t.P.RnOvRight.Visibility = "Collapsed" } catch {}
             $t.RenestPath = ""
-            Refresh-PJob $t.P $t.P._GpJob
+            # Queue a slice-only export on the CURRENT pJob (TempWork still valid — no Refresh before slice)
+            Enqueue-SliceOnlyJob $t.P $t.P._GpJob
+            if ($null -eq $script:activeProcess -and $script:processQueue.Count -gt 0) { Start-NextProcess }
         } catch {
             $t.LblStatus.Text = "Replace failed: $($_.Exception.Message)"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"
         }
@@ -2656,39 +2750,117 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         if (-not [string]::IsNullOrEmpty($t.RenestPath) -and (Test-Path -LiteralPath $t.RenestPath)) {
             try { Remove-Item -LiteralPath $t.RenestPath -Force -ErrorAction SilentlyContinue } catch {}
         }
-        # Hide overlays
-        try { $t.P.RnOvLeft.Visibility = "Collapsed"; $t.P.RnOvRight.Visibility = "Collapsed" } catch {}
+        # Restore right overlay to the original Final image (revert label back to "Final")
+        try {
+            if ($null -ne $t.P.RnLblRight) { $t.P.RnLblRight.Text = "Final" }
+            if (-not [string]::IsNullOrEmpty($t.FinalPath) -and (Test-Path -LiteralPath $t.FinalPath)) {
+                $discardTmpDir = Join-Path $env:TEMP ("discard_imgs_" + [System.Guid]::NewGuid().ToString("N"))
+                New-Item -ItemType Directory -Path $discardTmpDir -Force | Out-Null
+                $discardFinPath = Extract-3mfPickImage $t.FinalPath $discardTmpDir "dfin"
+                if ($null -ne $discardFinPath -and (Test-Path $discardFinPath)) {
+                    $t.P.RnImgRight.Source = Load-WpfImage $discardFinPath
+                }
+            }
+        } catch {}
         $t.BorderReview.Visibility = "Collapsed"
         $t.LblStatus.Text = "Discarded."; $t.LblStatus.Foreground = Get-WpfColor "#888A9A"
         $t.RenestPath = ""
     })
 
+    $btnOpenDebug.Add_Click({
+        $t = $this.Tag
+        $dbPath = if ($null -ne $t.DebugTempPath) { $t.DebugTempPath } else { "" }
+        if ([string]::IsNullOrEmpty($dbPath) -or -not (Test-Path -LiteralPath $dbPath)) {
+            $t.LblStatus.Text = "No debug file available."; $t.LblStatus.Foreground = Get-WpfColor "#888A9A"
+            return
+        }
+        try { Start-Process "notepad.exe" -ArgumentList $dbPath } catch {}
+    })
+
+    $btnSaveDebug.Add_Click({
+        $t = $this.Tag
+        $dbPath = if ($null -ne $t.DebugTempPath) { $t.DebugTempPath } else { "" }
+        if ([string]::IsNullOrEmpty($dbPath) -or -not (Test-Path -LiteralPath $dbPath)) {
+            $t.LblStatus.Text = "No debug file to save."; $t.LblStatus.Foreground = Get-WpfColor "#888A9A"
+            return
+        }
+        $stemR2  = [System.IO.Path]::GetFileNameWithoutExtension($t.FinalPath) -replace '(?i)_Final$', ''
+        $outDir2 = [System.IO.Path]::GetDirectoryName($t.FinalPath)
+        $savePath = Join-Path $outDir2 ($stemR2 + "_Renest_debug.txt")
+        try {
+            Copy-Item -LiteralPath $dbPath -Destination $savePath -Force
+            $t.LblStatus.Text = "Debug saved: $([System.IO.Path]::GetFileName($savePath))"
+            $t.LblStatus.Foreground = Get-WpfColor "#4CAF72"
+        } catch {
+            $t.LblStatus.Text = "Save failed: $($_.Exception.Message)"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"
+        }
+    })
+
     $pJob.BtnRunRenest = $btnRunRenest; $pJob.RenestStatusLbl = $lblRenestStatus
 
-    # ── Re-Nest review overlays — cover only the two left squares (col 0 = card, col 1 = pick) ──
-    # Col 0 of leftGrid = card image area  → source (before)
-    # Col 1 of leftGrid = pick image area  → renest  (after)
+    # ── Per-card Queue button handler ─────────────────────────────────────────
+    $btnEdQueue.Tag = @{ P = $pJob; G = $gpJob }
+    $btnEdQueue.Add_Click({
+        $t = $this.Tag
+        Enqueue-EditJob $t.P $t.G
+        if ($null -eq $script:editActiveJob) { Start-NextEditJob }
+    }.GetNewClosure())
+
+    # ── Edit-mode overlays — always visible in Editing mode, show top_1.png from source/final ──
+    # Col 0 of leftGrid = "Nest Source" top_1.png  (static — never changes)
+    # Col 1 of leftGrid = "Final" top_1.png        (updated to "Re-Nest" after renesting)
+    $ovInitVis = if ($script:GlobalMode -eq "Editing") { "Visible" } else { "Collapsed" }
     foreach ($ovSide in @(0, 1)) {
         $ovBorder = New-Object System.Windows.Controls.Border
-        $ovBorder.Background = Get-WpfColor "#0A0B0F"; $ovBorder.Visibility = "Collapsed"
+        $ovBorder.Background = Get-WpfColor "#0A0B0F"; $ovBorder.Visibility = $ovInitVis
         $ovBorder.VerticalAlignment = "Stretch"; $ovBorder.HorizontalAlignment = "Stretch"
         [System.Windows.Controls.Grid]::SetColumn($ovBorder, $ovSide)
         $ovStack = New-Object System.Windows.Controls.StackPanel
         $ovStack.VerticalAlignment = "Center"; $ovStack.HorizontalAlignment = "Center"
         $ovLbl = New-Object System.Windows.Controls.TextBlock
-        $ovLbl.Text = if ($ovSide -eq 0) { "Source (before)" } else { "Re-Nest (after)" }
+        $ovLbl.Text = if ($ovSide -eq 0) { "Nest Source" } else { "Final" }
         $ovLbl.Foreground = Get-WpfColor "#7AAABB"; $ovLbl.FontSize = 12
         $ovLbl.FontWeight = [System.Windows.FontWeights]::Bold
         $ovLbl.HorizontalAlignment = "Center"; $ovLbl.Margin = New-Object System.Windows.Thickness(0,0,0,8)
         $ovImg = New-Object System.Windows.Controls.Image
         $ovImg.Stretch = "Uniform"; $ovImg.MaxHeight = 420
+        $ovImg.Cursor = [System.Windows.Input.Cursors]::Hand
+        $ovImg.Add_MouseLeftButtonDown({
+            if ($_.ClickCount -ge 2 -and $null -ne $this.Source) {
+                $viewer = New-Object System.Windows.Window
+                $viewer.Title = if ($this.Tag -eq 0) { "Nest Source (top_1.png)" } else { "Final / Re-Nest (top_1.png)" }
+                $viewer.Background = Get-WpfColor "#0D0E10"
+                $viewer.SizeToContent = "WidthAndHeight"; $viewer.WindowStartupLocation = "CenterScreen"
+                $viewer.ResizeMode = "CanResizeWithGrip"
+                $imgView = New-Object System.Windows.Controls.Image
+                $imgView.Source = $this.Source; $imgView.MaxWidth = 900; $imgView.MaxHeight = 900; $imgView.Stretch = "Uniform"
+                $imgView.Margin = New-Object System.Windows.Thickness(10)
+                $viewer.Content = $imgView
+                $viewer.ShowDialog() | Out-Null
+            }
+        })
+        $ovImg.Tag = $ovSide
         $ovStack.Children.Add($ovLbl) | Out-Null
         $ovStack.Children.Add($ovImg)  | Out-Null
         $ovBorder.Child = $ovStack
         $leftGrid.Children.Add($ovBorder) | Out-Null
-        if ($ovSide -eq 0) { $pJob.RnOvLeft  = $ovBorder; $pJob.RnImgLeft  = $ovImg }
-        else               { $pJob.RnOvRight = $ovBorder; $pJob.RnImgRight = $ovImg }
+        if ($ovSide -eq 0) { $pJob.RnOvLeft  = $ovBorder; $pJob.RnImgLeft  = $ovImg; $pJob.RnLblLeft  = $ovLbl }
+        else               { $pJob.RnOvRight = $ovBorder; $pJob.RnImgRight = $ovImg; $pJob.RnLblRight = $ovLbl }
     }
+
+    # Pre-load top_1.png images from source and final 3MF files into the overlays
+    try {
+        $ovTmpDir = Join-Path $env:TEMP ("ov_imgs_" + [System.Guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $ovTmpDir -Force | Out-Null
+        $ovSrcPath = if ($null -ne $feRenestSource -and (Test-Path -LiteralPath $feRenestSource.FullName)) {
+            Extract-3mfPickImage $feRenestSource.FullName $ovTmpDir "ovsrc"
+        } else { $null }
+        $ovFinPath = if ($null -ne $feRenestFinal -and (Test-Path -LiteralPath $feRenestFinal.FullName)) {
+            Extract-3mfPickImage $feRenestFinal.FullName $ovTmpDir "ovfin"
+        } else { $null }
+        if ($null -ne $ovSrcPath -and (Test-Path $ovSrcPath)) { $pJob.RnImgLeft.Source  = Load-WpfImage $ovSrcPath }
+        if ($null -ne $ovFinPath -and (Test-Path $ovFinPath)) { $pJob.RnImgRight.Source = Load-WpfImage $ovFinPath }
+    } catch {}
 
     $btnApply.Tag = @{ P = $pJob; G = $gpJob }
     $btnApply.Add_Click({
@@ -2846,7 +3018,7 @@ function Build-GpJob($gpPath, $parentDict) {
         if ($detectedTheme) { $gpNameForTheme = $detectedTheme }
     }
 
-    $gpJob = @{ GpPath = $gpPath; DiGrand = $diGrand; Parents = New-Object System.Collections.ArrayList; CbPrefix = $null; CbTag = $null; GpRenameConfirmed = $false; ReviewMode = $false; HeaderGrid = $null; ThemeBar = $null }
+    $gpJob = @{ GpPath = $gpPath; DiGrand = $diGrand; Parents = New-Object System.Collections.ArrayList; CbPrefix = $null; CbTag = $null; GpRenameConfirmed = $false; ReviewMode = $false; HeaderGrid = $null; ThemeBar = $null; EditingThemeBar = $null; RenameGroup = $null }
     $script:jobs.Add($gpJob) | Out-Null
 
     $container = New-Object System.Windows.Controls.Border
@@ -2868,9 +3040,16 @@ function Build-GpJob($gpPath, $parentDict) {
     $lblCurrentName.VerticalAlignment = "Center"; $lblCurrentName.Margin = New-Object System.Windows.Thickness(15,0,20,0)
     $headerStack.Children.Add($lblCurrentName) | Out-Null
 
+    # Renaming controls — hidden in Editing mode
+    $renameGroup = New-Object System.Windows.Controls.StackPanel; $renameGroup.Orientation = "Horizontal"
+    $renameGroup.VerticalAlignment = "Center"
+    $renameGroup.Visibility = if ($script:GlobalMode -eq "Editing") { "Collapsed" } else { "Visible" }
+    $headerStack.Children.Add($renameGroup) | Out-Null
+    $gpJob.RenameGroup = $renameGroup
+
     # Printer prefix dropdown
     $lblPrefix = Create-TextBlock "Printer: " "#E8A135" 14 "Bold"
-    $lblPrefix.Margin = New-Object System.Windows.Thickness(0,0,0,0); $headerStack.Children.Add($lblPrefix) | Out-Null
+    $lblPrefix.Margin = New-Object System.Windows.Thickness(0,0,0,0); $renameGroup.Children.Add($lblPrefix) | Out-Null
     $cbPrefix = New-Object System.Windows.Controls.ComboBox; $cbPrefix.Width = 85
     $cbPrefix.Background = Get-WpfColor "#2A2C35"; $cbPrefix.Foreground = Get-WpfColor "#FFFFFF"
     $cbPrefix.BorderBrush = Get-WpfColor "#5A78C4"; $cbPrefix.BorderThickness = New-Object System.Windows.Thickness(1)
@@ -2892,11 +3071,11 @@ function Build-GpJob($gpPath, $parentDict) {
     if ($gpDetectedPrefix -ne "" -and $script:PrinterPrefixes -icontains $gpDetectedPrefix) {
         $cbPrefix.SelectedItem = $gpDetectedPrefix
     } else { $cbPrefix.SelectedIndex = 0 }
-    $headerStack.Children.Add($cbPrefix) | Out-Null; $gpJob.CbPrefix = $cbPrefix
+    $renameGroup.Children.Add($cbPrefix) | Out-Null; $gpJob.CbPrefix = $cbPrefix
 
     # Grandparent tag dropdown
     $lblGpTag = Create-TextBlock "Tag: " "#E8A135" 14 "Bold"
-    $lblGpTag.Margin = New-Object System.Windows.Thickness(0,0,0,0); $headerStack.Children.Add($lblGpTag) | Out-Null
+    $lblGpTag.Margin = New-Object System.Windows.Thickness(0,0,0,0); $renameGroup.Children.Add($lblGpTag) | Out-Null
     $cbGpTag = New-Object System.Windows.Controls.ComboBox; $cbGpTag.Width = 80
     $cbGpTag.Background = Get-WpfColor "#2A2C35"; $cbGpTag.Foreground = Get-WpfColor "#FFFFFF"
     $cbGpTag.BorderBrush = Get-WpfColor "#5A78C4"; $cbGpTag.BorderThickness = New-Object System.Windows.Thickness(1)
@@ -2915,11 +3094,11 @@ function Build-GpJob($gpPath, $parentDict) {
     if ($gpDetectedTag -ne "" -and $script:Tags -icontains $gpDetectedTag) {
         $cbGpTag.SelectedItem = $gpDetectedTag
     } else { $cbGpTag.SelectedIndex = 0 }
-    $headerStack.Children.Add($cbGpTag) | Out-Null; $gpJob.CbTag = $cbGpTag
+    $renameGroup.Children.Add($cbGpTag) | Out-Null; $gpJob.CbTag = $cbGpTag
 
     # Grandparent theme label + dropdown
     $lblGP = Create-TextBlock "Theme: " "#E8A135" 14 "Bold"
-    $lblGP.Margin = New-Object System.Windows.Thickness(0,0,0,0); $headerStack.Children.Add($lblGP) | Out-Null
+    $lblGP.Margin = New-Object System.Windows.Thickness(0,0,0,0); $renameGroup.Children.Add($lblGP) | Out-Null
 
     $cbTheme = New-Object System.Windows.Controls.ComboBox; $cbTheme.Width = 175
     $cbTheme.Background = Get-WpfColor "#1E2028"; $cbTheme.Foreground = Get-WpfColor "#FFFFFF"
@@ -2937,12 +3116,12 @@ function Build-GpJob($gpPath, $parentDict) {
     foreach ($theme in $script:GpThemes) { [void]$cbTheme.Items.Add($theme) }
     $matchedTheme = $script:GpThemes | Where-Object { ($_ -replace '[^a-zA-Z0-9]','') -ieq ($gpNameForTheme -replace '[^a-zA-Z0-9]','') } | Select-Object -First 1
     if ($matchedTheme) { $cbTheme.SelectedItem = $matchedTheme } else { $cbTheme.SelectedIndex = -1 }
-    $headerStack.Children.Add($cbTheme) | Out-Null; $gpJob.TBTheme = $cbTheme
+    $renameGroup.Children.Add($cbTheme) | Out-Null; $gpJob.TBTheme = $cbTheme
 
     $chkSkip = New-Object System.Windows.Controls.CheckBox; $chkSkip.Content = "Don't rename folder"
     $chkSkip.Foreground = Get-WpfColor "#FFFFFF"; $chkSkip.VerticalAlignment = "Center"
     $chkSkip.Margin = New-Object System.Windows.Thickness(15,0,0,0)
-    $headerStack.Children.Add($chkSkip) | Out-Null; $gpJob.ChkSkip = $chkSkip
+    $renameGroup.Children.Add($chkSkip) | Out-Null; $gpJob.ChkSkip = $chkSkip
 
     # Live preview of the full grandparent folder name (Prefix_Theme or just Theme)
     $lblGpPreview = Create-TextBlock "" "#6B9FD4" 14 "Bold"
@@ -2950,11 +3129,11 @@ function Build-GpJob($gpPath, $parentDict) {
     $initGpTag = if ($gpDetectedTag) { $gpDetectedTag } else { "Standard" }
     $initGpPreview = ((@($gpDetectedPrefix, $initGpTag, $gpNameForTheme) | Where-Object { $_ }) -join '_')
     $lblGpPreview.Text = if ($initGpPreview) { [char]0x2192 + " $initGpPreview" } else { "" }
-    $headerStack.Children.Add($lblGpPreview) | Out-Null; $gpJob.LblGpPreview = $lblGpPreview
+    $renameGroup.Children.Add($lblGpPreview) | Out-Null; $gpJob.LblGpPreview = $lblGpPreview
 
     $lblFileCount = Create-TextBlock "" "#888888" 11 "Normal"
     $lblFileCount.VerticalAlignment = "Center"; $lblFileCount.Margin = New-Object System.Windows.Thickness(15,0,0,0)
-    $headerStack.Children.Add($lblFileCount) | Out-Null; $gpJob.LblFileCount = $lblFileCount
+    $renameGroup.Children.Add($lblFileCount) | Out-Null; $gpJob.LblFileCount = $lblFileCount
 
     $headerGrid.Children.Add($headerStack) | Out-Null
 
@@ -2963,49 +3142,6 @@ function Build-GpJob($gpPath, $parentDict) {
     $gpRightBtnStack.VerticalAlignment = "Center"; $gpRightBtnStack.Margin = New-Object System.Windows.Thickness(0,0,15,0)
 
     # (Review Mode is now a global top-bar button — no per-group toggle needed)
-
-    $btnCombineGp = New-Object System.Windows.Controls.Button
-    $btnCombineGp.Content = "Combine TSV Data"; $btnCombineGp.Background = Get-WpfColor "#7B4FBF"; $btnCombineGp.Foreground = Get-WpfColor "#FFFFFF"
-    $btnCombineGp.FontWeight = [System.Windows.FontWeights]::Bold; $btnCombineGp.Width = 140; $btnCombineGp.Height = 30; $btnCombineGp.BorderThickness = 0
-    $btnCombineGp.Margin = New-Object System.Windows.Thickness(0,0,10,0); $btnCombineGp.Cursor = [System.Windows.Input.Cursors]::Hand
-    $btnCombineGp.Tag = $gpJob
-    $btnCombineGp.Add_Click({
-        $gp = $this.Tag
-        $targetDir = $gp.GpPath
-        if ([string]::IsNullOrWhiteSpace($targetDir) -or -not (Test-Path $targetDir)) {
-            [System.Windows.MessageBox]::Show("Grandparent folder path is not valid.", "Combine TSV Data", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
-            return
-        }
-        $folderName = Split-Path $targetDir -Leaf
-        $outTsvPath = Join-Path $targetDir "${folderName}_Data.tsv"
-        $tsvFiles = Get-ChildItem -Path $targetDir -Filter "*_Data.tsv" -Recurse -ErrorAction SilentlyContinue |
-                    Where-Object { $_.Name -notmatch "(?i)^.*_Design_Data\.tsv$" }
-        if ($tsvFiles.Count -eq 0) {
-            [System.Windows.MessageBox]::Show("No TSV data files found in:`n$targetDir", "Nothing to Combine", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
-            return
-        }
-        $combined = [ordered]@{}
-        foreach ($tsv in $tsvFiles) {
-            if ($tsv.FullName -eq $outTsvPath) { continue }
-            $line = Get-Content $tsv.FullName -ErrorAction SilentlyContinue | Select-Object -Last 1
-            if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            $cols = $line -split "`t"; $key = if ($cols.Count -ge 3) { $cols[2] } else { $cols[0] }
-            $combined[$key] = $line
-        }
-        if ($combined.Count -eq 0) {
-            [System.Windows.MessageBox]::Show("No TSV data rows found to combine.", "Nothing to Combine", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
-            return
-        }
-        $combined.Values | Set-Content -Path $outTsvPath -Encoding UTF8
-        [System.Windows.Clipboard]::SetText($combined.Values -join "`r`n")
-        [System.Windows.MessageBox]::Show(
-            "Combined $($combined.Count) rows into:`n${folderName}_Data.tsv`n`nAll $($combined.Count) rows have been copied to your clipboard.",
-            "Combine Complete",
-            [System.Windows.MessageBoxButton]::OK,
-            [System.Windows.MessageBoxImage]::Information
-        ) | Out-Null
-    })
-    $gpRightBtnStack.Children.Add($btnCombineGp) | Out-Null
 
     $btnRemoveGp = New-Object System.Windows.Controls.Button
     $btnRemoveGp.Content = "Remove Group"; $btnRemoveGp.Background = Get-WpfColor "#D95F5F"; $btnRemoveGp.Foreground = Get-WpfColor "#FFFFFF"
@@ -3059,6 +3195,51 @@ function Build-GpJob($gpPath, $parentDict) {
     $themeBar.Child = $themeBarStack
     $gpStack.Children.Add($themeBar) | Out-Null
     $gpJob.ThemeBar = $themeBar
+    $themeBar.Visibility = if ($script:GlobalMode -eq "Editing") { "Collapsed" } else { "Visible" }
+
+    # --- EDITING TASK BAR (shown only in Editing mode) ---
+    $editingThemeBar = New-Object System.Windows.Controls.Border
+    $editingThemeBar.Background = Get-WpfColor "#1C1E28"
+    $editingThemeBar.BorderBrush = Get-WpfColor "#2A2C38"
+    $editingThemeBar.BorderThickness = New-Object System.Windows.Thickness(0,0,0,1)
+    $editingThemeBar.Padding = New-Object System.Windows.Thickness(15,10,15,10)
+    $editingThemeBar.Visibility = if ($script:GlobalMode -eq "Editing") { "Visible" } else { "Collapsed" }
+
+    $etbStack = New-Object System.Windows.Controls.StackPanel; $etbStack.Orientation = "Horizontal"
+
+    $lblEtbHeader = New-Object System.Windows.Controls.TextBlock
+    $lblEtbHeader.Text = "Editing Queue:"; $lblEtbHeader.Foreground = Get-WpfColor "#7AAABB"
+    $lblEtbHeader.FontWeight = [System.Windows.FontWeights]::Bold; $lblEtbHeader.FontSize = 12
+    $lblEtbHeader.VerticalAlignment = "Center"; $lblEtbHeader.Margin = New-Object System.Windows.Thickness(0,0,18,0)
+    $etbStack.Children.Add($lblEtbHeader) | Out-Null
+
+    $chkThEdReNest = New-Object System.Windows.Controls.CheckBox; $chkThEdReNest.Content = "Re-Nest"
+    $chkThEdReNest.IsChecked = $true; $chkThEdReNest.Foreground = Get-WpfColor "#CCCCCC"
+    $chkThEdReNest.VerticalAlignment = "Center"; $chkThEdReNest.Margin = New-Object System.Windows.Thickness(0,0,20,0)
+
+    $btnThEdSelAll   = New-Object System.Windows.Controls.Button; $btnThEdSelAll.Content   = "Select All"
+    $btnThEdSelAll.Background   = Get-WpfColor "#2A2C35"; $btnThEdSelAll.Foreground   = Get-WpfColor "#FFFFFF"
+    $btnThEdSelAll.Width = 85; $btnThEdSelAll.Height = 25; $btnThEdSelAll.BorderThickness = 0
+    $btnThEdSelAll.Cursor = [System.Windows.Input.Cursors]::Hand; $btnThEdSelAll.Margin = New-Object System.Windows.Thickness(0,0,8,0)
+
+    $btnThEdDeselAll = New-Object System.Windows.Controls.Button; $btnThEdDeselAll.Content = "Deselect All"
+    $btnThEdDeselAll.Background = Get-WpfColor "#2A2C35"; $btnThEdDeselAll.Foreground = Get-WpfColor "#FFFFFF"
+    $btnThEdDeselAll.Width = 90; $btnThEdDeselAll.Height = 25; $btnThEdDeselAll.BorderThickness = 0
+    $btnThEdDeselAll.Cursor = [System.Windows.Input.Cursors]::Hand; $btnThEdDeselAll.Margin = New-Object System.Windows.Thickness(0,0,20,0)
+
+    $btnThEdQueueAll = New-Object System.Windows.Controls.Button; $btnThEdQueueAll.Content = "Queue Group"
+    $btnThEdQueueAll.Background = Get-WpfColor "#3A5080"; $btnThEdQueueAll.Foreground = Get-WpfColor "#FFFFFF"
+    $btnThEdQueueAll.Width = 105; $btnThEdQueueAll.Height = 25; $btnThEdQueueAll.BorderThickness = 0
+    $btnThEdQueueAll.FontWeight = [System.Windows.FontWeights]::Bold
+    $btnThEdQueueAll.Cursor = [System.Windows.Input.Cursors]::Hand
+
+    $etbStack.Children.Add($chkThEdReNest)  | Out-Null
+    $etbStack.Children.Add($btnThEdSelAll)  | Out-Null
+    $etbStack.Children.Add($btnThEdDeselAll)    | Out-Null
+    $etbStack.Children.Add($btnThEdQueueAll)    | Out-Null
+    $editingThemeBar.Child = $etbStack
+    $gpStack.Children.Add($editingThemeBar) | Out-Null
+    $gpJob.EditingThemeBar = $editingThemeBar
 
     $parentListStack = New-Object System.Windows.Controls.StackPanel
     $parentListStack.Margin = New-Object System.Windows.Thickness(15)
@@ -3175,7 +3356,94 @@ function Build-GpJob($gpPath, $parentDict) {
     $cbPrefix.Add_SelectionChanged({ foreach ($p in $this.Tag.Parents) { Update-ParentPreview $p $this.Tag } })
     $cbGpTag.Tag = $gpJob
     $cbGpTag.Add_SelectionChanged({ foreach ($p in $this.Tag.Parents) { Update-ParentPreview $p $this.Tag } })
+
+    # --- EDITING THEME BAR HANDLERS (wired after Parents are populated) ---
+    $chkThEdReNest.Tag = $gpJob
+    $chkThEdReNest.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { if ($null -ne $p.ChkEdReNest) { $p.ChkEdReNest.IsChecked = $s } } })
+
+    $btnThEdSelAll.Tag = $gpJob
+    $btnThEdSelAll.Add_Click({
+        foreach ($p in $this.Tag.Parents) {
+            if ($null -ne $p.ChkEdReNest) { $p.ChkEdReNest.IsChecked = $true }
+        }
+        $chkThEdReNest.IsChecked = $true
+    }.GetNewClosure())
+
+    $btnThEdDeselAll.Tag = $gpJob
+    $btnThEdDeselAll.Add_Click({
+        foreach ($p in $this.Tag.Parents) {
+            if ($null -ne $p.ChkEdReNest) { $p.ChkEdReNest.IsChecked = $false }
+        }
+        $chkThEdReNest.IsChecked = $false
+    }.GetNewClosure())
+
+    $btnThEdQueueAll.Tag = $gpJob
+    $btnThEdQueueAll.Add_Click({
+        $gp = $this.Tag
+        foreach ($p in $gp.Parents) { Enqueue-EditJob $p $gp }
+        if ($null -eq $script:editActiveJob) { Start-NextEditJob }
+    })
+
     $mainStack.Children.Add($container) | Out-Null
+}
+
+# --- Edit queue functions ---
+
+function Enqueue-EditJob($pJob, $gpJob) {
+    if ($pJob.EdIsQueued) { return }
+    $doReNest = ($null -ne $pJob.ChkEdReNest -and [bool]$pJob.ChkEdReNest.IsChecked)
+    if (-not $doReNest) { return }   # nothing to queue right now
+    $pJob.EdIsQueued = $true
+    if ($null -ne $pJob.LblEdQueueStatus) {
+        $pJob.LblEdQueueStatus.Text = "Queued"; $pJob.LblEdQueueStatus.Foreground = Get-WpfColor "#E8A135"
+    }
+    if ($null -ne $pJob.BtnEdQueue) { $pJob.BtnEdQueue.IsEnabled = $false }
+    $script:editQueue.Enqueue(@{ PJob = $pJob; GpJob = $gpJob })
+}
+
+function Start-NextEditJob {
+    if ($null -ne $script:editActiveJob -or $script:editQueue.Count -eq 0) { return }
+    $jobWrapper = $script:editQueue.Dequeue()
+    $pJob  = $jobWrapper.PJob
+    $gpJob = $jobWrapper.GpJob
+    $script:editActiveJob = $jobWrapper
+
+    if ($null -ne $pJob.LblEdQueueStatus) {
+        $pJob.LblEdQueueStatus.Text = "Running..."; $pJob.LblEdQueueStatus.Foreground = Get-WpfColor "#F0A030"
+    }
+
+    # Trigger Re-Nest via the card's existing renestTag
+    $rt = if ($null -ne $pJob.BtnRunRenest) { $pJob.BtnRunRenest.Tag } else { $null }
+    if ($null -eq $rt -or [string]::IsNullOrEmpty($rt.FinalPath) -or -not (Test-Path -LiteralPath $rt.FinalPath)) {
+        if ($null -ne $pJob.LblEdQueueStatus) {
+            $pJob.LblEdQueueStatus.Text = "No Final.3mf"; $pJob.LblEdQueueStatus.Foreground = Get-WpfColor "#D95F5F"
+        }
+        $pJob.EdIsQueued = $false
+        if ($null -ne $pJob.BtnEdQueue) { $pJob.BtnEdQueue.IsEnabled = $true }
+        $script:editActiveJob = $null
+        if ($script:editQueue.Count -gt 0) { Start-NextEditJob }
+        return
+    }
+
+    # Reset Re-Nest review state and fire
+    $rt.BorderReview.Visibility = "Collapsed"
+    $rt.BtnRun.IsEnabled = $false; $rt.BtnRun.Content = "Running..."
+    $rt.BtnRun.Background = Get-WpfColor "#333333"; $rt.BtnRun.Foreground = Get-WpfColor "#888888"
+    $rt.LblStatus.Text = "Re-nesting..."; $rt.LblStatus.Foreground = Get-WpfColor "#F0A030"
+
+    $tmpBase = Join-Path $env:TEMP ("renest_" + [System.Guid]::NewGuid().ToString("N"))
+    $rt.LogOut = $tmpBase + "_out.txt"; $rt.LogErr = $tmpBase + "_err.txt"
+    [System.IO.File]::WriteAllText($rt.LogOut, ""); [System.IO.File]::WriteAllText($rt.LogErr, "")
+    $psArgs = @("-NoProfile","-ExecutionPolicy","Bypass","-File",$rt.WorkerPath,"-FinalPath",$rt.FinalPath,"-NoConfirm")
+    $rt.Proc = Start-Process -FilePath "powershell.exe" -ArgumentList $psArgs `
+        -NoNewWindow -RedirectStandardOutput $rt.LogOut -RedirectStandardError $rt.LogErr -PassThru
+    $script:_RenestActive = $rt
+
+    $renestTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $renestTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+    $rt.Timer = $renestTimer
+    $renestTimer.Add_Tick($script:_RenestTickSB)
+    $renestTimer.Start()
 }
 
 # --- Renest tick handler (polls hidden worker process every 250 ms) ---
@@ -3202,16 +3470,24 @@ $script:_RenestTickSB = {
     $outDir = [System.IO.Path]::GetDirectoryName($t2.FinalPath)
     $t2.RenestPath = Join-Path $outDir ($stemR + "_Renest.3mf")
 
-    # Append captured stdout/stderr to the worker's debug file
+    # Move worker debug file to TEMP (keep permanent copy only if user requests it)
+    $t2.DebugTempPath = ""
     try {
-        $debugPath = Join-Path $outDir ($stemR + "_Renest_debug.txt")
-        $logContent = if ($t2.LogOut -and (Test-Path -LiteralPath $t2.LogOut)) { [System.IO.File]::ReadAllText($t2.LogOut) } else { "" }
-        $errContent = if ($t2.LogErr -and (Test-Path -LiteralPath $t2.LogErr)) { [System.IO.File]::ReadAllText($t2.LogErr) } else { "" }
-        $combined = $logContent.TrimEnd()
-        if ($errContent.Trim()) { $combined += "`r`n--- stderr ---`r`n" + $errContent.TrimEnd() }
-        if ($combined.Trim()) {
-            $append = "`r`n`r`n======================================`r`nRUN LOG (exit $exitCode)`r`n======================================`r`n" + $combined
-            [System.IO.File]::AppendAllText($debugPath, $append, [System.Text.Encoding]::UTF8)
+        $permDebugPath = Join-Path $outDir ($stemR + "_Renest_debug.txt")
+        $errContent = if ($t2.LogErr -and (Test-Path -LiteralPath $t2.LogErr)) { [System.IO.File]::ReadAllText($t2.LogErr).Trim() } else { "" }
+        if (Test-Path -LiteralPath $permDebugPath) {
+            # Append stderr (if any) then move to temp
+            if ($errContent) {
+                [System.IO.File]::AppendAllText($permDebugPath, "`r`n--- stderr ---`r`n" + $errContent, [System.Text.Encoding]::UTF8)
+            }
+            $debugTmp = Join-Path $env:TEMP ("renest_debug_" + [System.Guid]::NewGuid().ToString("N") + ".txt")
+            Move-Item -LiteralPath $permDebugPath -Destination $debugTmp -Force
+            $t2.DebugTempPath = $debugTmp
+        } elseif ($errContent) {
+            # No debug file from worker but we have stderr - save that to temp
+            $debugTmp = Join-Path $env:TEMP ("renest_debug_" + [System.Guid]::NewGuid().ToString("N") + ".txt")
+            [System.IO.File]::WriteAllText($debugTmp, "--- stderr ---`r`n" + $errContent, [System.Text.Encoding]::UTF8)
+            $t2.DebugTempPath = $debugTmp
         }
     } catch {}
     try { if ($t2.LogOut -and (Test-Path -LiteralPath $t2.LogOut)) { Remove-Item -LiteralPath $t2.LogOut -Force -ErrorAction SilentlyContinue } } catch {}
@@ -3220,16 +3496,16 @@ $script:_RenestTickSB = {
     # Success = exit 0 OR the renest file was actually created (handles edge-case ExitCode issues)
     $renestExists = Test-Path -LiteralPath $t2.RenestPath
     if ($exitCode -eq 0 -or $renestExists) {
-        $t2.LblStatus.Text = "Done - loading previews..."; $t2.LblStatus.Foreground = Get-WpfColor "#4CAF72"
+        $t2.LblStatus.Text = "Done - loading preview..."; $t2.LblStatus.Foreground = Get-WpfColor "#4CAF72"
         try {
             $tmpImgDir = Join-Path $env:TEMP ("renest_imgs_" + [System.Guid]::NewGuid().ToString("N"))
             New-Item -ItemType Directory -Path $tmpImgDir -Force | Out-Null
-            $srcPickPath = if ($t2.SourcePath) { Extract-3mfPickImage $t2.SourcePath $tmpImgDir "src" } else { $null }
-            $newPickPath = if ($renestExists)   { Extract-3mfPickImage $t2.RenestPath $tmpImgDir "new" } else { $null }
-            # Col 0 (RnImgLeft)  = source/before over the card image area
-            # Col 1 (RnImgRight) = renest/after  over the pick image area
-            $t2.P.RnImgLeft.Source  = if ($srcPickPath -and (Test-Path $srcPickPath)) { Load-WpfImage $srcPickPath } else { $null }
+            # Only update the right (col 1) overlay with the new Renest top_1.png
+            # Left (col 0) keeps its original Nest Source image loaded at build time
+            $newPickPath = if ($renestExists) { Extract-3mfPickImage $t2.RenestPath $tmpImgDir "new" } else { $null }
             $t2.P.RnImgRight.Source = if ($newPickPath -and (Test-Path $newPickPath)) { Load-WpfImage $newPickPath } else { $null }
+            if ($null -ne $t2.P.RnLblRight) { $t2.P.RnLblRight.Text = "Re-Nest" }
+            # Ensure overlays are visible (they may have been hidden if in non-Editing mode)
             $t2.P.RnOvLeft.Visibility  = "Visible"
             $t2.P.RnOvRight.Visibility = "Visible"
             $t2.LblStatus.Text = "Done - review and confirm below."; $t2.LblStatus.Foreground = Get-WpfColor "#4CAF72"
@@ -3239,6 +3515,20 @@ $script:_RenestTickSB = {
         $t2.BorderReview.Visibility = "Visible"
     } else {
         $t2.LblStatus.Text = "Failed (exit $exitCode)"; $t2.LblStatus.Foreground = Get-WpfColor "#D95F5F"
+    }
+
+    # If this run was triggered by the edit queue, update queue state and advance
+    if ($null -ne $script:editActiveJob -and [object]::ReferenceEquals($script:editActiveJob.PJob, $t2.P)) {
+        $qPJob = $script:editActiveJob.PJob
+        $qPJob.EdIsQueued = $false
+        $statusOk = ($exitCode -eq 0 -or (Test-Path -LiteralPath $t2.RenestPath))
+        if ($null -ne $qPJob.LblEdQueueStatus) {
+            $qPJob.LblEdQueueStatus.Text = if ($statusOk) { "Done" } else { "Failed" }
+            $qPJob.LblEdQueueStatus.Foreground = Get-WpfColor $(if ($statusOk) { "#4CAF72" } else { "#D95F5F" })
+        }
+        if ($null -ne $qPJob.BtnEdQueue) { $qPJob.BtnEdQueue.IsEnabled = $true }
+        $script:editActiveJob = $null
+        if ($script:editQueue.Count -gt 0) { Start-NextEditJob }
     }
 }
 
@@ -3268,6 +3558,15 @@ $script:queueTimer.Add_Tick({
                         $pJob.CardStatusLabel.Text = $txt
                         $pJob.PickStatusLabel.Text = $txt
                         $pJob.BtnApply.Content = $raw
+                        # Mirror to editing-panel status labels so progress is visible in Editing mode
+                        $editFg = Get-WpfColor $(if ($raw -match '(?i)error') { "#D95F5F" } else { "#F0A030" })
+                        $editTxt = if ($slicePct -ne $null) { "Exporting GCode... $slicePct%" } else { $raw }
+                        if ($null -ne $pJob.RenestStatusLbl) {
+                            $pJob.RenestStatusLbl.Text = $editTxt; $pJob.RenestStatusLbl.Foreground = $editFg
+                        }
+                        if ($null -ne $pJob.LblEdQueueStatus) {
+                            $pJob.LblEdQueueStatus.Text = $editTxt; $pJob.LblEdQueueStatus.Foreground = $editFg
+                        }
                         if ($slicePct -ne $null) {
                             $pJob.CardProgressBar.Value = $slicePct
                             $pJob.CardProgressBar.Visibility = "Visible"
@@ -3342,27 +3641,52 @@ $script:queueTimer.Add_Tick({
             foreach ($fi in $files) { Add-FileRow $pJob $gpJob $fi }
             Update-ParentPreview $pJob $gpJob
 
-            # Update UI to KEEP/REVERT state
+            # Clear progress bars and overlays (common to all job types)
             $pJob.CardProgressBar.Visibility = "Collapsed"; $pJob.CardProgressBar.Value = 0
             $pJob.PickProgressBar.Visibility = "Collapsed"; $pJob.PickProgressBar.Value = 0
             $pJob.ProcessingOverlay.Visibility = "Collapsed"
             $pJob.PickProcessingOverlay.Visibility = "Collapsed"
             $pJob.RowPanel.IsEnabled = $true
-            $pJob.IsDone = $true
-            $pJob.ChkRename.IsEnabled = $true; $pJob.ChkMerge.IsEnabled = $true; $pJob.ChkSlice.IsEnabled = $true
-            $pJob.ChkExtract.IsEnabled = $true; $pJob.ChkImage.IsEnabled = $true
 
-            $pJob.BtnApply.Content = "KEEP"; $pJob.BtnApply.Background = Get-WpfColor "#4CAF72"
-            $pJob.BtnApply.IsEnabled = $true; $pJob.BtnApply.Width = 70
+            $isSliceOnly = ($script:activeProcessJob.SliceOnly -eq $true)
 
-            # Only enable revert controls if a Nest.3mf actually exists (failed merges won't have one)
-            $nestNow = Get-ChildItem -Path $pJob.FolderPath -Filter "*Nest.3mf" -File -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($nestNow) {
-                $pJob.BtnRevertDone.Visibility = "Visible"
-                if ($pJob.BtnRevertMerge) { $pJob.BtnRevertMerge.IsEnabled = $true; $pJob.BtnRevertMerge.Background = Get-WpfColor "#D95F5F"; $pJob.BtnRevertMerge.Foreground = Get-WpfColor "#FFFFFF"; $pJob.BtnRevertMerge.ToolTip = $null }
+            if ($isSliceOnly) {
+                # Editing-mode slice export finished — leave card reusable, don't touch FilePrepPanel state
+                $pJob.IsQueued = $false; $pJob.IsDone = $false
+                if ($null -ne $pJob.RenestStatusLbl) {
+                    $pJob.RenestStatusLbl.Text = "Export GCode complete!"; $pJob.RenestStatusLbl.Foreground = Get-WpfColor "#4CAF72"
+                }
+                if ($null -ne $pJob.LblEdQueueStatus) {
+                    $pJob.LblEdQueueStatus.Text = "Done"; $pJob.LblEdQueueStatus.Foreground = Get-WpfColor "#4CAF72"
+                }
+                if ($null -ne $pJob.BtnEdQueue) { $pJob.BtnEdQueue.IsEnabled = $true }
+                if ($null -ne $pJob.BtnRunRenest) { $pJob.BtnRunRenest.IsEnabled = $true }
             } else {
-                $pJob.BtnRevertDone.Visibility = "Collapsed"
-                if ($pJob.BtnRevertMerge) { $pJob.BtnRevertMerge.IsEnabled = $false; $pJob.BtnRevertMerge.Background = Get-WpfColor "#3A3A3A"; $pJob.BtnRevertMerge.Foreground = Get-WpfColor "#666666"; $pJob.BtnRevertMerge.ToolTip = "No Nest.3mf found - merge may have failed" }
+                # Normal merge/process job finished — KEEP/REVERT state
+                $pJob.IsDone = $true
+                $pJob.ChkRename.IsEnabled = $true; $pJob.ChkMerge.IsEnabled = $true; $pJob.ChkSlice.IsEnabled = $true
+                $pJob.ChkExtract.IsEnabled = $true; $pJob.ChkImage.IsEnabled = $true
+
+                $pJob.BtnApply.Content = "KEEP"; $pJob.BtnApply.Background = Get-WpfColor "#4CAF72"
+                $pJob.BtnApply.IsEnabled = $true; $pJob.BtnApply.Width = 70
+                # Mirror completion to editing panel in case mode was switched
+                if ($null -ne $pJob.RenestStatusLbl) {
+                    $pJob.RenestStatusLbl.Text = "Export GCode complete!"; $pJob.RenestStatusLbl.Foreground = Get-WpfColor "#4CAF72"
+                }
+                if ($null -ne $pJob.LblEdQueueStatus) {
+                    $pJob.LblEdQueueStatus.Text = "Done"; $pJob.LblEdQueueStatus.Foreground = Get-WpfColor "#4CAF72"
+                    if ($null -ne $pJob.BtnEdQueue) { $pJob.BtnEdQueue.IsEnabled = $true }
+                }
+
+                # Only enable revert controls if a Nest.3mf actually exists (failed merges won't have one)
+                $nestNow = Get-ChildItem -Path $pJob.FolderPath -Filter "*Nest.3mf" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($nestNow) {
+                    $pJob.BtnRevertDone.Visibility = "Visible"
+                    if ($pJob.BtnRevertMerge) { $pJob.BtnRevertMerge.IsEnabled = $true; $pJob.BtnRevertMerge.Background = Get-WpfColor "#D95F5F"; $pJob.BtnRevertMerge.Foreground = Get-WpfColor "#FFFFFF"; $pJob.BtnRevertMerge.ToolTip = $null }
+                } else {
+                    $pJob.BtnRevertDone.Visibility = "Collapsed"
+                    if ($pJob.BtnRevertMerge) { $pJob.BtnRevertMerge.IsEnabled = $false; $pJob.BtnRevertMerge.Background = Get-WpfColor "#3A3A3A"; $pJob.BtnRevertMerge.Foreground = Get-WpfColor "#666666"; $pJob.BtnRevertMerge.ToolTip = "No Nest.3mf found - merge may have failed" }
+                }
             }
 
             $script:activeProcess = $null; $script:activeProcessJob = $null
