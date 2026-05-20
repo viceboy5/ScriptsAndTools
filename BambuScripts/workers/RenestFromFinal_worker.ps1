@@ -386,31 +386,19 @@ try {
     # If the Final's build item is identity (no reorientation), no correction is needed.
     $finalBuildRot = Get-TxRot (Parse-Tx $masterItem.GetAttribute('transform'))
     $compsMatch    = $false   # initialised here; set inside else block if applicable
+    # Variables initialised here so the debug section can always reference them
+    $rotMatchesSource = $false
+    $sameTilt         = $false
+    $refR8norm        = 1.0
+    $finalR8norm      = 1.0
     if (Is-IdentityRot $finalBuildRot) {
         $rotCorrection = [double[]](1,0,0, 0,1,0, 0,0,1)
         Write-Host "Final master build item is identity - no rotation correction needed."
     } else {
-        # Before applying any correction, check whether the Final's component transforms
-        # are identical to the source template's component transforms.
-        #
-        # When the Final was saved directly from a plate (e.g. the user exported one
-        # instance from the Nest for editing), its build item rotation is the same
-        # rotation that is already baked into the source build items.  The component-
-        # level geometry is in exactly the same local frame the source transforms
-        # expect.  Applying a correction in this case would double-rotate every clone.
-        #
-        # Only apply a correction when the Final was genuinely re-oriented relative to
-        # the source (component transforms differ), meaning the user edited it in a
-        # different orientation and Bambu changed the local frame.
-        # Check if the Final's build rotation matches any source plate item rotation.
-        # If the user exported the Final directly from the nest (or the Final is otherwise
-        # in the same plate orientation), its build rotation will appear in the source
-        # build items.  In that case the geometry is already in the expected frame and
-        # applying a correction would double-rotate every clone.
-        # Translation-only design edits (component positions changing) do NOT affect this
-        # check, making it robust against the previous component-transform comparison which
-        # could misfire when parts were repositioned without re-orienting the assembly.
-        $rotMatchesSource = $false
+        # Check if the Final's build rotation matches any source plate item rotation exactly.
+        # If the user exported the Final directly from the nest its rotation will appear in
+        # the source build items; geometry is already in the expected frame so no correction
+        # is needed (applying one would double-rotate every clone).
         $rotEps = 1e-3
         foreach ($txStr in $sourceTransforms) {
             if ([string]::IsNullOrWhiteSpace($txStr)) { continue }
@@ -426,14 +414,41 @@ try {
             $rotCorrection = [double[]](1,0,0, 0,1,0, 0,0,1)
             Write-Host "Final rotation matches a source plate item - same orientation, no correction needed."
         } else {
-            # Final has a rotation not present in the source plate items.
-            # The user re-oriented the assembly for editing; extract the tilt component
-            # (strip Z yaw to avoid spinning the nest positions) and propagate it.
-            $rotCorrection = Get-TiltOnlyCorrection $finalBuildRot
-            if (Is-IdentityRot $rotCorrection) {
-                Write-Host "Rotation correction: Final has Z-only rotation - tilt is identity, no correction applied."
+            # ── Tilt-depth check ──────────────────────────────────────────────────
+            # r[8] / |row| = cos(tilt_angle) and is INVARIANT under any additional
+            # Z-axis (yaw) rotation.  If the user opened the Final (already at the
+            # source's tilt) and simply spun it around Z for editing convenience,
+            # the tilt depth will be identical to the source reference even though
+            # the full rotation matrix no longer matches.  Applying Get-TiltOnlyCorrection
+            # in that case would extract a DIFFERENT tilt direction (the source tilt
+            # rotated by the extra yaw) and double-tilt every clone on the plate.
+            # Solution: skip the correction whenever the tilt depth agrees with the
+            # source.  Only apply a tilt correction when the user genuinely changed
+            # the tilt (e.g. stood the object upright when the source has it flat).
+            $sumR8 = 0.0; $cntR8 = 0
+            foreach ($txStr in $sourceTransforms) {
+                if ([string]::IsNullOrWhiteSpace($txStr)) { continue }
+                $rt = Get-TxRot (Parse-Tx $txStr)
+                $rLen = [Math]::Sqrt($rt[6]*$rt[6]+$rt[7]*$rt[7]+$rt[8]*$rt[8])
+                if ($rLen -gt 1e-9) { $sumR8 += $rt[8]/$rLen; $cntR8++ }
+            }
+            $refR8norm   = if ($cntR8 -gt 0) { $sumR8/$cntR8 } else { 1.0 }
+            $finalRowLen = [Math]::Sqrt($finalBuildRot[6]*$finalBuildRot[6]+$finalBuildRot[7]*$finalBuildRot[7]+$finalBuildRot[8]*$finalBuildRot[8])
+            $finalR8norm = if ($finalRowLen -gt 1e-9) { $finalBuildRot[8]/$finalRowLen } else { 1.0 }
+            $sameTilt    = ([Math]::Abs($finalR8norm - $refR8norm) -lt 0.02)
+
+            if ($sameTilt) {
+                $rotCorrection = [double[]](1,0,0, 0,1,0, 0,0,1)
+                Write-Host ("Tilt depth matches source (final={0:F4} src_ref={1:F4}) - Z-yaw only, no tilt correction." -f $finalR8norm, $refR8norm)
             } else {
-                Write-Host "Rotation correction: tilt-only component extracted from Final build item (Z yaw stripped)."
+                # Tilt genuinely differs - extract tilt-only correction, strip Z yaw so
+                # the nest layout positions don't spin.
+                $rotCorrection = Get-TiltOnlyCorrection $finalBuildRot
+                if (Is-IdentityRot $rotCorrection) {
+                    Write-Host ("Tilt differs (final={0:F4} src_ref={1:F4}) but correction is identity (upright model)." -f $finalR8norm, $refR8norm)
+                } else {
+                    Write-Host ("Tilt differs (final={0:F4} src_ref={1:F4}) - tilt-only correction applied (Z yaw stripped)." -f $finalR8norm, $refR8norm)
+                }
             }
         }
     }
@@ -820,8 +835,9 @@ try {
     $masterBuildTx = $masterItem.GetAttribute('transform')
     $dbLines.Add("  Build TX    : $(if ([string]::IsNullOrWhiteSpace($masterBuildTx)) { '(identity/none)' } else { $masterBuildTx })")
     $dbLines.Add("  Build ROT   : $($finalBuildRot -join ' ')")
-    $dbLines.Add("  Rot match   : $(if ($rotMatchesSource) { 'YES - Final rotation found in source plate items, no correction needed' } else { 'NO - Final rotation not in source plate, tilt correction applied' })")
-    $dbLines.Add("  Correction  : $(if (Is-IdentityRot $rotCorrection) { 'none (identity)' } else { 'applied (left-multiply source rot by tilt-only component of Final build ROT)' })")
+    $dbLines.Add("  Rot match   : $(if ($rotMatchesSource) { 'YES - exact match to a source item, no correction' } else { 'NO - no exact match' })")
+    $dbLines.Add("  Tilt check  : final r8/|r|=$($finalR8norm.ToString('F4'))  src_ref=$($refR8norm.ToString('F4'))  sameTilt=$sameTilt")
+    $dbLines.Add("  Correction  : $(if (Is-IdentityRot $rotCorrection) { 'none (identity)' } else { 'applied (tilt-only, Z yaw stripped)' })")
     $dbLines.Add("")
 
     $dbLines.Add("FINAL.3MF - Master Object Component Transforms")
