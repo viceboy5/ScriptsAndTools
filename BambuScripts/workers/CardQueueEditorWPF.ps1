@@ -4398,6 +4398,61 @@ function Rebuild-TagsList($stack) {
     }
 }
 
+# ── Script-scope helpers for Naming Conventions closures ─────────────────────
+# These functions are called BY NAME from inside .GetNewClosure() closures, so
+# they execute in the main script's scope and can safely read/write $script: vars.
+function Set-GpThemes([string[]]$items)        { $script:GpThemes        = $items }
+function Set-PrinterPrefixes([string[]]$items) { $script:PrinterPrefixes = $items }
+
+function Invoke-AddTagEntry([string]$tn, [string]$tl, $stack) {
+    Write-Log "Invoke-AddTagEntry: tn='$tn' tl='$tl'"
+    $tes = $script:TagEditState
+    if ($null -eq $tes) { Write-Log "Invoke-AddTagEntry: TagEditState is null" "ERROR"; return }
+    $oldSel = $tes.SelectedTag
+    if (-not [string]::IsNullOrWhiteSpace($oldSel) -and $oldSel -ne $tn -and ($script:Tags -contains $oldSel)) {
+        $script:Tags = @($script:Tags | ForEach-Object { if ($_ -eq $oldSel) { $tn } else { $_ } })
+        $script:TagLabels.Remove($oldSel) | Out-Null
+        $tes.DirtyTags.Remove($oldSel) | Out-Null
+    } elseif (-not ($script:Tags -contains $tn)) {
+        $script:Tags += $tn
+    }
+    $script:TagLabels[$tn] = $tl
+    $tes.DirtyTags[$tn] = $true
+    $tes.SelectedTag = ""
+    if ($null -ne $tes.TagBox) { $tes.TagBox.Text = "" }
+    if ($null -ne $tes.LblBox) { $tes.LblBox.Text = "" }
+    if ($null -ne $tes.AddBtn) { $tes.AddBtn.Content = "Add" }
+    Rebuild-TagsList $stack
+    Write-Log "Invoke-AddTagEntry: done (Tags=$($script:Tags.Count))"
+}
+
+function Invoke-RemoveTagEntry([string]$tn, $stack) {
+    Write-Log "Invoke-RemoveTagEntry: tn='$tn'"
+    $tes = $script:TagEditState
+    if ($null -eq $tes) { Write-Log "Invoke-RemoveTagEntry: TagEditState is null" "ERROR"; return }
+    $script:Tags = @($script:Tags | Where-Object { $_ -ne $tn })
+    $script:TagLabels.Remove($tn) | Out-Null
+    $tes.DirtyTags.Remove($tn) | Out-Null
+    $tes.SelectedTag = ""
+    if ($null -ne $tes.TagBox) { $tes.TagBox.Text = "" }
+    if ($null -ne $tes.LblBox) { $tes.LblBox.Text = "" }
+    if ($null -ne $tes.AddBtn) { $tes.AddBtn.Content = "Add" }
+    Rebuild-TagsList $stack
+    Write-Log "Invoke-RemoveTagEntry: done (Tags=$($script:Tags.Count))"
+}
+
+function Invoke-SaveTagsSection($stack) {
+    Write-Log "Invoke-SaveTagsSection: start"
+    if (Save-NamesLibrary) {
+        $script:TagEditState.DirtyTags = @{}
+        Rebuild-TagsList $stack
+        Write-Log "Invoke-SaveTagsSection: success"
+        return $true
+    }
+    Write-Log "Invoke-SaveTagsSection: Save-NamesLibrary returned false" "ERROR"
+    return $false
+}
+
 function Build-LibrariesPanel {
     # ── Root panel: overlaps the ScrollViewer in Grid Row 1 ───────────────────
     $outerGrid = $window.Content
@@ -4985,14 +5040,14 @@ function Build-LibrariesPanel {
     # Themes — column 0
     Build-NameListSection $secNaming "Themes" `
         { $script:GpThemes } `
-        { param($v) $script:GpThemes = $v } `
-        { Save-NamesLibrary } 0 | Out-Null
+        { param($v) Set-GpThemes $v } `
+        { Write-Log "Save-NamesLibrary (Themes): called"; $ok = Save-NamesLibrary; Write-Log "Save-NamesLibrary (Themes): $(if($ok){'success'}else{'FAILED'})"; $ok } 0 | Out-Null
 
     # Printer Prefixes — column 2
     Build-NameListSection $secNaming "Printer Prefixes" `
         { $script:PrinterPrefixes } `
-        { param($v) $script:PrinterPrefixes = $v } `
-        { Save-NamesLibrary } 2 | Out-Null
+        { param($v) Set-PrinterPrefixes $v } `
+        { Write-Log "Save-NamesLibrary (Prefixes): called"; $ok = Save-NamesLibrary; Write-Log "Save-NamesLibrary (Prefixes): $(if($ok){'success'}else{'FAILED'})"; $ok } 2 | Out-Null
 
     # Tags & Labels — column 4
     $tagsContainer = New-Object System.Windows.Controls.Grid; $tagsContainer.Margin = New-Object System.Windows.Thickness(0,16,20,16)
@@ -5065,49 +5120,39 @@ function Build-LibrariesPanel {
     $btnSaveTags.Background=Get-WpfColor "#3A5080"; $btnSaveTags.Foreground=Get-WpfColor "#FFFFFF"; $btnSaveTags.BorderThickness=0; $btnSaveTags.Cursor=[System.Windows.Input.Cursors]::Hand
     [System.Windows.Controls.Grid]::SetColumn($btnSaveTags,2); $tagsActGrid.Children.Add($btnSaveTags)|Out-Null
 
-    # Capture stack directly — avoids $this.Tag retrieval inside closures
-    $capturedTagsStack = $tagsListStack
+    # Capture $script: variables as locals — $script: scope is NOT reliably accessible
+    # inside .GetNewClosure() closures running on the WPF dispatcher thread.
+    $capturedTagEditState = $script:TagEditState
+    $capturedTagsStack    = $tagsListStack
+
     $btnAddTag.Add_Click({
-        $tes = $script:TagEditState
-        $tn = $tes.TagBox.Text.Trim(); $tl = $tes.LblBox.Text.Trim()
-        if ([string]::IsNullOrWhiteSpace($tn)) { return }
-        $oldSel = $tes.SelectedTag
-        if (-not [string]::IsNullOrWhiteSpace($oldSel) -and $oldSel -ne $tn -and ($script:Tags -contains $oldSel)) {
-            $script:Tags = @($script:Tags | ForEach-Object { if ($_ -eq $oldSel) { $tn } else { $_ } })
-            $script:TagLabels.Remove($oldSel) | Out-Null
-            $tes.DirtyTags.Remove($oldSel) | Out-Null
-        } elseif (-not ($script:Tags -contains $tn)) {
-            $script:Tags += $tn
-        }
-        $script:TagLabels[$tn] = $tl
-        $tes.DirtyTags[$tn] = $true
-        $tes.SelectedTag = ""
-        $tes.TagBox.Text = ""; $tes.LblBox.Text = ""
-        if ($null -ne $tes.AddBtn) { $tes.AddBtn.Content = "Add" }
-        Rebuild-TagsList $capturedTagsStack
+        Write-Log "btnAddTag: clicked"
+        try {
+            $tn = $capturedTagEditState.TagBox.Text.Trim()
+            $tl = $capturedTagEditState.LblBox.Text.Trim()
+            if ([string]::IsNullOrWhiteSpace($tn)) { Write-Log "btnAddTag: tag name empty, skipping"; return }
+            Invoke-AddTagEntry $tn $tl $capturedTagsStack
+        } catch { Write-Log "btnAddTag EXCEPTION: $($_.Exception.Message)" "ERROR"; Write-Log "  STACK: $($_.ScriptStackTrace)" "ERROR"; throw }
     }.GetNewClosure())
 
     $btnDelTag.Add_Click({
-        $tes = $script:TagEditState
-        $tn = $tes.SelectedTag
-        if ([string]::IsNullOrWhiteSpace($tn)) { return }
-        $script:Tags = @($script:Tags | Where-Object { $_ -ne $tn })
-        $script:TagLabels.Remove($tn) | Out-Null
-        $tes.DirtyTags.Remove($tn) | Out-Null
-        $tes.SelectedTag = ""
-        $tes.TagBox.Text = ""; $tes.LblBox.Text = ""
-        if ($null -ne $tes.AddBtn) { $tes.AddBtn.Content = "Add" }
-        Rebuild-TagsList $capturedTagsStack
+        Write-Log "btnDelTag: clicked"
+        try {
+            $tn = $capturedTagEditState.SelectedTag
+            if ([string]::IsNullOrWhiteSpace($tn)) { Write-Log "btnDelTag: nothing selected, skipping"; return }
+            Invoke-RemoveTagEntry $tn $capturedTagsStack
+        } catch { Write-Log "btnDelTag EXCEPTION: $($_.Exception.Message)" "ERROR"; Write-Log "  STACK: $($_.ScriptStackTrace)" "ERROR"; throw }
     }.GetNewClosure())
 
     $btnSaveTags.Add_Click({
-        if (Save-NamesLibrary) {
-            $script:TagEditState.DirtyTags = @{}
-            $this.Background = Get-WpfColor "#4CAF72"
-            Rebuild-TagsList $capturedTagsStack
-        } else {
-            $this.Background = Get-WpfColor "#D95F5F"
-        }
+        Write-Log "btnSaveTags: clicked"
+        try {
+            if (Invoke-SaveTagsSection $capturedTagsStack) {
+                $this.Background = Get-WpfColor "#4CAF72"
+            } else {
+                $this.Background = Get-WpfColor "#D95F5F"
+            }
+        } catch { Write-Log "btnSaveTags EXCEPTION: $($_.Exception.Message)" "ERROR"; Write-Log "  STACK: $($_.ScriptStackTrace)" "ERROR"; throw }
     }.GetNewClosure())
 
     $script:LibrariesPanel = $root
