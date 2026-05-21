@@ -4127,20 +4127,29 @@ function Rebuild-TagsList($stack) {
             if ($capturedTag -ne $tes.SelectedTag) { $capturedRow.Background = $null }
         }.GetNewClosure())
         $row.Add_MouseLeftButtonDown({
-            # Clear selection highlight on all sibling rows
-            foreach ($sib in $capturedStack.Children) {
-                if ($sib -is [System.Windows.FrameworkElement] -and $null -ne $sib.Tag -and
-                    $sib.Tag -is [string] -and $sib.Tag -ne "header") {
-                    $sib.Background = $null
+            if ($tes.SelectedTag -eq $capturedTag) {
+                # Toggle off — clicking selected row again deselects it
+                $capturedRow.Background = $null
+                $tes.SelectedTag = ""
+                if ($null -ne $tes.TagBox) { $tes.TagBox.Text = "" }
+                if ($null -ne $tes.LblBox) { $tes.LblBox.Text = "" }
+                if ($null -ne $tes.AddBtn) { $tes.AddBtn.Content = "Add" }
+            } else {
+                # Select this row, clear all others
+                foreach ($sib in $capturedStack.Children) {
+                    if ($sib -is [System.Windows.FrameworkElement] -and
+                        $null -ne $sib.Tag -and $sib.Tag -is [string]) {
+                        $sib.Background = $null
+                    }
                 }
+                $capturedRow.Background = Get-WpfColor "#2A3A5A"
+                $tes.SelectedTag = $capturedTag
+                if ($null -ne $tes.TagBox) {
+                    $tes.TagBox.Text = $capturedTag
+                    $tes.LblBox.Text = if ($tagLabels.ContainsKey($capturedTag)) { $tagLabels[$capturedTag] } else { "" }
+                }
+                if ($null -ne $tes.AddBtn) { $tes.AddBtn.Content = "Edit" }
             }
-            $capturedRow.Background = Get-WpfColor "#2A3A5A"
-            $tes.SelectedTag = $capturedTag
-            if ($null -ne $tes.TagBox) {
-                $tes.TagBox.Text = $capturedTag
-                $tes.LblBox.Text = if ($tagLabels.ContainsKey($capturedTag)) { $tagLabels[$capturedTag] } else { "" }
-            }
-            if ($null -ne $tes.AddBtn) { $tes.AddBtn.Content = "Edit" }
         }.GetNewClosure())
         # Use a simple string tag so sibling-clear loop works without hashtable method calls
         $row.Tag = $capturedTag
@@ -4326,6 +4335,7 @@ function Build-LibrariesPanel {
     $editStack.Children.Add($svOuter) | Out-Null
 
     $svCanvas = New-Object System.Windows.Controls.Canvas
+    $svCanvas.Background = [System.Windows.Media.Brushes]::Transparent  # needed for hit-testing
     $svOuter.Child = $svCanvas
 
     # Layer 1: horizontal white→hue gradient
@@ -4437,40 +4447,49 @@ function Build-LibrariesPanel {
     }
 
     # ── Hue canvas mouse events ───────────────────────────────────────────────
-    # Use captured $pickerState directly — $this.Tag retrieval via WPF DependencyProperty
-    # is unreliable inside .GetNewClosure() closures on the WPF dispatcher thread.
+    # Use captured canvas/pickerState variables — avoids $this/$_ capture ambiguity
+    # from .GetNewClosure(). WPF passes (sender, eventArgs) as $args[0]/$args[1];
+    # those are never captured and are safe to use for position queries.
     $hueCanvas.Add_MouseLeftButtonDown({
-        $this.CaptureMouse()
-        $w = $this.ActualWidth; if ($w -le 0) { return }
-        $pickerState.H = [Math]::Max(0,[Math]::Min(359.9, $_.GetPosition($this).X / $w * 360))
+        $hueCanvas.CaptureMouse()
+        $w = $hueCanvas.ActualWidth; if ($w -le 0) { return }
+        $pickerState.H = [Math]::Max(0.0,[Math]::Min(359.9, $args[1].GetPosition($hueCanvas).X / $w * 360.0))
         Update-PickerFromHsv $pickerState
     }.GetNewClosure())
     $hueCanvas.Add_MouseMove({
-        if (-not $this.IsMouseCaptured) { return }
-        $w = $this.ActualWidth; if ($w -le 0) { return }
-        $pickerState.H = [Math]::Max(0,[Math]::Min(359.9, $_.GetPosition($this).X / $w * 360))
+        if (-not $hueCanvas.IsMouseCaptured) { return }
+        $w = $hueCanvas.ActualWidth; if ($w -le 0) { return }
+        $pickerState.H = [Math]::Max(0.0,[Math]::Min(359.9, $args[1].GetPosition($hueCanvas).X / $w * 360.0))
         Update-PickerFromHsv $pickerState
     }.GetNewClosure())
-    $hueCanvas.Add_MouseLeftButtonUp({ $this.ReleaseMouseCapture() })
+    $hueCanvas.Add_MouseLeftButtonUp({ $hueCanvas.ReleaseMouseCapture() }.GetNewClosure())
 
     # ── SV canvas mouse events ────────────────────────────────────────────────
-    $svCanvas.Add_MouseLeftButtonDown({
-        $this.CaptureMouse()
-        $w = $this.ActualWidth; $h = $this.ActualHeight; if ($w -le 0 -or $h -le 0) { return }
-        $p = $_.GetPosition($this)
-        $pickerState.S = [Math]::Max(0,[Math]::Min(1, $p.X / $w))
-        $pickerState.V = [Math]::Max(0,[Math]::Min(1, 1 - $p.Y / $h))
+    # Uses $svOuter (Border) for hit-testing and size — more reliable than the
+    # Canvas whose Background was null (non-hit-testable) before children sized.
+    # Position via Mouse.GetPosition to avoid any $args capture ambiguity.
+    # IMPORTANT: use 0.0/1.0 double literals in Min/Max — PowerShell selects the
+    # Int32 overload when the first arg is an integer literal, which rounds the
+    # double result to 0 or 1 and causes the "locked to quadrants" behaviour.
+    $svOuter.Add_MouseLeftButtonDown({
+        $svOuter.CaptureMouse()
+        $w = $svOuter.ActualWidth; $h = $svOuter.ActualHeight
+        if ($w -le 0 -or $h -le 0) { return }
+        $p = [System.Windows.Input.Mouse]::GetPosition($svOuter)
+        $pickerState.S = [Math]::Max(0.0,[Math]::Min(1.0, $p.X / $w))
+        $pickerState.V = [Math]::Max(0.0,[Math]::Min(1.0, 1.0 - $p.Y / $h))
         Update-PickerFromHsv $pickerState
     }.GetNewClosure())
-    $svCanvas.Add_MouseMove({
-        if (-not $this.IsMouseCaptured) { return }
-        $w = $this.ActualWidth; $h = $this.ActualHeight; if ($w -le 0 -or $h -le 0) { return }
-        $p = $_.GetPosition($this)
-        $pickerState.S = [Math]::Max(0,[Math]::Min(1, $p.X / $w))
-        $pickerState.V = [Math]::Max(0,[Math]::Min(1, 1 - $p.Y / $h))
+    $svOuter.Add_MouseMove({
+        if (-not $svOuter.IsMouseCaptured) { return }
+        $w = $svOuter.ActualWidth; $h = $svOuter.ActualHeight
+        if ($w -le 0 -or $h -le 0) { return }
+        $p = [System.Windows.Input.Mouse]::GetPosition($svOuter)
+        $pickerState.S = [Math]::Max(0.0,[Math]::Min(1.0, $p.X / $w))
+        $pickerState.V = [Math]::Max(0.0,[Math]::Min(1.0, 1.0 - $p.Y / $h))
         Update-PickerFromHsv $pickerState
     }.GetNewClosure())
-    $svCanvas.Add_MouseLeftButtonUp({ $this.ReleaseMouseCapture() })
+    $svOuter.Add_MouseLeftButtonUp({ $svOuter.ReleaseMouseCapture() }.GetNewClosure())
 
     # ── RGB box TextChanged ───────────────────────────────────────────────────
     foreach ($box in @($tbR,$tbG,$tbB)) {
@@ -4620,7 +4639,29 @@ function Build-LibrariesPanel {
                 $t.TextBox.Text = "$($this.SelectedItem.Content)"
                 $t.AddBtn.Content = "Edit"
             } else {
+                $t.TextBox.Text = ""
                 $t.AddBtn.Content = "Add"
+            }
+        }.GetNewClosure())
+
+        # Toggle-deselect: clicking an already-selected row deselects it
+        $capturedListBox = $listBox
+        $capturedTbNew   = $tbNew
+        $capturedBtnAdd  = $btnAdd
+        $capturedListBox.Add_PreviewMouseLeftButtonDown({
+            $hit = $args[1].OriginalSource
+            # Walk up the visual tree to find the ListBoxItem that was clicked
+            $lbi = $hit
+            while ($null -ne $lbi -and -not ($lbi -is [System.Windows.Controls.ListBoxItem])) {
+                $lbi = [System.Windows.Media.VisualTreeHelper]::GetParent($lbi)
+            }
+            if ($null -ne $lbi -and ($lbi -is [System.Windows.Controls.ListBoxItem]) -and $lbi.IsSelected) {
+                # Deselect and clear the text box; mark event handled so WPF
+                # doesn't immediately re-select the item on mouse-up
+                $capturedListBox.SelectedItem = $null
+                $capturedTbNew.Text = ""
+                $capturedBtnAdd.Content = "Add"
+                $args[1].Handled = $true
             }
         }.GetNewClosure())
 
@@ -4715,6 +4756,7 @@ function Build-LibrariesPanel {
     $tagsListStack.Children.Add($tagsColHdr) | Out-Null
 
     Rebuild-TagsList $tagsListStack
+
 
     # Add row for tags
     $tagsAddGrid = New-Object System.Windows.Controls.Grid; $tagsAddGrid.Margin = New-Object System.Windows.Thickness(0,8,0,6)
