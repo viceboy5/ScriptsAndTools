@@ -927,11 +927,11 @@ function Start-NextProcess {
 
     # RenameOnlyBypass: user confirmed rename despite unmatched colors — skip all heavy tasks
     if ($pJob.RenameOnlyBypass) {
-        $doRename = $true; $doMerge = $false; $doSlice = $false; $doExtract = $false; $doImage = $false; $doLogs = $false; $doBOD = $false
+        $doRename = $true; $doMerge = $false; $doSlice = $false; $doExtract = $false; $doImage = $false; $doLogs = $false; $doBOD = $false; $doPrintQ = $false
         $pJob.RenameOnlyBypass = $false
     } elseif ($pJob.SliceOnlyBypass) {
         # Editing mode slice-only — no rename, no merge, just slice using the current anchor
-        $doRename = $false; $doMerge = $false; $doSlice = $true; $doExtract = $false; $doImage = $false; $doLogs = $false; $doBOD = $false
+        $doRename = $false; $doMerge = $false; $doSlice = $true; $doExtract = $false; $doImage = $false; $doLogs = $false; $doBOD = $false; $doPrintQ = $false
         $pJob.SliceOnlyBypass = $false
         $pJob.ProcessedAnchorPath = $pJob.AnchorFile.FullName
     } else {
@@ -942,6 +942,7 @@ function Start-NextProcess {
         $doImage   = [bool]$pJob.ChkImage.IsChecked
         $doLogs    = [bool]$pJob.ChkLogs.IsChecked
         $doBOD     = [bool]$pJob.ChkBOD.IsChecked
+        $doPrintQ  = [bool]$pJob.ChkPrintQ.IsChecked
     }
 
     $anchorIsZip3mf = $pJob.AnchorFile.Extension -imatch '\.3mf$' -and $pJob.AnchorFile.Name -notmatch '(?i)\.gcode\.3mf$'
@@ -1067,7 +1068,7 @@ function Start-NextProcess {
     }
 
     # If rename-only (no heavy tasks), complete immediately without launching worker
-    if (-not ($doMerge -or $doSlice -or $doExtract -or $doImage -or $doBOD)) {
+    if (-not ($doMerge -or $doSlice -or $doExtract -or $doImage -or $doBOD -or $doPrintQ)) {
         $pJob.ProcessingOverlay.Visibility = "Collapsed"; $pJob.PickProcessingOverlay.Visibility = "Collapsed"
         $pJob.RowPanel.IsEnabled = $true; $pJob.IsDone = $true
         $pJob.BtnApply.Content = "Done"; $pJob.BtnApply.Background = Get-WpfColor "#4CAF72"
@@ -1211,6 +1212,18 @@ function Start-NextProcess {
             [void]$sb.AppendLine("    Start-Process -FilePath 'cmd.exe' -ArgumentList `$argList -Wait -WindowStyle Hidden")
         }
         [void]$sb.AppendLine("}")
+    }
+
+    if ($doPrintQ) {
+        [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value 'COPYING TO PRINT QUEUE...' -Force")
+        [void]$sb.AppendLine("if (Test-Path `"$slicedFile`") {")
+        [void]$sb.AppendLine("    `$pqDate   = Get-Date -Format 'MMMM d'")
+        [void]$sb.AppendLine("    `$pqFolder = Join-Path `"$bodQueueBase`" `$pqDate")
+        [void]$sb.AppendLine("    New-Item -ItemType Directory -Path `$pqFolder -Force | Out-Null")
+        [void]$sb.AppendLine("    `$pqDest = Join-Path `$pqFolder `"$($baseName).gcode.3mf`"")
+        [void]$sb.AppendLine("    Copy-Item -LiteralPath `"$slicedFile`" -Destination `$pqDest -Force")
+        [void]$sb.AppendLine("    Write-Host `"[PrintQ] Copied to: `$pqDest`" -ForegroundColor Green")
+        [void]$sb.AppendLine("} else { Write-Host '[PrintQ] Gcode not found - run Slice first.' -ForegroundColor Yellow }")
     }
 
     if ($doLogs) {
@@ -2327,11 +2340,13 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $chkExtract = New-Object System.Windows.Controls.CheckBox; $chkExtract.Content = "Extract Data";         $chkExtract.IsChecked = $false; $chkExtract.Foreground = Get-WpfColor "#FFFFFF"; $chkExtract.Margin = New-Object System.Windows.Thickness(0,0,15,0)
     $chkImage   = New-Object System.Windows.Controls.CheckBox; $chkImage.Content   = "Generate Image Card";  $chkImage.IsChecked   = $false; $chkImage.Foreground   = Get-WpfColor "#FFFFFF"; $chkImage.Margin = New-Object System.Windows.Thickness(0,0,15,0)
     $chkLogs    = New-Object System.Windows.Controls.CheckBox; $chkLogs.Content    = "Create Logs";          $chkLogs.IsChecked    = $false; $chkLogs.Foreground    = Get-WpfColor "#FFFFFF"; $chkLogs.Margin = New-Object System.Windows.Thickness(0,0,15,0)
-    $chkBOD     = New-Object System.Windows.Controls.CheckBox; $chkBOD.Content     = "Create BOD";           $chkBOD.IsChecked     = $false; $chkBOD.Foreground     = Get-WpfColor "#FFFFFF"
+    $chkBOD     = New-Object System.Windows.Controls.CheckBox; $chkBOD.Content     = "Create BOD";           $chkBOD.IsChecked     = $false; $chkBOD.Foreground     = Get-WpfColor "#FFFFFF"; $chkBOD.Margin = New-Object System.Windows.Thickness(0,0,15,0)
     $chkBOD.ToolTip = "Reduces the merged Full.3mf to the 5 pairs closest to centre and exports a BOD.gcode.3mf to the Printing Queue"
+    $chkPrintQ  = New-Object System.Windows.Controls.CheckBox; $chkPrintQ.Content  = "Printing Queue";       $chkPrintQ.IsChecked  = $false; $chkPrintQ.Foreground  = Get-WpfColor "#FFFFFF"
+    $chkPrintQ.ToolTip = "Copies the existing Full.gcode.3mf to the Printing Queue folder with today's date"
     $tasksRow1.Children.Add($chkRename) | Out-Null; $tasksRow1.Children.Add($chkMerge) | Out-Null; $tasksRow1.Children.Add($chkSlice) | Out-Null
     $tasksRow1.Children.Add($chkExtract) | Out-Null; $tasksRow1.Children.Add($chkImage) | Out-Null
-    $tasksRow1.Children.Add($chkLogs) | Out-Null; $tasksRow1.Children.Add($chkBOD) | Out-Null
+    $tasksRow1.Children.Add($chkLogs) | Out-Null; $tasksRow1.Children.Add($chkBOD) | Out-Null; $tasksRow1.Children.Add($chkPrintQ) | Out-Null
     $tasksOuter.Children.Add($tasksRow1) | Out-Null
 
     $tasksRow2 = New-Object System.Windows.Controls.StackPanel
@@ -2353,7 +2368,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $filePrepPanel.Children.Add($tasksBox) | Out-Null
     $pJob.TasksBox = $tasksBox
 
-    $pJob.ChkRename = $chkRename; $pJob.ChkMerge = $chkMerge; $pJob.ChkSlice = $chkSlice; $pJob.ChkExtract = $chkExtract; $pJob.ChkImage = $chkImage; $pJob.ChkLogs = $chkLogs; $pJob.ChkBOD = $chkBOD
+    $pJob.ChkRename = $chkRename; $pJob.ChkMerge = $chkMerge; $pJob.ChkSlice = $chkSlice; $pJob.ChkExtract = $chkExtract; $pJob.ChkImage = $chkImage; $pJob.ChkLogs = $chkLogs; $pJob.ChkBOD = $chkBOD; $pJob.ChkPrintQ = $chkPrintQ
     if ($nestExists) {
         $chkMerge.IsChecked = $false; $chkMerge.IsEnabled = $false; $chkMerge.Foreground = Get-WpfColor "#555555"
         $chkMerge.ToolTip = "Remove Nest.3mf or Revert Merge before merging again"
@@ -2365,7 +2380,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $chkRename.Add_Unchecked({ Validate-PJob $this.Tag })
 
     # Checkbox interdependencies
-    $tasksData = @{ Rename = $chkRename; Merge = $chkMerge; Slice = $chkSlice; Extract = $chkExtract; Image = $chkImage; Logs = $chkLogs; BOD = $chkBOD; PJob = $pJob; GpJob = $gpJob }
+    $tasksData = @{ Rename = $chkRename; Merge = $chkMerge; Slice = $chkSlice; Extract = $chkExtract; Image = $chkImage; Logs = $chkLogs; BOD = $chkBOD; PrintQ = $chkPrintQ; PJob = $pJob; GpJob = $gpJob }
 
     $chkSlice.Tag = $tasksData
     $chkSlice.Add_Checked({ if ($this.IsChecked) { $this.Tag.Extract.IsChecked = $true } })
@@ -2398,7 +2413,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnDeselAll.Tag = $tasksData
     $btnDeselAll.Add_Click({
         $t = $this.Tag
-        $t.Rename.IsChecked = $false; $t.Slice.IsChecked = $false; $t.Extract.IsChecked = $false; $t.Image.IsChecked = $false; $t.Logs.IsChecked = $false; $t.BOD.IsChecked = $false
+        $t.Rename.IsChecked = $false; $t.Slice.IsChecked = $false; $t.Extract.IsChecked = $false; $t.Image.IsChecked = $false; $t.Logs.IsChecked = $false; $t.BOD.IsChecked = $false; $t.PrintQ.IsChecked = $false
         if ($t.Merge.IsEnabled) { $t.Merge.IsChecked = $false }
     })
 
@@ -2698,7 +2713,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $reviewBtnRow = New-Object System.Windows.Controls.StackPanel
     $reviewBtnRow.Orientation = "Horizontal"
     $btnReplaceSource = New-Object System.Windows.Controls.Button
-    $btnReplaceSource.Content = "Replace and Export GCode"; $btnReplaceSource.Height = 30; $btnReplaceSource.Width = 190
+    $btnReplaceSource.Content = "Confirm and Replace"; $btnReplaceSource.Height = 30; $btnReplaceSource.Width = 160
     $btnReplaceSource.FontWeight = [System.Windows.FontWeights]::Bold; $btnReplaceSource.FontSize = 11
     $btnReplaceSource.Background = Get-WpfColor "#2E5A42"; $btnReplaceSource.Foreground = Get-WpfColor "#FFFFFF"
     $btnReplaceSource.BorderThickness = 0; $btnReplaceSource.Cursor = [System.Windows.Input.Cursors]::Hand
@@ -2802,7 +2817,8 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $tmpBase = Join-Path $env:TEMP ("renest_" + [System.Guid]::NewGuid().ToString("N"))
         $t.LogOut = $tmpBase + "_out.txt"; $t.LogErr = $tmpBase + "_err.txt"
         [System.IO.File]::WriteAllText($t.LogOut, ""); [System.IO.File]::WriteAllText($t.LogErr, "")
-        $psArgs = @("-NoProfile","-ExecutionPolicy","Bypass","-File",$t.WorkerPath,"-FinalPath",$t.FinalPath,"-NoConfirm")
+        $t.RenestTempOut = Join-Path $env:TEMP ("renest_" + [System.Guid]::NewGuid().ToString("N") + ".3mf")
+        $psArgs = @("-NoProfile","-ExecutionPolicy","Bypass","-File",$t.WorkerPath,"-FinalPath",$t.FinalPath,"-OutputPath",$t.RenestTempOut,"-NoConfirm")
         $t.Proc = Start-Process -FilePath "powershell.exe" -ArgumentList $psArgs `
             -NoNewWindow -RedirectStandardOutput $t.LogOut -RedirectStandardError $t.LogErr -PassThru
         $script:_RenestActive = $t
@@ -2822,12 +2838,75 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             $t.LblStatus.Text = "Source path unknown"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"; return
         }
         try {
+            # 1. Replace the source file with the renested file first
             Move-Item -LiteralPath $t.RenestPath -Destination $t.SourcePath -Force
             $t.BorderReview.Visibility = "Collapsed"
             $t.RenestPath = ""
-            # Queue a slice-only export on the CURRENT pJob (TempWork still valid — no Refresh before slice)
-            Enqueue-SliceOnlyJob $t.P $t.P._GpJob
-            if ($null -eq $script:activeProcess -and $script:processQueue.Count -gt 0) { Start-NextProcess }
+
+            # 2. Auto-revert merge if applicable
+            $srcDir  = Split-Path $t.SourcePath -Parent
+            $srcBase = [System.IO.Path]::GetFileNameWithoutExtension($t.SourcePath)
+
+            $mergeReverted = $false
+
+            if ($srcBase -imatch '_Nest$') {
+                # ── Merged folder: source was Nest.3mf ──────────────────────────────
+                # feRenestSource resolves to Nest.3mf when the folder is merged because
+                # it carries the individual-object transforms. The renested file now
+                # lives at Nest.3mf; we need to delete the stale Full.3mf and rename
+                # Nest → Full to restore a clean pre-merge state.
+                $corePrefix    = $srcBase -replace '(?i)_Nest$', ''  # e.g. X1C_Arthropleura
+                $staleFullPath = Join-Path $srcDir ($corePrefix + '_Full.3mf')
+                $staleFiles    = @(
+                    $staleFullPath,
+                    (Join-Path $srcDir ($corePrefix + '_Final.gcode.3mf')),
+                    (Join-Path $srcDir ($corePrefix + '_Full.gcode.3mf')),
+                    (Join-Path $srcDir ($corePrefix + '_Data.tsv'))
+                )
+                foreach ($s in $staleFiles) {
+                    if (Test-Path -LiteralPath $s) { Remove-Item -LiteralPath $s -Force -ErrorAction SilentlyContinue }
+                }
+                # Rename the renested Nest.3mf → Full.3mf
+                Rename-Item -LiteralPath $t.SourcePath -NewName ($corePrefix + '_Full.3mf') -Force
+                $mergeReverted = $true
+
+            } elseif ($srcBase -imatch '_Full$') {
+                # ── Unmerged folder: source was Full.3mf ────────────────────────────
+                # A Nest.3mf shouldn't normally be here but handle it in case.
+                $corePrefix = $srcBase -replace '(?i)_Full$', ''
+                $nestFile   = Join-Path $srcDir ($corePrefix + '_Nest.3mf')
+                if (Test-Path -LiteralPath $nestFile) {
+                    $staleFiles = @(
+                        $nestFile,
+                        (Join-Path $srcDir ($corePrefix + '_Final.gcode.3mf')),
+                        (Join-Path $srcDir ($srcBase    + '.gcode.3mf')),
+                        (Join-Path $srcDir ($corePrefix + '_Data.tsv'))
+                    )
+                    foreach ($s in $staleFiles) {
+                        if (Test-Path -LiteralPath $s) { Remove-Item -LiteralPath $s -Force -ErrorAction SilentlyContinue }
+                    }
+                    $mergeReverted = $true
+                }
+            }
+
+            if ($mergeReverted) {
+                # Update the card UI to reflect that the merge has been undone
+                if ($null -ne $t.P.ChkMerge) {
+                    $t.P.ChkMerge.IsEnabled  = $true
+                    $t.P.ChkMerge.Foreground = Get-WpfColor "#FFFFFF"
+                    $t.P.ChkMerge.ToolTip    = $null
+                }
+                if ($null -ne $t.P.BtnRevertMerge) {
+                    $t.P.BtnRevertMerge.IsEnabled  = $false
+                    $t.P.BtnRevertMerge.Background = Get-WpfColor "#3A3A3A"
+                    $t.P.BtnRevertMerge.Foreground = Get-WpfColor "#666666"
+                    $t.P.BtnRevertMerge.ToolTip    = "No merged file detected"
+                }
+                if ($null -ne $t.P.MergeBanner) { $t.P.MergeBanner.Visibility = "Collapsed" }
+                $t.LblStatus.Text = "Source replaced + merge reverted."; $t.LblStatus.Foreground = Get-WpfColor "#4CAF72"
+            } else {
+                $t.LblStatus.Text = "Source replaced."; $t.LblStatus.Foreground = Get-WpfColor "#4CAF72"
+            }
         } catch {
             $t.LblStatus.Text = "Replace failed: $($_.Exception.Message)"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"
         }
@@ -3522,7 +3601,8 @@ function Start-NextEditJob {
     $tmpBase = Join-Path $env:TEMP ("renest_" + [System.Guid]::NewGuid().ToString("N"))
     $rt.LogOut = $tmpBase + "_out.txt"; $rt.LogErr = $tmpBase + "_err.txt"
     [System.IO.File]::WriteAllText($rt.LogOut, ""); [System.IO.File]::WriteAllText($rt.LogErr, "")
-    $psArgs = @("-NoProfile","-ExecutionPolicy","Bypass","-File",$rt.WorkerPath,"-FinalPath",$rt.FinalPath,"-NoConfirm")
+    $rt.RenestTempOut = Join-Path $env:TEMP ("renest_" + [System.Guid]::NewGuid().ToString("N") + ".3mf")
+    $psArgs = @("-NoProfile","-ExecutionPolicy","Bypass","-File",$rt.WorkerPath,"-FinalPath",$rt.FinalPath,"-OutputPath",$rt.RenestTempOut,"-NoConfirm")
     $rt.Proc = Start-Process -FilePath "powershell.exe" -ArgumentList $psArgs `
         -NoNewWindow -RedirectStandardOutput $rt.LogOut -RedirectStandardError $rt.LogErr -PassThru
     $script:_RenestActive = $rt
@@ -3553,10 +3633,10 @@ $script:_RenestTickSB = {
     $exitCode = -1
     try { $exitCode = [int]$t2.Proc.ExitCode } catch {}
 
-    # Derive output path — used for success check and image extraction
+    # Output path was pre-computed as a temp file before the worker launched
     $stemR  = [System.IO.Path]::GetFileNameWithoutExtension($t2.FinalPath) -replace '(?i)_Final$', ''
     $outDir = [System.IO.Path]::GetDirectoryName($t2.FinalPath)
-    $t2.RenestPath = Join-Path $outDir ($stemR + "_Renest.3mf")
+    $t2.RenestPath = $t2.RenestTempOut
 
     # Move worker debug file to TEMP (keep permanent copy only if user requests it)
     $t2.DebugTempPath = ""

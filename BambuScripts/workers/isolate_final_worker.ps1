@@ -197,6 +197,16 @@ if ($null -ne $relsPath) {
 Save-Xml $xml $modelFile
 if ($hasSettings) { Save-Xml $settings $settingsPath }
 
+# ── 6a. Strip stale plate images so Bambu regenerates them on resave ──────────
+# If we leave top_*.png / pick_*.png from the Nest in the archive, Bambu's
+# --export-3mf keeps them as-is (full-plate thumbnails) instead of regenerating
+# a single-object thumbnail for the Final.
+$metaDir = Join-Path $WorkDir 'Metadata'
+if (Test-Path $metaDir) {
+    Get-ChildItem -Path $metaDir -File | Where-Object { $_.Name -match '^(top|pick|plate)_.*\.(png|json)$' } |
+        ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
+}
+
 # ── 6. Repack ──
 Add-Type -AssemblyName 'System.IO.Compression.FileSystem'
 if (Test-Path $OutputPath) { Remove-Item $OutputPath -Force }
