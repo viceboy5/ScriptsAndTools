@@ -181,6 +181,24 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 # ---------------------------------------------------------------------------------
 $projectName = ((Split-Path $InputFile -Leaf) -replace '\.gcode\.3mf$', '') -replace '(?i)_Full$', ''
 
+# --- READ EXISTING SKU (preserved from seed TSV if present) ---
+# Old format: Printer|FileType|FileName|Theme|Date|H|M|...  (Date at col 4)
+# New format: Printer|FileType|FileName|SKU|Theme|Date|H|M| (Date at col 5)
+# Seed row:   |||SKU                                         (4 cols, no date)
+$existingSku = ""
+if ($IndividualTsvPath -ne "" -and (Test-Path $IndividualTsvPath)) {
+    try {
+        $skuLine = Get-Content $IndividualTsvPath | Select-Object -Last 1
+        $skuCols = $skuLine -split "`t"
+        $datePattern = '^\d{1,2}/\d{1,2}/\d{4}$'
+        # Old format has Date at col 4 — skip read so we don't pull Theme as SKU
+        $isOldFormat = $skuCols.Count -gt 4 -and $skuCols[4] -match $datePattern
+        if (-not $isOldFormat -and $skuCols.Count -ge 4 -and -not [string]::IsNullOrWhiteSpace($skuCols[3])) {
+            $existingSku = $skuCols[3].Trim()
+        }
+    } catch {}
+}
+
 # --- DETECT PRINTER PREFIX and TAG, then derive clean columns ---
 $detectedTag    = ''
 $printerPrefix  = ''
@@ -371,8 +389,8 @@ if (-not $SkipExtraction) {
         }
 
         # Always output all 8 filament slots; unused slots get empty strings so columns stay consistent
-        # Columns: Printer, FileType, FileName, Theme, Date, H, M, [8x (grams, color)], ColorSwaps, ObjCount, ModelGrams, TotalGrams, TimeAdd
-        $outputValues = @($printerPrefix, $fileTypeLabel, $fileNameClean, $themeOutput, (Get-Date).ToString("M/d/yyyy"), $h, $m)
+        # Columns: Printer, FileType, FileName, SKU, Theme, Date, H, M, [8x (grams, color)], ColorSwaps, ObjCount, ModelGrams, TotalGrams, TimeAdd
+        $outputValues = @($printerPrefix, $fileTypeLabel, $fileNameClean, $existingSku, $themeOutput, (Get-Date).ToString("M/d/yyyy"), $h, $m)
         for ($i = 1; $i -le 8; $i++) {
             $outputValues += $(if ($filData[$i].g -gt 0) { $filData[$i].g } else { "" })
             $outputValues += $filData[$i].color
@@ -400,10 +418,10 @@ if (-not $SkipExtraction) {
             $existingData = Get-Content $IndividualTsvPath | Select-Object -Last 1
             $cols = $existingData -split "`t"
 
-            if ($cols.Count -ge 20) {
-                # Slot data starts at index 7 (after Printer,FileType,FileName,Theme,Date,H,M); always read up to 8 slots
+            if ($cols.Count -ge 21) {
+                # Slot data starts at index 8 (after Printer,FileType,FileName,SKU,Theme,Date,H,M); always read up to 8 slots
                 for ($i = 1; $i -le 8; $i++) {
-                    $gIdx = 7 + (($i - 1) * 2)
+                    $gIdx = 8 + (($i - 1) * 2)
                     $cIdx = $gIdx + 1
                     if ($gIdx -lt $cols.Count -and [double]::TryParse($cols[$gIdx], [ref]$null)) { $filData[$i].g = [double]$cols[$gIdx] }
                     if ($cIdx -lt $cols.Count) {
