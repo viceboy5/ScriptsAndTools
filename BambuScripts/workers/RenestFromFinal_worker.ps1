@@ -391,9 +391,50 @@ try {
     $sameTilt         = $false
     $refR8norm        = 1.0
     $finalR8norm      = 1.0
+    $trimBakedDetected = $false   # set true when trim-bake path is taken
     if (Is-IdentityRot $finalBuildRot) {
-        $rotCorrection = [double[]](1,0,0, 0,1,0, 0,0,1)
-        Write-Host "Final master build item is identity - no rotation correction needed."
+        # ── Trim-bake detection ───────────────────────────────────────────────────
+        # When Bambu Studio trims/cuts an object it bakes the current plate rotation
+        # into the mesh vertex positions and resets the build item transform to
+        # identity.  The resulting Final looks identical but all rotation metadata
+        # is gone.  If we then apply the source transforms (which still carry the
+        # original plate rotation R) to this pre-rotated geometry, every clone
+        # double-rotates by R.
+        #
+        # Detection heuristic: cut_information.xml is present (Bambu writes it for
+        # every trim/cut operation) AND at least one source build item has a
+        # non-identity rotation.
+        #
+        # Correction: R_correction = R_src^T = R_src^-1 (for the normalised, pure
+        # rotation part).  Apply-TxCorrection then computes:
+        #   R_new = R_src^T * R_src = I  →  pure translation, no rotation added.
+        # The pre-baked mesh therefore lands at each plate position correctly.
+        $firstSrcRotNorm  = $null
+        $srcHasRotation   = $false
+        foreach ($txStr in $sourceTransforms) {
+            if ([string]::IsNullOrWhiteSpace($txStr)) { continue }
+            $r = Get-TxRot (Parse-Tx $txStr)
+            if (-not (Is-IdentityRot $r)) {
+                # Strip uniform scale so we get a pure rotation matrix for transposition
+                $rsc = Get-RowScale $r
+                $firstSrcRotNorm = if ($rsc -gt 1e-9) { [double[]]($r | ForEach-Object { $_ / $rsc }) } else { [double[]]$r }
+                $srcHasRotation = $true
+                break
+            }
+        }
+        $hasCutInfo = ($null -ne $cutInfoPath) -and (Test-Path $cutInfoPath)
+
+        if ($hasCutInfo -and $srcHasRotation) {
+            # The trim baked the source's plate rotation into the mesh vertices.
+            # R_correction = R_src_norm^T so that (R_src_norm^T)(R_src) = I.
+            $rotCorrection     = Transpose-3x3 $firstSrcRotNorm
+            $trimBakedDetected = $true
+            Write-Host ("Trim-baked geometry detected (cut_information.xml present, source has rotation, Final is identity).")
+            Write-Host ("Correction: inverse of first source rotation applied so clones don't double-rotate.")
+        } else {
+            $rotCorrection = [double[]](1,0,0, 0,1,0, 0,0,1)
+            Write-Host "Final master build item is identity - no rotation correction needed."
+        }
     } else {
         # Check if the Final's build rotation matches any source plate item rotation exactly.
         # If the user exported the Final directly from the nest its rotation will appear in
@@ -837,7 +878,11 @@ try {
     $dbLines.Add("  Build ROT   : $($finalBuildRot -join ' ')")
     $dbLines.Add("  Rot match   : $(if ($rotMatchesSource) { 'YES - exact match to a source item, no correction' } else { 'NO - no exact match' })")
     $dbLines.Add("  Tilt check  : final r8/|r|=$($finalR8norm.ToString('F4'))  src_ref=$($refR8norm.ToString('F4'))  sameTilt=$sameTilt")
-    $dbLines.Add("  Correction  : $(if (Is-IdentityRot $rotCorrection) { 'none (identity)' } else { 'applied (tilt-only, Z yaw stripped)' })")
+    $dbLines.Add("  Trim baked  : $trimBakedDetected")
+    $corrDesc = if ($trimBakedDetected) { 'inverse source rotation (trim-bake cancellation)' } `
+                elseif (Is-IdentityRot $rotCorrection) { 'none (identity)' } `
+                else { 'applied (tilt-only, Z yaw stripped)' }
+    $dbLines.Add("  Correction  : $corrDesc")
     $dbLines.Add("")
 
     $dbLines.Add("FINAL.3MF - Master Object Component Transforms")
