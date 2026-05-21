@@ -12,6 +12,27 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $ErrorActionPreference = 'Stop'
 
+# ── DEBUG LOGGING ─────────────────────────────────────────────────────────────
+$script:DebugLog = Join-Path $PSScriptRoot "CardQueueEditor_debug.txt"
+Set-Content -Path $script:DebugLog -Value "=== CardQueueEditor Debug Log  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ===" -Encoding UTF8
+function Write-Log {
+    param([string]$msg, [string]$level = "INFO")
+    $ts  = (Get-Date).ToString("HH:mm:ss.fff")
+    $line = "[$ts][$level] $msg"
+    Add-Content -Path $script:DebugLog -Value $line -Encoding UTF8
+    Write-Host $line
+}
+Start-Transcript -Path ($script:DebugLog -replace '\.txt$', '_transcript.txt') -Force | Out-Null
+Write-Log "Script started"
+
+[System.AppDomain]::CurrentDomain.add_UnhandledException({
+    param($sender, $e)
+    $ex = $e.ExceptionObject
+    Write-Log "APPDOMAIN UNHANDLED: $($ex.GetType().FullName): $($ex.Message)" "FATAL"
+    if ($ex.InnerException) { Write-Log "  INNER: $($ex.InnerException.Message)" "FATAL" }
+    Write-Log "  STACK: $($ex.StackTrace)" "FATAL"
+})
+
 # --- 1. ENVIRONMENT & LIBRARY ---
 $scriptDir = $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($scriptDir)) { $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition }
@@ -20,7 +41,7 @@ $colorCsvPath = Join-Path $scriptDir "..\libraries\FilamentLibrary.csv"
 $namesLibPath  = Join-Path $scriptDir "..\libraries\NamesLibrary.ps1"
 
 $script:LibraryColors = [ordered]@{}
-$HexToName = @{}
+$script:HexToName = @{}
 if (Test-Path $colorCsvPath) {
     $csvLines = Get-Content -Path $colorCsvPath
     foreach ($line in $csvLines) {
@@ -35,8 +56,8 @@ if (Test-Path $colorCsvPath) {
                 $b = [int]$parts[3].Replace('"','').Trim()
                 $hex = "#{0:X2}{1:X2}{2:X2}FF" -f $r, $g, $b
                 $script:LibraryColors[$name] = $hex
-                $HexToName[$hex] = $name
-                $HexToName[$hex.Substring(0,7)] = $name
+                $script:HexToName[$hex] = $name
+                $script:HexToName[$hex.Substring(0,7)] = $name
             } catch { continue }
         }
     }
@@ -560,6 +581,17 @@ if ($args.Count -gt 0) {
 "@
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [System.Windows.Markup.XamlReader]::Load($reader)
+
+# Hook WPF dispatcher so unhandled exceptions on the UI thread are logged
+$window.Dispatcher.add_UnhandledException({
+    param($sender, $e)
+    $ex = $e.Exception
+    Write-Log "DISPATCHER UNHANDLED: $($ex.GetType().FullName): $($ex.Message)" "FATAL"
+    if ($ex.InnerException) { Write-Log "  INNER: $($ex.InnerException.Message)" "FATAL" }
+    Write-Log "  STACK: $($ex.StackTrace)" "FATAL"
+    $e.Handled = $true   # prevent WPF from crashing the process so the log can flush
+})
+Write-Log "Window created, dispatcher hooked"
 
 $lblGlobalTitle = $window.FindName("LblGlobalTitle")
 $btnProcessAll  = $window.FindName("BtnProcessAll")
@@ -1259,8 +1291,8 @@ function Count-3mfObjects([string]$path) {
 function Build-ReviewContent($pJob) {
     $sp = $pJob.ReviewStack
 
-    # --- Print time from *_Data.tsv (col 5 = hours, col 6 = minutes) ---
-    # TSV layout: Printer(0), FileType(1), FileName(2), Theme(3), Date(4), H(5), M(6), ...
+    # --- Print time from *_Data.tsv (col 6 = hours, col 7 = minutes) ---
+    # TSV layout: Printer(0), FileType(1), FileName(2), SKU(3), Theme(4), Date(5), H(6), M(7), ...
     $printTimeStr = "n/a"
     $tsvFile = Get-ChildItem -Path $pJob.FolderPath -Filter "*_Data.tsv" -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($tsvFile) {
@@ -1268,10 +1300,10 @@ function Build-ReviewContent($pJob) {
             $tsvLine = Get-Content $tsvFile.FullName -ErrorAction SilentlyContinue | Select-Object -Last 1
             if ($tsvLine) {
                 $cols = $tsvLine -split "`t"
-                if ($cols.Count -ge 7) {
+                if ($cols.Count -ge 8) {
                     $th = 0; $tm = 0
-                    [int]::TryParse($cols[5], [ref]$th) | Out-Null
-                    [int]::TryParse($cols[6], [ref]$tm) | Out-Null
+                    [int]::TryParse($cols[6], [ref]$th) | Out-Null
+                    [int]::TryParse($cols[7], [ref]$tm) | Out-Null
                     $printTimeStr = if ($th -gt 0) { "${th}h ${tm}m" } else { "${tm}m" }
                 }
             }
@@ -1591,7 +1623,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             $slotId = $SlotMap[$hex]
             if ($UsedSlots.Contains($slotId)) {
                 $checkHex = if ($hex.Length -eq 7) { $hex + "FF" } else { $hex }
-                $matchedName = if ($HexToName.Contains($checkHex)) { $HexToName[$checkHex] } else { "" }
+                $matchedName = if ($script:HexToName.Contains($checkHex)) { $script:HexToName[$checkHex] } else { "" }
                 $activeSlots.Add([PSCustomObject]@{ OldHex = $checkHex; Name = $matchedName }) | Out-Null
             }
         }
@@ -2364,11 +2396,97 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $tasksRow2.Children.Add($btnSelAll) | Out-Null; $tasksRow2.Children.Add($btnDeselAll) | Out-Null; $tasksRow2.Children.Add($btnRevertMerge) | Out-Null
     $tasksOuter.Children.Add($tasksRow2) | Out-Null
 
+    # SKU row
+    $tasksRow3 = New-Object System.Windows.Controls.StackPanel
+    $tasksRow3.Orientation = "Horizontal"; $tasksRow3.Margin = New-Object System.Windows.Thickness(0,8,0,0)
+
+    $lblSku = New-Object System.Windows.Controls.TextBlock
+    $lblSku.Text = "SKU:"; $lblSku.Foreground = Get-WpfColor "#A0A0A0"; $lblSku.FontSize = 12
+    $lblSku.VerticalAlignment = "Center"; $lblSku.Margin = New-Object System.Windows.Thickness(0,0,8,0)
+
+    $txtSku = New-Object System.Windows.Controls.TextBox
+    $txtSku.Width = 140; $txtSku.Height = 26; $txtSku.FontSize = 12
+    $txtSku.Background = Get-WpfColor "#2A2C35"; $txtSku.Foreground = Get-WpfColor "#FFFFFF"
+    $txtSku.BorderBrush = Get-WpfColor "#444444"; $txtSku.Padding = New-Object System.Windows.Thickness(4,2,4,2)
+    $txtSku.Margin = New-Object System.Windows.Thickness(0,0,8,0); $txtSku.VerticalContentAlignment = "Center"
+
+    # Pre-populate SKU from existing TSV if present
+    # Guard against old-format TSVs where col 3 is Theme, not SKU (old Date at col 4, new Date at col 5)
+    $existingSkuTsvFile = Get-ChildItem -Path $pJob.FolderPath -Filter "*_Data.tsv" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($existingSkuTsvFile) {
+        try {
+            $skuSeedLine = Get-Content $existingSkuTsvFile.FullName -ErrorAction SilentlyContinue | Select-Object -Last 1
+            if ($skuSeedLine) {
+                $skuSeedCols = $skuSeedLine -split "`t"
+                $skuDatePat  = '^\d{1,2}/\d{1,2}/\d{4}$'
+                $skuOldFmt   = $skuSeedCols.Count -gt 4 -and $skuSeedCols[4] -match $skuDatePat
+                if (-not $skuOldFmt -and $skuSeedCols.Count -ge 4 -and -not [string]::IsNullOrWhiteSpace($skuSeedCols[3])) {
+                    $txtSku.Text = $skuSeedCols[3].Trim()
+                }
+            }
+        } catch {}
+    }
+
+    $btnSaveSku = New-Object System.Windows.Controls.Button
+    $btnSaveSku.Content = "Save SKU"; $btnSaveSku.Height = 26; $btnSaveSku.Width = 80
+    $btnSaveSku.Background = Get-WpfColor "#2A2C35"; $btnSaveSku.Foreground = Get-WpfColor "#FFFFFF"
+    $btnSaveSku.BorderThickness = 0; $btnSaveSku.Cursor = [System.Windows.Input.Cursors]::Hand
+
+    $lblSkuStatus = New-Object System.Windows.Controls.TextBlock
+    $lblSkuStatus.FontSize = 11; $lblSkuStatus.Margin = New-Object System.Windows.Thickness(8,0,0,0)
+    $lblSkuStatus.VerticalAlignment = "Center"; $lblSkuStatus.Text = ""
+
+    $btnSaveSku.Tag = @{ TxtSku = $txtSku; LblStatus = $lblSkuStatus; FolderPath = $pJob.FolderPath; AnchorFile = $pJob.AnchorFile }
+    $btnSaveSku.Add_Click({
+        $t = $this.Tag
+        try {
+            $skuVal = $t.TxtSku.Text.Trim()
+            # Derive TSV path from anchor file base name
+            $af         = $t.AnchorFile
+            $anchorBase = if ($null -ne $af) { [System.IO.Path]::GetFileNameWithoutExtension($af.FullName) } else { "" }
+            $tsvBase    = $anchorBase -replace '(?i)_?(Full|Nest)$', ''
+            $tsvPath    = Join-Path $t.FolderPath "${tsvBase}_Data.tsv"
+            if (Test-Path $tsvPath) {
+                $lines = @(Get-Content $tsvPath)
+                if ($lines.Count -gt 0) {
+                    $cols     = $lines[-1] -split "`t"
+                    $datePat  = '^\d{1,2}/\d{1,2}/\d{4}$'
+                    # Old format has Date at col 4; new format has Date at col 5
+                    $isOldFmt = $cols.Count -gt 4 -and $cols[4] -match $datePat
+                    if ($isOldFmt) {
+                        # Insert SKU at position 3, shifting Theme and everything else right
+                        $newCols   = $cols[0..2] + @($skuVal) + $cols[3..($cols.Count - 1)]
+                        $lines[-1] = $newCols -join "`t"
+                    } else {
+                        # New format or seed: set/overwrite col 3
+                        while ($cols.Count -lt 4) { $cols += "" }
+                        $cols[3]   = $skuVal
+                        $lines[-1] = $cols -join "`t"
+                    }
+                    Set-Content -Path $tsvPath -Value $lines -Encoding UTF8
+                }
+            } else {
+                # Seed TSV: tabs pad out columns 0-2, SKU at index 3
+                Set-Content -Path $tsvPath -Value "`t`t`t$skuVal" -Encoding UTF8
+            }
+            $t.LblStatus.Text = "Saved"; $t.LblStatus.Foreground = Get-WpfColor "#4CAF72"
+        } catch {
+            $t.LblStatus.Text = "Failed: $($_.Exception.Message)"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"
+        }
+    }.GetNewClosure())
+
+    $tasksRow3.Children.Add($lblSku) | Out-Null
+    $tasksRow3.Children.Add($txtSku) | Out-Null
+    $tasksRow3.Children.Add($btnSaveSku) | Out-Null
+    $tasksRow3.Children.Add($lblSkuStatus) | Out-Null
+    $tasksOuter.Children.Add($tasksRow3) | Out-Null
+
     $tasksBox.Child = $tasksOuter
     $filePrepPanel.Children.Add($tasksBox) | Out-Null
     $pJob.TasksBox = $tasksBox
 
     $pJob.ChkRename = $chkRename; $pJob.ChkMerge = $chkMerge; $pJob.ChkSlice = $chkSlice; $pJob.ChkExtract = $chkExtract; $pJob.ChkImage = $chkImage; $pJob.ChkLogs = $chkLogs; $pJob.ChkBOD = $chkBOD; $pJob.ChkPrintQ = $chkPrintQ
+    $pJob.TxtSKU = $txtSku
     if ($nestExists) {
         $chkMerge.IsChecked = $false; $chkMerge.IsEnabled = $false; $chkMerge.Foreground = Get-WpfColor "#555555"
         $chkMerge.ToolTip = "Remove Nest.3mf or Revert Merge before merging again"
@@ -4044,6 +4162,7 @@ $window.Add_Closed({
 #  LIBRARIES PANEL
 # ════════════════════════════════════════════════════════════════════════════════
 function Save-FilamentLibrary {
+    Write-Log "Save-FilamentLibrary: start ($($script:LibraryColors.Count) entries)"
     try {
         $lines = [System.Collections.Generic.List[string]]::new()
         $lines.Add("N/A,,,,,,,")
@@ -4055,15 +4174,20 @@ function Save-FilamentLibrary {
             $lines.Add("$($kv.Key),$r,$g,$b,,,,")
         }
         [System.IO.File]::WriteAllLines($colorCsvPath, $lines, (New-Object System.Text.UTF8Encoding($false)))
-        # Refresh $HexToName
+        # Refresh $script:HexToName
         $script:HexToNameLib = @{}
         foreach ($kv in $script:LibraryColors.GetEnumerator()) {
             $hex9 = $kv.Value
             $hex7 = $hex9.Substring(0,7)
-            $HexToName[$hex9] = $kv.Key; $HexToName[$hex7] = $kv.Key
+            $script:HexToName[$hex9] = $kv.Key; $script:HexToName[$hex7] = $kv.Key
         }
+        Write-Log "Save-FilamentLibrary: success"
         return $true
-    } catch { return $false }
+    } catch {
+        Write-Log "Save-FilamentLibrary: FAILED - $($_.Exception.Message)" "ERROR"
+        Write-Log "  STACK: $($_.ScriptStackTrace)" "ERROR"
+        return $false
+    }
 }
 function Save-NamesLibrary {
     try {
@@ -4163,8 +4287,9 @@ function Update-PickerFromRgb($st) {
 }
 
 function Load-FilamentEntry([string]$entryName, $st) {
+    Write-Log "Load-FilamentEntry: '$entryName'"
     $hex9 = $script:LibraryColors[$entryName]
-    if (-not $hex9) { return }
+    if (-not $hex9) { Write-Log "Load-FilamentEntry: not found in library" "WARN"; return }
     $r=[Convert]::ToInt32($hex9.Substring(1,2),16)
     $g=[Convert]::ToInt32($hex9.Substring(3,2),16)
     $b=[Convert]::ToInt32($hex9.Substring(5,2),16)
@@ -4178,6 +4303,7 @@ function Load-FilamentEntry([string]$entryName, $st) {
 }
 
 function Rebuild-FilamentList($st) {
+    Write-Log "Rebuild-FilamentList: start"
     $st.FilamentStack.Children.Clear()
     foreach ($kv in $script:LibraryColors.GetEnumerator()) {
         $eName = $kv.Key; $eHex = $kv.Value
@@ -4202,10 +4328,14 @@ function Rebuild-FilamentList($st) {
         $row.Add_MouseEnter({ $this.Background = Get-WpfColor "#1A1C24" })
         $row.Add_MouseLeave({ $this.Background = Get-WpfColor "#0D0E10" })
         $row.Add_MouseLeftButtonDown({
-            Load-FilamentEntry $capturedName $capturedState
+            try {
+                Write-Log "FilamentRow.MouseDown: '$capturedName'"
+                Load-FilamentEntry $capturedName $capturedState
+            } catch { Write-Log "FilamentRow.MouseDown EXCEPTION: $($_.Exception.Message)" "ERROR" }
         }.GetNewClosure())
         $st.FilamentStack.Children.Add($row) | Out-Null
     }
+    Write-Log "Rebuild-FilamentList: done ($($script:LibraryColors.Count) rows)"
 }
 
 function Rebuild-TagsList($stack) {
@@ -4327,8 +4457,8 @@ function Build-LibrariesPanel {
     $script:LibNavState.NavBtns = $navBtns
     $script:LibNavState.NavSecs = $navSecs
     Set-NavSection "Filaments"
-    $btnNavFilaments.Add_Click({ Set-NavSection "Filaments"           })
-    $btnNavNaming.Add_Click({    Set-NavSection "Naming Conventions"  })
+    $btnNavFilaments.Add_Click({ Write-Log "btnNavFilaments: clicked"; Set-NavSection "Filaments"          })
+    $btnNavNaming.Add_Click({    Write-Log "btnNavNaming: clicked";    Set-NavSection "Naming Conventions" })
 
     # ══════════════════════════════════════════════════════════════════════════
     #  FILAMENTS SECTION
@@ -4541,6 +4671,11 @@ function Build-LibrariesPanel {
     $libStatusLbl.Margin = New-Object System.Windows.Thickness(0,4,0,0)
     $editStack.Children.Add($libStatusLbl) | Out-Null
 
+    # Capture script-scope collections as locals — $script: scope is NOT reliably
+    # accessible inside .GetNewClosure() closures running on the WPF dispatcher thread.
+    $capturedLibColors = $script:LibraryColors
+    $capturedHexToName = $script:HexToName
+
     # ── Shared picker state ───────────────────────────────────────────────────
     $pickerState = @{
         H = 0.0; S = 1.0; V = 1.0
@@ -4562,16 +4697,20 @@ function Build-LibrariesPanel {
     # from .GetNewClosure(). WPF passes (sender, eventArgs) as $args[0]/$args[1];
     # those are never captured and are safe to use for position queries.
     $hueCanvas.Add_MouseLeftButtonDown({
-        $hueCanvas.CaptureMouse()
-        $w = $hueCanvas.ActualWidth; if ($w -le 0) { return }
-        $pickerState.H = [Math]::Max(0.0,[Math]::Min(359.9, $args[1].GetPosition($hueCanvas).X / $w * 360.0))
-        Update-PickerFromHsv $pickerState
+        try {
+            $hueCanvas.CaptureMouse()
+            $w = $hueCanvas.ActualWidth; if ($w -le 0) { return }
+            $pickerState.H = [Math]::Max(0.0,[Math]::Min(359.9, $args[1].GetPosition($hueCanvas).X / $w * 360.0))
+            Update-PickerFromHsv $pickerState
+        } catch { Write-Log "hueCanvas.MouseDown EXCEPTION: $($_.Exception.Message)" "ERROR" }
     }.GetNewClosure())
     $hueCanvas.Add_MouseMove({
-        if (-not $hueCanvas.IsMouseCaptured) { return }
-        $w = $hueCanvas.ActualWidth; if ($w -le 0) { return }
-        $pickerState.H = [Math]::Max(0.0,[Math]::Min(359.9, $args[1].GetPosition($hueCanvas).X / $w * 360.0))
-        Update-PickerFromHsv $pickerState
+        try {
+            if (-not $hueCanvas.IsMouseCaptured) { return }
+            $w = $hueCanvas.ActualWidth; if ($w -le 0) { return }
+            $pickerState.H = [Math]::Max(0.0,[Math]::Min(359.9, $args[1].GetPosition($hueCanvas).X / $w * 360.0))
+            Update-PickerFromHsv $pickerState
+        } catch { Write-Log "hueCanvas.MouseMove EXCEPTION: $($_.Exception.Message)" "ERROR" }
     }.GetNewClosure())
     $hueCanvas.Add_MouseLeftButtonUp({ $hueCanvas.ReleaseMouseCapture() }.GetNewClosure())
 
@@ -4583,22 +4722,26 @@ function Build-LibrariesPanel {
     # Int32 overload when the first arg is an integer literal, which rounds the
     # double result to 0 or 1 and causes the "locked to quadrants" behaviour.
     $svOuter.Add_MouseLeftButtonDown({
-        $svOuter.CaptureMouse()
-        $w = $svOuter.ActualWidth; $h = $svOuter.ActualHeight
-        if ($w -le 0 -or $h -le 0) { return }
-        $p = [System.Windows.Input.Mouse]::GetPosition($svOuter)
-        $pickerState.S = [Math]::Max(0.0,[Math]::Min(1.0, $p.X / $w))
-        $pickerState.V = [Math]::Max(0.0,[Math]::Min(1.0, 1.0 - $p.Y / $h))
-        Update-PickerFromHsv $pickerState
+        try {
+            $svOuter.CaptureMouse()
+            $w = $svOuter.ActualWidth; $h = $svOuter.ActualHeight
+            if ($w -le 0 -or $h -le 0) { return }
+            $p = [System.Windows.Input.Mouse]::GetPosition($svOuter)
+            $pickerState.S = [Math]::Max(0.0,[Math]::Min(1.0, $p.X / $w))
+            $pickerState.V = [Math]::Max(0.0,[Math]::Min(1.0, 1.0 - $p.Y / $h))
+            Update-PickerFromHsv $pickerState
+        } catch { Write-Log "svOuter.MouseDown EXCEPTION: $($_.Exception.Message)" "ERROR" }
     }.GetNewClosure())
     $svOuter.Add_MouseMove({
-        if (-not $svOuter.IsMouseCaptured) { return }
-        $w = $svOuter.ActualWidth; $h = $svOuter.ActualHeight
-        if ($w -le 0 -or $h -le 0) { return }
-        $p = [System.Windows.Input.Mouse]::GetPosition($svOuter)
-        $pickerState.S = [Math]::Max(0.0,[Math]::Min(1.0, $p.X / $w))
-        $pickerState.V = [Math]::Max(0.0,[Math]::Min(1.0, 1.0 - $p.Y / $h))
-        Update-PickerFromHsv $pickerState
+        try {
+            if (-not $svOuter.IsMouseCaptured) { return }
+            $w = $svOuter.ActualWidth; $h = $svOuter.ActualHeight
+            if ($w -le 0 -or $h -le 0) { return }
+            $p = [System.Windows.Input.Mouse]::GetPosition($svOuter)
+            $pickerState.S = [Math]::Max(0.0,[Math]::Min(1.0, $p.X / $w))
+            $pickerState.V = [Math]::Max(0.0,[Math]::Min(1.0, 1.0 - $p.Y / $h))
+            Update-PickerFromHsv $pickerState
+        } catch { Write-Log "svOuter.MouseMove EXCEPTION: $($_.Exception.Message)" "ERROR" }
     }.GetNewClosure())
     $svOuter.Add_MouseLeftButtonUp({ $svOuter.ReleaseMouseCapture() }.GetNewClosure())
 
@@ -4612,35 +4755,49 @@ function Build-LibrariesPanel {
 
     # ── Save / Update ─────────────────────────────────────────────────────────
     $btnSaveFilament.Add_Click({
-        $nm = $pickerState.NameBox.Text.Trim()
-        if ([string]::IsNullOrWhiteSpace($nm)) { $pickerState.StatusLbl.Text = "Name required."; return }
-        $rV=0;$gV=0;$bV=0
-        [int]::TryParse($pickerState.RBox.Text,[ref]$rV)|Out-Null
-        [int]::TryParse($pickerState.GBox.Text,[ref]$gV)|Out-Null
-        [int]::TryParse($pickerState.BBox.Text,[ref]$bV)|Out-Null
-        $rV=[Math]::Max(0,[Math]::Min(255,$rV));$gV=[Math]::Max(0,[Math]::Min(255,$gV));$bV=[Math]::Max(0,[Math]::Min(255,$bV))
-        $hex9 = "#{0:X2}{1:X2}{2:X2}FF" -f $rV,$gV,$bV
-        if ($pickerState.EditingName -and $pickerState.EditingName -ne $nm -and $script:LibraryColors.Contains($pickerState.EditingName)) {
-            $script:LibraryColors.Remove($pickerState.EditingName) | Out-Null
-            $HexToName.Remove($script:LibraryColors[$pickerState.EditingName]) | Out-Null
+        try {
+            Write-Log "btnSaveFilament: clicked"
+            $nm = $pickerState.NameBox.Text.Trim()
+            Write-Log "btnSaveFilament: name='$nm'"
+            if ([string]::IsNullOrWhiteSpace($nm)) { $pickerState.StatusLbl.Text = "Name required."; return }
+            $rV=0;$gV=0;$bV=0
+            [int]::TryParse($pickerState.RBox.Text,[ref]$rV)|Out-Null
+            [int]::TryParse($pickerState.GBox.Text,[ref]$gV)|Out-Null
+            [int]::TryParse($pickerState.BBox.Text,[ref]$bV)|Out-Null
+            $rV=[Math]::Max(0,[Math]::Min(255,$rV));$gV=[Math]::Max(0,[Math]::Min(255,$gV));$bV=[Math]::Max(0,[Math]::Min(255,$bV))
+            $hex9 = "#{0:X2}{1:X2}{2:X2}FF" -f $rV,$gV,$bV
+            Write-Log "btnSaveFilament: hex=$hex9, editingName='$($pickerState.EditingName)'"
+            if ($pickerState.EditingName -and $pickerState.EditingName -ne $nm -and $capturedLibColors.Contains($pickerState.EditingName)) {
+                # Capture old hex BEFORE removing so we can clean up HexToName correctly
+                $oldHex = $capturedLibColors[$pickerState.EditingName]
+                $capturedLibColors.Remove($pickerState.EditingName) | Out-Null
+                if ($oldHex) { $capturedHexToName.Remove($oldHex) | Out-Null; $capturedHexToName.Remove($oldHex.Substring(0,7)) | Out-Null }
+            }
+            $capturedLibColors[$nm] = $hex9; $capturedHexToName[$hex9] = $nm; $capturedHexToName[$hex9.Substring(0,7)] = $nm
+            $pickerState.EditingName = $nm
+            Write-Log "btnSaveFilament: calling Save-FilamentLibrary"
+            if (Save-FilamentLibrary) {
+                $pickerState.StatusLbl.Text = "Saved."; $pickerState.StatusLbl.Foreground = Get-WpfColor "#4CAF72"
+            } else {
+                $pickerState.StatusLbl.Text = "Save failed!"; $pickerState.StatusLbl.Foreground = Get-WpfColor "#D95F5F"
+            }
+            Write-Log "btnSaveFilament: calling Rebuild-FilamentList"
+            Rebuild-FilamentList $pickerState
+            Write-Log "btnSaveFilament: done"
+        } catch {
+            Write-Log "btnSaveFilament: EXCEPTION $($_.Exception.GetType().FullName): $($_.Exception.Message)" "ERROR"
+            Write-Log "  STACK: $($_.ScriptStackTrace)" "ERROR"
+            throw
         }
-        $script:LibraryColors[$nm] = $hex9; $HexToName[$hex9] = $nm; $HexToName[$hex9.Substring(0,7)] = $nm
-        $pickerState.EditingName = $nm
-        if (Save-FilamentLibrary) {
-            $pickerState.StatusLbl.Text = "Saved."; $pickerState.StatusLbl.Foreground = Get-WpfColor "#4CAF72"
-        } else {
-            $pickerState.StatusLbl.Text = "Save failed!"; $pickerState.StatusLbl.Foreground = Get-WpfColor "#D95F5F"
-        }
-        Rebuild-FilamentList $pickerState
     }.GetNewClosure())
 
     # ── Delete ────────────────────────────────────────────────────────────────
     $btnDelFilament.Add_Click({
         $nm = $pickerState.EditingName
-        if ([string]::IsNullOrWhiteSpace($nm) -or -not $script:LibraryColors.Contains($nm)) {
+        if ([string]::IsNullOrWhiteSpace($nm) -or -not $capturedLibColors.Contains($nm)) {
             $pickerState.StatusLbl.Text = "Nothing selected to delete."; return
         }
-        $script:LibraryColors.Remove($nm) | Out-Null
+        $capturedLibColors.Remove($nm) | Out-Null
         if (Save-FilamentLibrary) {
             $pickerState.EditingName = ""; $pickerState.NameBox.Text = ""
             $pickerState.RBox.Text="0"; $pickerState.GBox.Text="0"; $pickerState.BBox.Text="0"
@@ -4976,7 +5133,7 @@ $script:BtnModeLibraries = New-ModeButton "Libraries" 80  "#252630" "#7A7D90" $f
 $script:BtnModeFilePr.Add_Click({   Set-GlobalMode "FilePr"   })
 $script:BtnModeEditing.Add_Click({  Set-GlobalMode "Editing"  })
 $script:BtnModeReview.Add_Click({   Set-GlobalMode "Review"   })
-$script:BtnModeLibraries.Add_Click({ Set-GlobalMode "Libraries" })
+$script:BtnModeLibraries.Add_Click({ Write-Log "BtnModeLibraries: clicked"; Set-GlobalMode "Libraries" })
 
 $topModeBar.Children.Add($script:BtnModeFilePr)    | Out-Null
 $topModeBar.Children.Add($script:BtnModeEditing)   | Out-Null
@@ -5008,4 +5165,13 @@ $headerGrid.Children.Add($centerWrap) | Out-Null
 # Build the Libraries panel (attaches itself to the window's root Grid)
 Build-LibrariesPanel | Out-Null
 
-$window.ShowDialog() | Out-Null
+Write-Log "Entering window.ShowDialog()"
+try {
+    $window.ShowDialog() | Out-Null
+    Write-Log "window.ShowDialog() returned normally"
+} catch {
+    Write-Log "window.ShowDialog() THREW: $($_.Exception.GetType().FullName): $($_.Exception.Message)" "FATAL"
+    Write-Log "  STACK: $($_.ScriptStackTrace)" "FATAL"
+}
+Write-Log "Script exiting"
+try { Stop-Transcript } catch {}
