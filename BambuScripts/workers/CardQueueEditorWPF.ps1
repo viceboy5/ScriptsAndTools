@@ -927,11 +927,11 @@ function Start-NextProcess {
 
     # RenameOnlyBypass: user confirmed rename despite unmatched colors — skip all heavy tasks
     if ($pJob.RenameOnlyBypass) {
-        $doRename = $true; $doMerge = $false; $doSlice = $false; $doExtract = $false; $doImage = $false; $doLogs = $false
+        $doRename = $true; $doMerge = $false; $doSlice = $false; $doExtract = $false; $doImage = $false; $doLogs = $false; $doBOD = $false
         $pJob.RenameOnlyBypass = $false
     } elseif ($pJob.SliceOnlyBypass) {
         # Editing mode slice-only — no rename, no merge, just slice using the current anchor
-        $doRename = $false; $doMerge = $false; $doSlice = $true; $doExtract = $false; $doImage = $false; $doLogs = $false
+        $doRename = $false; $doMerge = $false; $doSlice = $true; $doExtract = $false; $doImage = $false; $doLogs = $false; $doBOD = $false
         $pJob.SliceOnlyBypass = $false
         $pJob.ProcessedAnchorPath = $pJob.AnchorFile.FullName
     } else {
@@ -941,6 +941,7 @@ function Start-NextProcess {
         $doExtract = [bool]$pJob.ChkExtract.IsChecked
         $doImage   = [bool]$pJob.ChkImage.IsChecked
         $doLogs    = [bool]$pJob.ChkLogs.IsChecked
+        $doBOD     = [bool]$pJob.ChkBOD.IsChecked
     }
 
     $anchorIsZip3mf = $pJob.AnchorFile.Extension -imatch '\.3mf$' -and $pJob.AnchorFile.Name -notmatch '(?i)\.gcode\.3mf$'
@@ -1066,7 +1067,7 @@ function Start-NextProcess {
     }
 
     # If rename-only (no heavy tasks), complete immediately without launching worker
-    if (-not ($doMerge -or $doSlice -or $doExtract -or $doImage)) {
+    if (-not ($doMerge -or $doSlice -or $doExtract -or $doImage -or $doBOD)) {
         $pJob.ProcessingOverlay.Visibility = "Collapsed"; $pJob.PickProcessingOverlay.Visibility = "Collapsed"
         $pJob.RowPanel.IsEnabled = $true; $pJob.IsDone = $true
         $pJob.BtnApply.Content = "Done"; $pJob.BtnApply.Background = Get-WpfColor "#4CAF72"
@@ -1106,15 +1107,18 @@ function Start-NextProcess {
     $statusFile = Join-Path $dir "AsyncWorker_Status.txt"
     $basePrefix = if ($baseName.ToLower().EndsWith("full")) { $baseName.Substring(0, $baseName.Length - 4) } else { $baseName + "_" }
 
-    $anchorPath = $pJob.ProcessedAnchorPath
-    $nestPath   = Join-Path $dir "$($basePrefix)Nest.3mf"
-    $finalPath  = Join-Path $dir "$($basePrefix)Final.3mf"
-    $tempOut    = Join-Path $dir "$($baseName)_merged_temp.3mf"
-    $tempIso    = Join-Path $env:TEMP "iso_$([guid]::NewGuid().ToString().Substring(0,8))"
-    $slicedFile = Join-Path $dir "$($baseName).gcode.3mf"
-    $singleFile = Join-Path $dir "$($basePrefix)Final.gcode.3mf"
-    $tsvBaseName = $baseName -replace '(?i)_Full$', ''
-    $tsvFile    = Join-Path $dir "${tsvBaseName}_Data.tsv"
+    $anchorPath    = $pJob.ProcessedAnchorPath
+    $nestPath      = Join-Path $dir "$($basePrefix)Nest.3mf"
+    $finalPath     = Join-Path $dir "$($basePrefix)Final.3mf"
+    $tempOut       = Join-Path $dir "$($baseName)_merged_temp.3mf"
+    $tempIso       = Join-Path $env:TEMP "iso_$([guid]::NewGuid().ToString().Substring(0,8))"
+    $slicedFile    = Join-Path $dir "$($baseName).gcode.3mf"
+    $singleFile    = Join-Path $dir "$($basePrefix)Final.gcode.3mf"
+    $tsvBaseName   = $baseName -replace '(?i)_Full$', ''
+    $tsvFile       = Join-Path $dir "${tsvBaseName}_Data.tsv"
+    $bodTempPath   = Join-Path $dir "$($basePrefix)BOD.3mf"
+    $bodGcodeTemp  = Join-Path $dir "$($basePrefix)BOD.gcode.3mf"
+    $bodQueueBase  = "C:\Users\Owner\SynologyDrive\WIGGLITEERZ\THEKITCHEN\Printing Queue"
 
     [void]$sb.AppendLine("`$ErrorActionPreference = 'Continue'")
     if ($doLogs) { [void]$sb.AppendLine("Start-Transcript -Path `"$dir\Worker_PS_Log.txt`" -Force") }
@@ -1133,6 +1137,30 @@ function Start-NextProcess {
         [void]$sb.AppendLine("[System.IO.Compression.ZipFile]::ExtractToDirectory(`"$nestPath`", `"$tempIso`")")
         [void]$sb.AppendLine("& `"$scriptDir\isolate_final_worker.ps1`" -WorkDir `"$tempIso`" -OutputPath `"$finalPath`"")
         [void]$sb.AppendLine("Remove-Item `"$tempIso`" -Recurse -Force -ErrorAction SilentlyContinue")
+    }
+
+    if ($doBOD) {
+        # Full.3mf path: after a merge it is $baseName.3mf; if no merge was done this run it already exists
+        $bodFullPath = Join-Path $dir "$baseName.3mf"
+        [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value 'CREATING BOD...' -Force")
+        [void]$sb.AppendLine("`$bodFullPath = `"$bodFullPath`"")
+        [void]$sb.AppendLine("if (-not (Test-Path `$bodFullPath)) { Write-Host '[BOD] Full.3mf not found - skipping BOD.' -ForegroundColor Yellow }")
+        [void]$sb.AppendLine("else {")
+        [void]$sb.AppendLine("    `$bodDate = Get-Date -Format 'MMMM d'")
+        [void]$sb.AppendLine("    `$bodFolder = Join-Path `"$bodQueueBase`" `$bodDate")
+        [void]$sb.AppendLine("    New-Item -ItemType Directory -Path `$bodFolder -Force | Out-Null")
+        [void]$sb.AppendLine("    & `"$scriptDir\create_bod_worker.ps1`" -InputPath `$bodFullPath -OutputPath `"$bodTempPath`"")
+        [void]$sb.AppendLine("    if (Test-Path `"$bodTempPath`") {")
+        [void]$sb.AppendLine("        Set-Content -Path `"$statusFile`" -Value 'SLICING BOD... 0%' -Force")
+        [void]$sb.AppendLine("        & `"$scriptDir\Slice_worker.ps1`" -InputPath `"$bodTempPath`" -StatusFile `"$statusFile`"")
+        [void]$sb.AppendLine("        if (Test-Path `"$bodGcodeTemp`") {")
+        [void]$sb.AppendLine("            `$bodDest = Join-Path `$bodFolder `"$($basePrefix)BOD.gcode.3mf`"")
+        [void]$sb.AppendLine("            Move-Item `"$bodGcodeTemp`" `$bodDest -Force")
+        [void]$sb.AppendLine("            Write-Host `"[BOD] Exported to: `$bodDest`" -ForegroundColor Green")
+        [void]$sb.AppendLine("        } else { Write-Host '[BOD] Slice produced no gcode output.' -ForegroundColor Yellow }")
+        [void]$sb.AppendLine("        Remove-Item `"$bodTempPath`" -Force -ErrorAction SilentlyContinue")
+        [void]$sb.AppendLine("    } else { Write-Host '[BOD] create_bod_worker produced no output.' -ForegroundColor Yellow }")
+        [void]$sb.AppendLine("}")
     }
 
     if ($doSlice) {
@@ -2298,10 +2326,12 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $chkSlice   = New-Object System.Windows.Controls.CheckBox; $chkSlice.Content   = "Slice / Export Gcode"; $chkSlice.IsChecked   = $false; $chkSlice.Foreground   = Get-WpfColor "#FFFFFF"; $chkSlice.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
     $chkExtract = New-Object System.Windows.Controls.CheckBox; $chkExtract.Content = "Extract Data";         $chkExtract.IsChecked = $false; $chkExtract.Foreground = Get-WpfColor "#FFFFFF"; $chkExtract.Margin = New-Object System.Windows.Thickness(0,0,15,0)
     $chkImage   = New-Object System.Windows.Controls.CheckBox; $chkImage.Content   = "Generate Image Card";  $chkImage.IsChecked   = $false; $chkImage.Foreground   = Get-WpfColor "#FFFFFF"; $chkImage.Margin = New-Object System.Windows.Thickness(0,0,15,0)
-    $chkLogs    = New-Object System.Windows.Controls.CheckBox; $chkLogs.Content    = "Create Logs";          $chkLogs.IsChecked    = $false; $chkLogs.Foreground    = Get-WpfColor "#FFFFFF"
+    $chkLogs    = New-Object System.Windows.Controls.CheckBox; $chkLogs.Content    = "Create Logs";          $chkLogs.IsChecked    = $false; $chkLogs.Foreground    = Get-WpfColor "#FFFFFF"; $chkLogs.Margin = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkBOD     = New-Object System.Windows.Controls.CheckBox; $chkBOD.Content     = "Create BOD";           $chkBOD.IsChecked     = $false; $chkBOD.Foreground     = Get-WpfColor "#FFFFFF"
+    $chkBOD.ToolTip = "Reduces the merged Full.3mf to the 5 pairs closest to centre and exports a BOD.gcode.3mf to the Printing Queue"
     $tasksRow1.Children.Add($chkRename) | Out-Null; $tasksRow1.Children.Add($chkMerge) | Out-Null; $tasksRow1.Children.Add($chkSlice) | Out-Null
     $tasksRow1.Children.Add($chkExtract) | Out-Null; $tasksRow1.Children.Add($chkImage) | Out-Null
-    $tasksRow1.Children.Add($chkLogs) | Out-Null
+    $tasksRow1.Children.Add($chkLogs) | Out-Null; $tasksRow1.Children.Add($chkBOD) | Out-Null
     $tasksOuter.Children.Add($tasksRow1) | Out-Null
 
     $tasksRow2 = New-Object System.Windows.Controls.StackPanel
@@ -2323,7 +2353,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $filePrepPanel.Children.Add($tasksBox) | Out-Null
     $pJob.TasksBox = $tasksBox
 
-    $pJob.ChkRename = $chkRename; $pJob.ChkMerge = $chkMerge; $pJob.ChkSlice = $chkSlice; $pJob.ChkExtract = $chkExtract; $pJob.ChkImage = $chkImage; $pJob.ChkLogs = $chkLogs
+    $pJob.ChkRename = $chkRename; $pJob.ChkMerge = $chkMerge; $pJob.ChkSlice = $chkSlice; $pJob.ChkExtract = $chkExtract; $pJob.ChkImage = $chkImage; $pJob.ChkLogs = $chkLogs; $pJob.ChkBOD = $chkBOD
     if ($nestExists) {
         $chkMerge.IsChecked = $false; $chkMerge.IsEnabled = $false; $chkMerge.Foreground = Get-WpfColor "#555555"
         $chkMerge.ToolTip = "Remove Nest.3mf or Revert Merge before merging again"
@@ -2335,7 +2365,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $chkRename.Add_Unchecked({ Validate-PJob $this.Tag })
 
     # Checkbox interdependencies
-    $tasksData = @{ Rename = $chkRename; Merge = $chkMerge; Slice = $chkSlice; Extract = $chkExtract; Image = $chkImage; Logs = $chkLogs; PJob = $pJob; GpJob = $gpJob }
+    $tasksData = @{ Rename = $chkRename; Merge = $chkMerge; Slice = $chkSlice; Extract = $chkExtract; Image = $chkImage; Logs = $chkLogs; BOD = $chkBOD; PJob = $pJob; GpJob = $gpJob }
 
     $chkSlice.Tag = $tasksData
     $chkSlice.Add_Checked({ if ($this.IsChecked) { $this.Tag.Extract.IsChecked = $true } })
@@ -2362,12 +2392,13 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $t = $this.Tag
         $t.Rename.IsChecked = $true; $t.Slice.IsChecked = $true; $t.Extract.IsChecked = $true; $t.Image.IsChecked = $true
         if ($t.Merge.IsEnabled) { $t.Merge.IsChecked = $true }
+        # BOD is intentionally left at its current value — it defaults off and is a special-purpose task
     })
 
     $btnDeselAll.Tag = $tasksData
     $btnDeselAll.Add_Click({
         $t = $this.Tag
-        $t.Rename.IsChecked = $false; $t.Slice.IsChecked = $false; $t.Extract.IsChecked = $false; $t.Image.IsChecked = $false; $t.Logs.IsChecked = $false
+        $t.Rename.IsChecked = $false; $t.Slice.IsChecked = $false; $t.Extract.IsChecked = $false; $t.Image.IsChecked = $false; $t.Logs.IsChecked = $false; $t.BOD.IsChecked = $false
         if ($t.Merge.IsEnabled) { $t.Merge.IsChecked = $false }
     })
 
