@@ -191,9 +191,11 @@ if ($IndividualTsvPath -ne "" -and (Test-Path $IndividualTsvPath)) {
         $skuLine = Get-Content $IndividualTsvPath | Select-Object -Last 1
         $skuCols = $skuLine -split "`t"
         $datePattern = '^\d{1,2}/\d{1,2}/\d{4}$'
-        # Old format has Date at col 4 — skip read so we don't pull Theme as SKU
+        # Old format has Date at col 4 — skip read so we don't pull Theme as SKU.
+        # Also require a 5-digit value so hours/minutes/theme text from older TSV layouts
+        # are never mistaken for a SKU.
         $isOldFormat = $skuCols.Count -gt 4 -and $skuCols[4] -match $datePattern
-        if (-not $isOldFormat -and $skuCols.Count -ge 4 -and -not [string]::IsNullOrWhiteSpace($skuCols[3])) {
+        if (-not $isOldFormat -and $skuCols.Count -ge 4 -and $skuCols[3].Trim() -match '^\d{5}$') {
             $existingSku = $skuCols[3].Trim()
         }
     } catch {}

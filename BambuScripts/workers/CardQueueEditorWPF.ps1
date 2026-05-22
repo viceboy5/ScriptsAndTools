@@ -2451,7 +2451,9 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
                 $skuSeedCols = $skuSeedLine -split "`t"
                 $skuDatePat  = '^\d{1,2}/\d{1,2}/\d{4}$'
                 $skuOldFmt   = $skuSeedCols.Count -gt 4 -and $skuSeedCols[4] -match $skuDatePat
-                if (-not $skuOldFmt -and $skuSeedCols.Count -ge 4 -and -not [string]::IsNullOrWhiteSpace($skuSeedCols[3])) {
+                # Only accept 5-digit values as SKUs — guards against old-format TSVs where
+                # col 3 may contain Theme text, hours, or other non-SKU data.
+                if (-not $skuOldFmt -and $skuSeedCols.Count -ge 4 -and $skuSeedCols[3].Trim() -match '^\d{5}$') {
                     $txtSku.Text = $skuSeedCols[3].Trim()
                 }
             }
