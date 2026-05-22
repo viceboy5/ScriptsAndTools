@@ -498,10 +498,23 @@ $script:AdjPresets = @('Common','RARE','EPIC','LEGENDARY','Default')
 function Find-AnchorFile($folderPath) {
     $files = Get-ChildItem -Path $folderPath -File -ErrorAction SilentlyContinue
     $f = $files | Where-Object { $_.Name -match '(?i)Full\.3mf$'  -and $_.Name -notmatch '(?i)\.gcode\.3mf$' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($f) { return $f }
+    $f = $files | Where-Object { $_.Name -match '(?i)Nest\.3mf$'  -and $_.Name -notmatch '(?i)\.gcode\.3mf$' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($f) { return $f }
     $f = $files | Where-Object { $_.Name -match '(?i)Final\.3mf$' -and $_.Name -notmatch '(?i)\.gcode\.3mf$' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($f) { return $f }
     $f = $files | Where-Object { $_.Extension -imatch '\.3mf$'    -and $_.Name -notmatch '(?i)\.gcode\.3mf$' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($f) { return $f }
     $f = $files | Where-Object { $_.Extension -imatch '\.stl$' }                                               | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($f) { return $f }
     $f = $files | Where-Object { $_.Extension -imatch '\.png$'    -and $_.Name -notmatch '(?i)_slicePreview\.png$' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    return $f
+}
+
+# Returns the best 3MF for color info only: Full > Nest > Final > any .3mf
+# Used independently of AnchorFile so that color slots always reflect the
+# richest source file even when the anchor was a Final or custom file.
+function Find-ColorInfoFile($folderPath) {
+    $files = Get-ChildItem -Path $folderPath -File -ErrorAction SilentlyContinue
+    $f = $files | Where-Object { $_.Name -match '(?i)Full\.3mf$'  -and $_.Name -notmatch '(?i)\.gcode\.3mf$' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($f) { return $f }
+    $f = $files | Where-Object { $_.Name -match '(?i)Nest\.3mf$'  -and $_.Name -notmatch '(?i)\.gcode\.3mf$' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($f) { return $f }
+    $f = $files | Where-Object { $_.Name -match '(?i)Final\.3mf$' -and $_.Name -notmatch '(?i)\.gcode\.3mf$' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($f) { return $f }
+    $f = $files | Where-Object { $_.Extension -imatch '\.3mf$'    -and $_.Name -notmatch '(?i)\.gcode\.3mf$' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     return $f
 }
 
@@ -1224,7 +1237,6 @@ function Start-NextProcess {
         [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value 'EXTRACTING DATA...' -Force")
         $imageFlag = if ($doImage) { "-GenerateImage" } else { "" }
         [void]$sb.AppendLine("if (Test-Path `"$slicedFile`") {")
-        [void]$sb.AppendLine("    Remove-Item `"$tsvFile`" -Force -ErrorAction SilentlyContinue")
         [void]$sb.AppendLine("    & `"$scriptDir\DataExtract_worker.ps1`" -InputFile `"$slicedFile`" -SingleFile `"$singleFile`" -IndividualTsvPath `"$tsvFile`" $imageFlag")
         [void]$sb.AppendLine("    Remove-Item `"$singleFile`" -Force -ErrorAction SilentlyContinue")
         [void]$sb.AppendLine("} else {")
@@ -1533,11 +1545,25 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         try { [System.IO.Compression.ZipFile]::ExtractToDirectory($anchorFile.FullName, $tempWork) } catch {}
     }
 
+    # Find the best 3MF for color info (Full > Nest > Final > any), independent of anchor.
+    # If it differs from the anchor, extract it to a short-lived temp dir for reading only.
+    $colorFile     = Find-ColorInfoFile $parentPath
+    if ($null -eq $colorFile) { $colorFile = $anchorFile }
+    $colorIsZip3mf = $colorFile.Extension -imatch '\.3mf$' -and $colorFile.Name -notmatch '(?i)\.gcode\.3mf$'
+    $colorTempWork = $null
+    $colorWorkDir  = $tempWork
+    if ($colorIsZip3mf -and $colorFile.FullName -ne $anchorFile.FullName) {
+        $colorTempWork = Join-Path $env:TEMP ("ColorInfo_" + [guid]::NewGuid().ToString().Substring(0,8))
+        New-Item -ItemType Directory -Path $colorTempWork | Out-Null
+        try { [System.IO.Compression.ZipFile]::ExtractToDirectory($colorFile.FullName, $colorTempWork) } catch {}
+        $colorWorkDir = $colorTempWork
+    }
+
     $activeSlots = New-Object System.Collections.ArrayList
 
-    if ($isZip3mf) {
-        $projPath   = Join-Path $tempWork "Metadata\project_settings.config"
-        $modSetPath = Join-Path $tempWork "Metadata\model_settings.config"
+    if ($colorIsZip3mf) {
+        $projPath   = Join-Path $colorWorkDir "Metadata\project_settings.config"
+        $modSetPath = Join-Path $colorWorkDir "Metadata\model_settings.config"
 
         $SlotMap = [ordered]@{}; $UsedSlots = New-Object System.Collections.Generic.HashSet[string]
         $UsedSlots.Add("1") | Out-Null
@@ -1559,7 +1585,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         # (filament_ids is 0-based). Use this when available — it's more precise than
         # scanning the whole model, and correctly excludes slots only used on other plates.
         $plateSlots = New-Object System.Collections.Generic.HashSet[string]
-        $metaDir = Join-Path $tempWork "Metadata"
+        $metaDir = Join-Path $colorWorkDir "Metadata"
         if (Test-Path $metaDir) {
             foreach ($pjf in (Get-ChildItem -Path $metaDir -Filter 'plate_*.json' -ErrorAction SilentlyContinue)) {
                 try {
@@ -1579,7 +1605,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             # Bambu Studio stores off-plate objects at negative X; on-plate objects have positive X and Y
             # within reasonable bed bounds (up to ~450 mm covers all current Bambu models).
             $onPlateIds = New-Object System.Collections.Generic.HashSet[string]
-            $modelFile = Get-ChildItem -Path $tempWork -Filter '3dmodel.model' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            $modelFile = Get-ChildItem -Path $colorWorkDir -Filter '3dmodel.model' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($modelFile -and (Test-Path $modelFile.FullName)) {
                 try {
                     $modelContent = [System.IO.File]::ReadAllText($modelFile.FullName, [System.Text.Encoding]::UTF8)
@@ -1628,6 +1654,11 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             }
         }
         if ($activeSlots.Count -gt 8) { $activeSlots = $activeSlots[0..7] }
+    }
+
+    # Clean up the color-only temp dir (kept separate from $tempWork which is still needed for thumbnails)
+    if ($null -ne $colorTempWork -and (Test-Path $colorTempWork)) {
+        try { Remove-Item -Path $colorTempWork -Recurse -Force -ErrorAction SilentlyContinue } catch {}
     }
 
     $pJob = @{
@@ -3992,7 +4023,7 @@ $btnBrowse.Add_Click({
     $hwnd = $interop.Handle
 
     # 2. Call the new NativeFolderBrowser (Now returns an array of paths!)
-    $selectedPaths = [NativeFolderBrowser]::ShowDialog($hwnd, "Select folders containing Full.3mf files")
+    $selectedPaths = [NativeFolderBrowser]::ShowDialog($hwnd, "Select folders containing 3MF source files")
 
     # 3. Stop if the user closed the window or clicked Cancel
     if ($null -eq $selectedPaths -or $selectedPaths.Count -eq 0) { return }
@@ -4000,29 +4031,21 @@ $btnBrowse.Add_Click({
     $lblGlobalTitle.Text = "Scanning selected folders..."
     [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
 
-    # 4. Standard scanning & queueing logic (Looping through every folder you checked!)
-    $newFound = @()
-    foreach ($path in $selectedPaths) {
-        $newFound += @(Get-ChildItem -Path $path -Filter "*Full.3mf" -Recurse -File -ErrorAction SilentlyContinue)
-    }
+    # 4. Build queue using the same anchor-discovery logic as drag-and-drop
+    # (finds Full > Nest > Final > any .3mf > .stl > .png per folder)
+    $newGpQueue = Get-AnchorQueue $selectedPaths
 
-    $newGpQueue = [ordered]@{}
-    foreach ($f in $newFound) {
-        $parentPath = $f.DirectoryName
-        $gp = $f.Directory.Parent
-        $gpPath = if ($gp) { $gp.FullName } else { "ROOT_" + $parentPath }
-
-        # Prevent duplicates
-        $exists = $false
-        foreach ($j in $script:jobs) {
-            foreach ($parentJob in $j.Parents) {
-                if ($parentJob.FolderPath -eq $parentPath) { $exists = $true; break }
+    # Remove folders already loaded in the UI
+    foreach ($gpPath in @($newGpQueue.Keys)) {
+        foreach ($parentPath in @($newGpQueue[$gpPath].Keys)) {
+            $exists = $false
+            foreach ($j in $script:jobs) {
+                foreach ($parentJob in $j.Parents) { if ($parentJob.FolderPath -eq $parentPath) { $exists = $true; break } }
+                if ($exists) { break }
             }
+            if ($exists) { $newGpQueue[$gpPath].Remove($parentPath) }
         }
-        if ($exists) { continue }
-
-        if (-not $newGpQueue.Contains($gpPath)) { $newGpQueue[$gpPath] = [ordered]@{} }
-        if (-not $newGpQueue[$gpPath].Contains($parentPath)) { $newGpQueue[$gpPath][$parentPath] = $f }
+        if ($newGpQueue[$gpPath].Count -eq 0) { $newGpQueue.Remove($gpPath) }
     }
 
     foreach ($gpPath in $newGpQueue.Keys) {
