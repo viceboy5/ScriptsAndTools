@@ -239,9 +239,6 @@ if ($nameParts.Count -ge 3) {
 }
 
 $themeOutput = $themeSlot
-if ($adjSlot -match '(?i)Rare|Legendary|Epic') {
-    $themeOutput = "RARE " + $themeSlot
-}
 # -------------------------------------------------
 
 $timeAdd = 0
