@@ -802,8 +802,7 @@ try {
     $plate1JsonBytes      = $null
     $srcWipeTowerX        = $null
     $srcWipeTowerY        = $null
-    $srcWipeTowerWidth    = $null
-    $srcWipeTowerRotation = $null
+    $srcPrimeTowerWidth   = $null
     $srcZipForPlate = [System.IO.Compression.ZipFile]::OpenRead($TransformSourcePath)
     try {
         # plate_1.json
@@ -826,14 +825,12 @@ try {
             $projText = $srProj.ReadToEnd(); $srProj.Dispose()
             $xm  = [regex]::Match($projText, '"wipe_tower_x"\s*:\s*\[([^\]]*)\]')
             $ym  = [regex]::Match($projText, '"wipe_tower_y"\s*:\s*\[([^\]]*)\]')
-            $wm  = [regex]::Match($projText, '"wipe_tower_width"\s*:\s*\[([^\]]*)\]')
-            $rm  = [regex]::Match($projText, '"wipe_tower_rotation"\s*:\s*\[([^\]]*)\]')
-            if ($xm.Success) { $srcWipeTowerX        = $xm.Groups[1].Value.Trim() }
-            if ($ym.Success) { $srcWipeTowerY        = $ym.Groups[1].Value.Trim() }
-            if ($wm.Success) { $srcWipeTowerWidth    = $wm.Groups[1].Value.Trim() }
-            if ($rm.Success) { $srcWipeTowerRotation = $rm.Groups[1].Value.Trim() }
+            $ptw = [regex]::Match($projText, '"prime_tower_width"\s*:\s*"([^"]*)"')
+            if ($xm.Success)  { $srcWipeTowerX      = $xm.Groups[1].Value.Trim() }
+            if ($ym.Success)  { $srcWipeTowerY      = $ym.Groups[1].Value.Trim() }
+            if ($ptw.Success) { $srcPrimeTowerWidth = $ptw.Groups[1].Value.Trim() }
             if ($null -ne $srcWipeTowerX) {
-                Write-Host "Wipe tower from source: x=[$srcWipeTowerX] y=[$srcWipeTowerY] width=[$srcWipeTowerWidth] rotation=[$srcWipeTowerRotation]"
+                Write-Host "Wipe tower from source: x=[$srcWipeTowerX] y=[$srcWipeTowerY] prime_tower_width=[$srcPrimeTowerWidth]"
             }
         }
     } finally { $srcZipForPlate.Dispose() }
@@ -969,19 +966,18 @@ try {
                 Write-Host "plate_1.json injected into output (wipe tower bbox preserved)."
             }
 
-            # Patch wipe tower settings in project_settings.config
+            # Patch wipe tower position + prime tower width in project_settings.config
             if ($null -ne $srcWipeTowerX) {
                 $projE = $outZip.Entries | Where-Object { $_.FullName -eq 'Metadata/project_settings.config' } | Select-Object -First 1
                 if ($null -ne $projE) {
                     $srOut = New-Object System.IO.StreamReader($projE.Open())
                     $projOut = $srOut.ReadToEnd(); $srOut.Dispose()
-                    $projOut = [regex]::Replace($projOut, '("wipe_tower_x"\s*:\s*\[)[^\]]*(\])',        "`$1$srcWipeTowerX`$2")
-                    $projOut = [regex]::Replace($projOut, '("wipe_tower_y"\s*:\s*\[)[^\]]*(\])',        "`$1$srcWipeTowerY`$2")
-                    if ($null -ne $srcWipeTowerWidth) {
-                        $projOut = [regex]::Replace($projOut, '("wipe_tower_width"\s*:\s*\[)[^\]]*(\])',    "`$1$srcWipeTowerWidth`$2")
-                    }
-                    if ($null -ne $srcWipeTowerRotation) {
-                        $projOut = [regex]::Replace($projOut, '("wipe_tower_rotation"\s*:\s*\[)[^\]]*(\])', "`$1$srcWipeTowerRotation`$2")
+                    $projOut = [regex]::Replace($projOut, '("wipe_tower_x"\s*:\s*\[)[^\]]*(\])', "`$1$srcWipeTowerX`$2")
+                    $projOut = [regex]::Replace($projOut, '("wipe_tower_y"\s*:\s*\[)[^\]]*(\])', "`$1$srcWipeTowerY`$2")
+                    if ($null -ne $srcPrimeTowerWidth) {
+                        # prime_tower_width is a plain string value: "prime_tower_width": "18"
+                        # Use lookbehind so no backreference digits can collide with the numeric value
+                        $projOut = [regex]::Replace($projOut, '(?<="prime_tower_width"\s*:\s*")[^"]*', $srcPrimeTowerWidth)
                     }
                     $projE.Delete()
                     $newProj     = $outZip.CreateEntry('Metadata/project_settings.config')
@@ -989,7 +985,7 @@ try {
                     $projBytes   = [System.Text.Encoding]::UTF8.GetBytes($projOut)
                     try { $projStream.Write($projBytes, 0, $projBytes.Length) }
                     finally { $projStream.Dispose() }
-                    Write-Host "project_settings.config patched: wipe_tower x=[$srcWipeTowerX] y=[$srcWipeTowerY] width=[$srcWipeTowerWidth] rotation=[$srcWipeTowerRotation]"
+                    Write-Host "project_settings.config patched: wipe_tower x=[$srcWipeTowerX] y=[$srcWipeTowerY] prime_tower_width=[$srcPrimeTowerWidth]"
                 }
             }
         } finally { $outZip.Dispose() }
