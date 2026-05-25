@@ -581,6 +581,7 @@ if ($args.Count -gt 0) {
                 <Grid Grid.Column="2" Margin="0,0,15,0">
                     <StackPanel Name="TopModeBar" HorizontalAlignment="Center" VerticalAlignment="Center" Orientation="Horizontal"/>
                     <StackPanel HorizontalAlignment="Right" VerticalAlignment="Center" Orientation="Horizontal">
+                        <Button Name="BtnImportSkus" Content="Import SKUs" Background="#7A5C2E" Foreground="White" FontWeight="Bold" Width="110" Height="30" BorderThickness="0" Cursor="Hand" Margin="0,0,8,0"/>
                         <Button Name="BtnProcessAll" Content="Process All Tasks" Background="#4CAF72" Foreground="White" FontWeight="Bold" Width="150" Height="30" BorderThickness="0" Cursor="Hand"/>
                     </StackPanel>
                 </Grid>
@@ -608,6 +609,7 @@ Write-Log "Window created, dispatcher hooked"
 
 $lblGlobalTitle = $window.FindName("LblGlobalTitle")
 $btnProcessAll  = $window.FindName("BtnProcessAll")
+$btnImportSkus  = $window.FindName("BtnImportSkus")
 $btnBrowse      = $window.FindName("BtnBrowse") # <--- ADD THIS LINE BACK
 $mainStack      = $window.FindName("MainStack")
 $topModeBar     = $window.FindName("TopModeBar")
@@ -1536,6 +1538,34 @@ function Set-GlobalMode([string]$mode) {
     }
 }
 
+# Saves a SKU value to the TSV for a given card folder.
+# Called from both the per-card Save button and the queue-level CSV import.
+function Save-SkuToTsv([string]$skuVal, [string]$folderPath, $anchorFile) {
+    $af         = $anchorFile
+    $anchorBase = if ($null -ne $af) { [System.IO.Path]::GetFileNameWithoutExtension($af.FullName) } else { "" }
+    $tsvBase    = $anchorBase -replace '(?i)_?(Full|Nest|Final)$', ''
+    $tsvPath    = Join-Path $folderPath "${tsvBase}_Data.tsv"
+    if (Test-Path $tsvPath) {
+        $lines = @(Get-Content $tsvPath)
+        if ($lines.Count -gt 0) {
+            $cols     = $lines[-1] -split "`t"
+            $datePat  = '^\d{1,2}/\d{1,2}/\d{4}$'
+            $isOldFmt = $cols.Count -gt 4 -and $cols[4] -match $datePat
+            if ($isOldFmt) {
+                $newCols   = $cols[0..2] + @($skuVal) + $cols[3..($cols.Count - 1)]
+                $lines[-1] = $newCols -join "`t"
+            } else {
+                while ($cols.Count -lt 4) { $cols += "" }
+                $cols[3]   = $skuVal
+                $lines[-1] = $cols -join "`t"
+            }
+            Set-Content -Path $tsvPath -Value $lines -Encoding UTF8
+        }
+    } else {
+        Set-Content -Path $tsvPath -Value "`t`t`t$skuVal" -Encoding UTF8
+    }
+}
+
 function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $tempWork = Join-Path $env:TEMP ("LiveCard_" + [guid]::NewGuid().ToString().Substring(0,8))
     New-Item -ItemType Directory -Path $tempWork | Out-Null
@@ -2427,7 +2457,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $tasksRow2.Children.Add($btnSelAll) | Out-Null; $tasksRow2.Children.Add($btnDeselAll) | Out-Null; $tasksRow2.Children.Add($btnRevertMerge) | Out-Null
     $tasksOuter.Children.Add($tasksRow2) | Out-Null
 
-    # SKU row
+    # SKU row — locked by default; Edit button unlocks for manual entry
     $tasksRow3 = New-Object System.Windows.Controls.StackPanel
     $tasksRow3.Orientation = "Horizontal"; $tasksRow3.Margin = New-Object System.Windows.Thickness(0,8,0,0)
 
@@ -2437,9 +2467,10 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
     $txtSku = New-Object System.Windows.Controls.TextBox
     $txtSku.Width = 140; $txtSku.Height = 26; $txtSku.FontSize = 12
-    $txtSku.Background = Get-WpfColor "#2A2C35"; $txtSku.Foreground = Get-WpfColor "#FFFFFF"
-    $txtSku.BorderBrush = Get-WpfColor "#444444"; $txtSku.Padding = New-Object System.Windows.Thickness(4,2,4,2)
+    $txtSku.Background = Get-WpfColor "#1A1C23"; $txtSku.Foreground = Get-WpfColor "#888888"
+    $txtSku.BorderBrush = Get-WpfColor "#333333"; $txtSku.Padding = New-Object System.Windows.Thickness(4,2,4,2)
     $txtSku.Margin = New-Object System.Windows.Thickness(0,0,8,0); $txtSku.VerticalContentAlignment = "Center"
+    $txtSku.IsReadOnly = $true
 
     # Pre-populate SKU from existing TSV if present
     # Guard against old-format TSVs where col 3 is Theme, not SKU (old Date at col 4, new Date at col 5)
@@ -2460,57 +2491,101 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         } catch {}
     }
 
+    # Edit button — shown when locked; unlocks the box for manual entry
+    $btnEditSku = New-Object System.Windows.Controls.Button
+    $btnEditSku.Content = "Edit"; $btnEditSku.Height = 26; $btnEditSku.Width = 46
+    $btnEditSku.Background = Get-WpfColor "#3A3C45"; $btnEditSku.Foreground = Get-WpfColor "#CCCCCC"
+    $btnEditSku.BorderThickness = 0; $btnEditSku.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnEditSku.Margin = New-Object System.Windows.Thickness(0,0,4,0)
+
+    # Save button — hidden until editing; commits value and re-locks
     $btnSaveSku = New-Object System.Windows.Controls.Button
-    $btnSaveSku.Content = "Save SKU"; $btnSaveSku.Height = 26; $btnSaveSku.Width = 80
-    $btnSaveSku.Background = Get-WpfColor "#2A2C35"; $btnSaveSku.Foreground = Get-WpfColor "#FFFFFF"
+    $btnSaveSku.Content = "Save"; $btnSaveSku.Height = 26; $btnSaveSku.Width = 46
+    $btnSaveSku.Background = Get-WpfColor "#2E5A42"; $btnSaveSku.Foreground = Get-WpfColor "#FFFFFF"
     $btnSaveSku.BorderThickness = 0; $btnSaveSku.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnSaveSku.Visibility = "Collapsed"; $btnSaveSku.Margin = New-Object System.Windows.Thickness(0,0,4,0)
+
+    # Cancel button — hidden until editing; restores original value and re-locks
+    $btnCancelSku = New-Object System.Windows.Controls.Button
+    $btnCancelSku.Content = "Cancel"; $btnCancelSku.Height = 26; $btnCancelSku.Width = 56
+    $btnCancelSku.Background = Get-WpfColor "#3A2020"; $btnCancelSku.Foreground = Get-WpfColor "#CCCCCC"
+    $btnCancelSku.BorderThickness = 0; $btnCancelSku.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnCancelSku.Visibility = "Collapsed"; $btnCancelSku.Margin = New-Object System.Windows.Thickness(0,0,4,0)
 
     $lblSkuStatus = New-Object System.Windows.Controls.TextBlock
     $lblSkuStatus.FontSize = 11; $lblSkuStatus.Margin = New-Object System.Windows.Thickness(8,0,0,0)
     $lblSkuStatus.VerticalAlignment = "Center"; $lblSkuStatus.Text = ""
 
-    $btnSaveSku.Tag = @{ TxtSku = $txtSku; LblStatus = $lblSkuStatus; FolderPath = $pJob.FolderPath; AnchorFile = $pJob.AnchorFile }
+    $skuTag = @{
+        TxtSku      = $txtSku
+        BtnEdit     = $btnEditSku
+        BtnSave     = $btnSaveSku
+        BtnCancel   = $btnCancelSku
+        LblStatus   = $lblSkuStatus
+        FolderPath  = $pJob.FolderPath
+        AnchorFile  = $pJob.AnchorFile
+        OriginalVal = ""
+    }
+
+    $btnEditSku.Tag = $skuTag
+    $btnEditSku.Add_Click({
+        $t = $this.Tag
+        $t.OriginalVal = $t.TxtSku.Text
+        $t.TxtSku.IsReadOnly = $false
+        $t.TxtSku.Background = Get-WpfColor "#2A2C35"
+        $t.TxtSku.Foreground = Get-WpfColor "#FFFFFF"
+        $t.TxtSku.BorderBrush = Get-WpfColor "#5A78C4"
+        $this.Visibility = "Collapsed"
+        $t.BtnSave.Visibility = "Visible"
+        $t.BtnCancel.Visibility = "Visible"
+        $t.LblStatus.Text = ""
+        $t.TxtSku.Focus() | Out-Null
+        $t.TxtSku.SelectAll()
+    }.GetNewClosure())
+
+    $btnSaveSku.Tag = $skuTag
     $btnSaveSku.Add_Click({
         $t = $this.Tag
         try {
             $skuVal = $t.TxtSku.Text.Trim()
-            # Derive TSV path from anchor file base name
-            $af         = $t.AnchorFile
-            $anchorBase = if ($null -ne $af) { [System.IO.Path]::GetFileNameWithoutExtension($af.FullName) } else { "" }
-            $tsvBase    = $anchorBase -replace '(?i)_?(Full|Nest)$', ''
-            $tsvPath    = Join-Path $t.FolderPath "${tsvBase}_Data.tsv"
-            if (Test-Path $tsvPath) {
-                $lines = @(Get-Content $tsvPath)
-                if ($lines.Count -gt 0) {
-                    $cols     = $lines[-1] -split "`t"
-                    $datePat  = '^\d{1,2}/\d{1,2}/\d{4}$'
-                    # Old format has Date at col 4; new format has Date at col 5
-                    $isOldFmt = $cols.Count -gt 4 -and $cols[4] -match $datePat
-                    if ($isOldFmt) {
-                        # Insert SKU at position 3, shifting Theme and everything else right
-                        $newCols   = $cols[0..2] + @($skuVal) + $cols[3..($cols.Count - 1)]
-                        $lines[-1] = $newCols -join "`t"
-                    } else {
-                        # New format or seed: set/overwrite col 3
-                        while ($cols.Count -lt 4) { $cols += "" }
-                        $cols[3]   = $skuVal
-                        $lines[-1] = $cols -join "`t"
-                    }
-                    Set-Content -Path $tsvPath -Value $lines -Encoding UTF8
-                }
-            } else {
-                # Seed TSV: tabs pad out columns 0-2, SKU at index 3
-                Set-Content -Path $tsvPath -Value "`t`t`t$skuVal" -Encoding UTF8
+            if ($skuVal -notmatch '^\d{5}$') {
+                $t.LblStatus.Text = "Must be 5 digits"
+                $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"
+                return
             }
+            Save-SkuToTsv $skuVal $t.FolderPath $t.AnchorFile
+            $t.TxtSku.IsReadOnly = $true
+            $t.TxtSku.Background = Get-WpfColor "#1A1C23"
+            $t.TxtSku.Foreground = Get-WpfColor "#888888"
+            $t.TxtSku.BorderBrush = Get-WpfColor "#333333"
+            $t.BtnEdit.Visibility = "Visible"
+            $this.Visibility = "Collapsed"
+            $t.BtnCancel.Visibility = "Collapsed"
             $t.LblStatus.Text = "Saved"; $t.LblStatus.Foreground = Get-WpfColor "#4CAF72"
         } catch {
             $t.LblStatus.Text = "Failed: $($_.Exception.Message)"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"
         }
     }.GetNewClosure())
 
+    $btnCancelSku.Tag = $skuTag
+    $btnCancelSku.Add_Click({
+        $t = $this.Tag
+        $t.TxtSku.Text = $t.OriginalVal
+        $t.TxtSku.IsReadOnly = $true
+        $t.TxtSku.Background = Get-WpfColor "#1A1C23"
+        $t.TxtSku.Foreground = Get-WpfColor "#888888"
+        $t.TxtSku.BorderBrush = Get-WpfColor "#333333"
+        $t.BtnEdit.Visibility = "Visible"
+        $t.BtnSave.Visibility = "Collapsed"
+        $this.Visibility = "Collapsed"
+        $t.LblStatus.Text = ""
+    }.GetNewClosure())
+
     $tasksRow3.Children.Add($lblSku) | Out-Null
     $tasksRow3.Children.Add($txtSku) | Out-Null
+    $tasksRow3.Children.Add($btnEditSku) | Out-Null
     $tasksRow3.Children.Add($btnSaveSku) | Out-Null
+    $tasksRow3.Children.Add($btnCancelSku) | Out-Null
     $tasksRow3.Children.Add($lblSkuStatus) | Out-Null
     $tasksOuter.Children.Add($tasksRow3) | Out-Null
 
@@ -4168,6 +4243,103 @@ $window.Add_Loaded({
     $lblGlobalTitle.Text = "Queue Dashboard ($($gpQueue.Count) Theme(s) found)"
     Update-GlobalProcessAllStatus
     $script:queueTimer.Start()
+})
+
+# ── Import SKUs from CSV ──────────────────────────────────────────────────────
+$btnImportSkus.Add_Click({
+    # Open file picker
+    $ofd = New-Object Microsoft.Win32.OpenFileDialog
+    $ofd.Title  = "Select SKU CSV File"
+    $ofd.Filter = "CSV Files (*.csv)|*.csv|All Files (*.*)|*.*"
+    $ofd.InitialDirectory = [System.Environment]::GetFolderPath('UserProfile')
+    if ($ofd.ShowDialog() -ne $true) { return }
+
+    try {
+        # Read CSV — expect a header row "SKU" then 5-digit values, one per line
+        $csvLines    = Get-Content $ofd.FileName -ErrorAction Stop
+        $skusFromCsv = [System.Collections.Generic.List[string]]::new()
+        $firstLine   = $true
+        foreach ($line in $csvLines) {
+            $val = $line.Trim().Trim('"')
+            if ($firstLine) { $firstLine = $false; if ($val -ieq 'SKU') { continue } }
+            if ($val -match '^\d{5}$') { $skusFromCsv.Add($val) }
+        }
+
+        if ($skusFromCsv.Count -eq 0) {
+            [System.Windows.MessageBox]::Show(
+                "No valid 5-digit SKUs found in:`n$($ofd.FileName)",
+                "Import SKUs", "OK", "Warning") | Out-Null
+            return
+        }
+
+        # Collect all pJobs that currently have no SKU, in queue order
+        $targetJobs = [System.Collections.Generic.List[object]]::new()
+        foreach ($gp in $script:jobs) {
+            foreach ($p in $gp.Parents) {
+                if ($null -ne $p.TxtSKU -and [string]::IsNullOrWhiteSpace($p.TxtSKU.Text)) {
+                    $targetJobs.Add($p)
+                }
+            }
+        }
+
+        if ($targetJobs.Count -eq 0) {
+            [System.Windows.MessageBox]::Show(
+                "All cards in the queue already have SKUs assigned.",
+                "Import SKUs", "OK", "Information") | Out-Null
+            return
+        }
+
+        $assignCount = [Math]::Min($skusFromCsv.Count, $targetJobs.Count)
+
+        # Build confirmation list
+        $sb = New-Object System.Text.StringBuilder
+        [void]$sb.AppendLine("Assign $assignCount SKU(s) to queue cards?")
+        [void]$sb.AppendLine("")
+        for ($i = 0; $i -lt $assignCount; $i++) {
+            $folderName = Split-Path $targetJobs[$i].FolderPath -Leaf
+            [void]$sb.AppendLine("  $($skusFromCsv[$i])  ->  $folderName")
+        }
+        if ($targetJobs.Count -gt $skusFromCsv.Count) {
+            [void]$sb.AppendLine("")
+            [void]$sb.AppendLine("  ($($targetJobs.Count - $skusFromCsv.Count) card(s) will remain unassigned - CSV has fewer SKUs)")
+        }
+        if ($skusFromCsv.Count -gt $targetJobs.Count) {
+            [void]$sb.AppendLine("")
+            [void]$sb.AppendLine("  ($($skusFromCsv.Count - $targetJobs.Count) SKU(s) in CSV will not be used)")
+        }
+
+        $result = [System.Windows.MessageBox]::Show(
+            $sb.ToString(), "Import SKUs - Confirm",
+            [System.Windows.MessageBoxButton]::YesNo,
+            [System.Windows.MessageBoxImage]::Question)
+        if ($result -ne [System.Windows.MessageBoxResult]::Yes) { return }
+
+        # Apply — bypass the lock, write to TSV, update the display box
+        $errors = 0
+        for ($i = 0; $i -lt $assignCount; $i++) {
+            $p   = $targetJobs[$i]
+            $sku = $skusFromCsv[$i]
+            try {
+                Save-SkuToTsv $sku $p.FolderPath $p.AnchorFile
+                $p.TxtSKU.Text = $sku
+            } catch {
+                $errors++
+                Write-Log "Import SKU error ($($p.FolderPath)): $($_.Exception.Message)" "ERROR"
+            }
+        }
+
+        $msg = if ($errors -eq 0) {
+            "Successfully assigned $assignCount SKU(s)."
+        } else {
+            "Assigned $($assignCount - $errors) SKU(s).  $errors error(s) - see debug log."
+        }
+        [System.Windows.MessageBox]::Show($msg, "Import SKUs", "OK", "Information") | Out-Null
+
+    } catch {
+        [System.Windows.MessageBox]::Show(
+            "Error reading CSV:`n$($_.Exception.Message)",
+            "Import SKUs", "OK", "Error") | Out-Null
+    }
 })
 
 $window.Add_Closed({
