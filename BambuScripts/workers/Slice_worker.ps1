@@ -3,7 +3,8 @@ param(
     [string[]]$InputPaths = @(),
     [string]$IsolatedPath = "",
     [string]$BambuPath = "C:\Program Files\Bambu Studio\bambu-studio.exe",
-    [string]$StatusFile = ""
+    [string]$StatusFile = "",
+    [switch]$DiagnoseFiles   # Watch for any files Bambu creates/deletes during slicing
 )
 $ErrorActionPreference = 'Stop'
 
@@ -32,6 +33,75 @@ function Write-SliceProgress([string]$sf, [int]$phasePct, [int]$phaseStart, [int
     try { Set-Content -Path $sf -Value "SLICING... $overall%" -Force -ErrorAction SilentlyContinue } catch {}
 }
 
+# ---------------------------------------------------------------------------
+# -DiagnoseFiles helper
+# Starts FileSystemWatchers on every folder Bambu Studio might write to, in
+# a background runspace.  Returns a handle hashtable; call Stop-FileWatcher
+# to terminate and get the event log.
+# ---------------------------------------------------------------------------
+function Start-FileWatcher([string]$workDir, [string]$bambuDir) {
+    $watchDirs = @(
+        $workDir,
+        $env:TEMP,
+        "$env:APPDATA\BambuStudio",
+        $bambuDir,
+        "$env:LOCALAPPDATA\Temp"
+    ) | Where-Object { $_ -ne "" -and (Test-Path $_) } | Select-Object -Unique
+
+    # Shared synchronized list the background runspace will write into
+    $events = [System.Collections.Concurrent.ConcurrentBag[string]]::new()
+
+    $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $rs.Open()
+    $rs.SessionStateProxy.SetVariable("watchDirs", $watchDirs)
+    $rs.SessionStateProxy.SetVariable("events",    $events)
+
+    $ps = [System.Management.Automation.PowerShell]::Create()
+    $ps.Runspace = $rs
+    [void]$ps.AddScript({
+        $watchers = @()
+        foreach ($dir in $watchDirs) {
+            $w = New-Object System.IO.FileSystemWatcher $dir
+            $w.IncludeSubdirectories = $true
+            $w.NotifyFilter = [System.IO.NotifyFilters]::FileName -bor [System.IO.NotifyFilters]::LastWrite
+
+            # Use GetNewClosure() so the delegate captures $events from this scope,
+            # not from whatever scope the ThreadPool thread happens to be in.
+            $handler = {
+                param($src, $e)
+                $ts = (Get-Date).ToString("HH:mm:ss.fff")
+                $events.Add("[$ts] $($e.ChangeType)  $($e.FullPath)")
+            }.GetNewClosure()
+
+            $w.add_Created($handler)
+            $w.add_Deleted($handler)
+            $w.add_Changed($handler)
+            $w.EnableRaisingEvents = $true
+            $watchers += $w
+        }
+        # Keep the runspace alive until the flag file appears
+        $stopFlag = Join-Path $env:TEMP "_slice_diag_stop"
+        while (-not (Test-Path $stopFlag)) { Start-Sleep -Milliseconds 200 }
+        foreach ($w in $watchers) { $w.EnableRaisingEvents = $false; $w.Dispose() }
+    })
+    $handle = $ps.BeginInvoke()
+
+    return @{ PS = $ps; RS = $rs; Handle = $handle; Events = $events }
+}
+
+function Stop-FileWatcher($watcher) {
+    # Signal the runspace loop to exit
+    $stopFlag = Join-Path $env:TEMP "_slice_diag_stop"
+    Set-Content -Path $stopFlag -Value "stop" -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 600    # let watchers drain final events
+    try { $watcher.PS.EndInvoke($watcher.Handle) } catch {}
+    $watcher.RS.Close()
+    Remove-Item $stopFlag -Force -ErrorAction SilentlyContinue
+
+    $log = @($watcher.Events | Sort-Object)
+    return $log
+}
+
 function Invoke-SliceFile([string]$filePath, [string]$label, [string]$sf, [int]$phaseStart, [int]$phaseEnd) {
     $workDir   = Split-Path $filePath -Parent
     $baseName  = (Get-Item $filePath).BaseName
@@ -46,9 +116,20 @@ function Invoke-SliceFile([string]$filePath, [string]$label, [string]$sf, [int]$
     $startTime  = Get-Date
     Write-SliceProgress $sf 0 $phaseStart $phaseEnd
 
-    # Added --uptodate and --allow-newer-file to bypass all version mismatch prompts
+    # Start file-system watcher BEFORE launching Bambu so we catch every file event
+    $diagWatcher = $null
+    if ($DiagnoseFiles) {
+        Write-Host "`n  [DIAG] Starting file watchers..." -ForegroundColor Yellow
+        $diagWatcher = Start-FileWatcher $workDir (Split-Path $BambuPath -Parent)
+    }
+
+    # Added --uptodate and --allow-newer-file to bypass all version mismatch prompts.
+    # WorkingDirectory is set explicitly so Bambu writes result.json into the design
+    # folder rather than wherever the calling shell's CWD happens to be.
     $procArgs = "--debug 3 --no-check --uptodate --allow-newer-file --slice 1 --min-save --export-3mf `"$slicedOut`" `"$filePath`""
-    $proc = Start-Process -FilePath $BambuPath -ArgumentList $procArgs -RedirectStandardOutput $logOut -RedirectStandardError $logErr -WindowStyle Hidden -PassThru
+    $proc = Start-Process -FilePath $BambuPath -ArgumentList $procArgs `
+        -WorkingDirectory $workDir `
+        -RedirectStandardOutput $logOut -RedirectStandardError $logErr -WindowStyle Hidden -PassThru
 
     while (-not $proc.HasExited) {
         # Try to parse a progress percentage from the Bambu Studio log first.
@@ -85,6 +166,30 @@ function Invoke-SliceFile([string]$filePath, [string]$label, [string]$sf, [int]$
     }
     Write-Host " [DONE]" -ForegroundColor Green
 
+    # Stop the watcher now that Bambu has fully exited, then dump the report
+    if ($null -ne $diagWatcher) {
+        $diagLog = Stop-FileWatcher $diagWatcher
+        $diagReportPath = Join-Path $workDir "${baseName}_DiagFiles.txt"
+        Write-Host "`n  [DIAG] File events during slice ($($diagLog.Count) total):" -ForegroundColor Yellow
+        if ($diagLog.Count -gt 0) {
+            $diagLog | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkYellow }
+        } else {
+            Write-Host "    (none detected)" -ForegroundColor DarkGray
+        }
+        # Also check stdout log for JSON content (in case Bambu pipes result to stdout)
+        if (Test-Path $logOut) {
+            $stdoutContent = Get-Content $logOut -Raw -ErrorAction SilentlyContinue
+            if ($stdoutContent -match '^\s*\{') {
+                Write-Host "`n  [DIAG] Stdout contains JSON!" -ForegroundColor Cyan
+                $diagLog += ""
+                $diagLog += "=== STDOUT JSON ==="
+                $diagLog += $stdoutContent
+            }
+        }
+        $diagLog | Set-Content -Path $diagReportPath -Encoding UTF8
+        Write-Host "  [DIAG] Report saved: $diagReportPath" -ForegroundColor Yellow
+    }
+
     if (-not (Test-Path $slicedOut)) {
         Write-Host "`n  [!] ERROR: Bambu Studio failed to generate $slicedOut" -ForegroundColor Red
         if (Test-Path $logOut) { Get-Content $logOut | Select-Object -Last 10 | Write-Host -ForegroundColor DarkGray }
@@ -92,6 +197,15 @@ function Invoke-SliceFile([string]$filePath, [string]$label, [string]$sf, [int]$
         if (Test-Path $logOut) { Remove-Item $logOut -Force -ErrorAction SilentlyContinue }
         if (Test-Path $logErr) { Remove-Item $logErr -Force -ErrorAction SilentlyContinue }
         return $false
+    }
+
+    # Bambu Studio writes result.json to its working directory after a successful slice.
+    # Rename it to {baseName}_result.json so it stays associated with this specific file
+    # and doesn't get overwritten when the Isolated file is sliced next.
+    $genericResult = Join-Path $workDir "result.json"
+    $namedResult   = Join-Path $workDir "${baseName}_result.json"
+    if (Test-Path $genericResult) {
+        Move-Item -Path $genericResult -Destination $namedResult -Force -ErrorAction SilentlyContinue
     }
 
     if (Test-Path $logOut) { Remove-Item $logOut -Force -ErrorAction SilentlyContinue }
