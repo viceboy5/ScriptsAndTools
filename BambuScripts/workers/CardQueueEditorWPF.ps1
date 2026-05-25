@@ -2969,7 +2969,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $t.LogOut = $tmpBase + "_out.txt"; $t.LogErr = $tmpBase + "_err.txt"
         [System.IO.File]::WriteAllText($t.LogOut, ""); [System.IO.File]::WriteAllText($t.LogErr, "")
         $t.RenestTempOut = Join-Path $env:TEMP ("renest_" + [System.Guid]::NewGuid().ToString("N") + ".3mf")
-        $psArgs = @("-NoProfile","-ExecutionPolicy","Bypass","-File",$t.WorkerPath,"-FinalPath",$t.FinalPath,"-OutputPath",$t.RenestTempOut,"-NoConfirm")
+        $psArgs = @("-NoProfile","-ExecutionPolicy","Bypass","-File","`"$($t.WorkerPath)`"","-FinalPath","`"$($t.FinalPath)`"","-OutputPath","`"$($t.RenestTempOut)`"","-NoConfirm")
         $t.Proc = Start-Process -FilePath "powershell.exe" -ArgumentList $psArgs `
             -NoNewWindow -RedirectStandardOutput $t.LogOut -RedirectStandardError $t.LogErr -PassThru
         $script:_RenestActive = $t
@@ -3753,7 +3753,7 @@ function Start-NextEditJob {
     $rt.LogOut = $tmpBase + "_out.txt"; $rt.LogErr = $tmpBase + "_err.txt"
     [System.IO.File]::WriteAllText($rt.LogOut, ""); [System.IO.File]::WriteAllText($rt.LogErr, "")
     $rt.RenestTempOut = Join-Path $env:TEMP ("renest_" + [System.Guid]::NewGuid().ToString("N") + ".3mf")
-    $psArgs = @("-NoProfile","-ExecutionPolicy","Bypass","-File",$rt.WorkerPath,"-FinalPath",$rt.FinalPath,"-OutputPath",$rt.RenestTempOut,"-NoConfirm")
+    $psArgs = @("-NoProfile","-ExecutionPolicy","Bypass","-File","`"$($rt.WorkerPath)`"","-FinalPath","`"$($rt.FinalPath)`"","-OutputPath","`"$($rt.RenestTempOut)`"","-NoConfirm")
     $rt.Proc = Start-Process -FilePath "powershell.exe" -ArgumentList $psArgs `
         -NoNewWindow -RedirectStandardOutput $rt.LogOut -RedirectStandardError $rt.LogErr -PassThru
     $script:_RenestActive = $rt
