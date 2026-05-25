@@ -796,12 +796,14 @@ try {
         Get-ChildItem $metaDir -Filter $pat -ErrorAction SilentlyContinue | Remove-Item -Force
     }
 
-    # Read plate_1.json and wipe tower coords from the source (Nest/Full) zip into memory.
-    # Both are re-injected after the Bambu resave step, which strips plate_1.json and
-    # overwrites project_settings.config with the Final's (wrong) wipe tower coordinates.
-    $plate1JsonBytes  = $null
-    $srcWipeTowerX    = $null
-    $srcWipeTowerY    = $null
+    # Read plate_1.json and wipe tower settings from the source (Nest/Full) zip into memory.
+    # All are re-injected after the Bambu resave step, which strips plate_1.json and
+    # overwrites project_settings.config with the Final's (wrong) wipe tower settings.
+    $plate1JsonBytes      = $null
+    $srcWipeTowerX        = $null
+    $srcWipeTowerY        = $null
+    $srcWipeTowerWidth    = $null
+    $srcWipeTowerRotation = $null
     $srcZipForPlate = [System.IO.Compression.ZipFile]::OpenRead($TransformSourcePath)
     try {
         # plate_1.json
@@ -822,12 +824,16 @@ try {
         if ($null -ne $projEntry) {
             $srProj = New-Object System.IO.StreamReader($projEntry.Open())
             $projText = $srProj.ReadToEnd(); $srProj.Dispose()
-            $xm = [regex]::Match($projText, '"wipe_tower_x"\s*:\s*\[([^\]]*)\]')
-            $ym = [regex]::Match($projText, '"wipe_tower_y"\s*:\s*\[([^\]]*)\]')
-            if ($xm.Success) { $srcWipeTowerX = $xm.Groups[1].Value.Trim() }
-            if ($ym.Success) { $srcWipeTowerY = $ym.Groups[1].Value.Trim() }
+            $xm  = [regex]::Match($projText, '"wipe_tower_x"\s*:\s*\[([^\]]*)\]')
+            $ym  = [regex]::Match($projText, '"wipe_tower_y"\s*:\s*\[([^\]]*)\]')
+            $wm  = [regex]::Match($projText, '"wipe_tower_width"\s*:\s*\[([^\]]*)\]')
+            $rm  = [regex]::Match($projText, '"wipe_tower_rotation"\s*:\s*\[([^\]]*)\]')
+            if ($xm.Success) { $srcWipeTowerX        = $xm.Groups[1].Value.Trim() }
+            if ($ym.Success) { $srcWipeTowerY        = $ym.Groups[1].Value.Trim() }
+            if ($wm.Success) { $srcWipeTowerWidth    = $wm.Groups[1].Value.Trim() }
+            if ($rm.Success) { $srcWipeTowerRotation = $rm.Groups[1].Value.Trim() }
             if ($null -ne $srcWipeTowerX) {
-                Write-Host "Wipe tower coords from source: x=[$srcWipeTowerX] y=[$srcWipeTowerY]"
+                Write-Host "Wipe tower from source: x=[$srcWipeTowerX] y=[$srcWipeTowerY] width=[$srcWipeTowerWidth] rotation=[$srcWipeTowerRotation]"
             }
         }
     } finally { $srcZipForPlate.Dispose() }
@@ -946,9 +952,9 @@ try {
         else { Write-Host " skipped (export produced no output)." }
     }
 
-    # Re-inject plate_1.json and fix wipe tower coords after pack/resave.
+    # Re-inject plate_1.json and fix wipe tower settings after pack/resave.
     # Bambu resave strips plate_1.json and overwrites project_settings.config with
-    # the Final's wipe tower position; we restore both from the source here.
+    # the Final's wipe tower settings; we restore all of them from the source here.
     if ($null -ne $plate1JsonBytes -or $null -ne $srcWipeTowerX) {
         $outZip = [System.IO.Compression.ZipFile]::Open($OutputPath, 'Update')
         try {
@@ -963,21 +969,27 @@ try {
                 Write-Host "plate_1.json injected into output (wipe tower bbox preserved)."
             }
 
-            # Patch wipe_tower_x / wipe_tower_y in project_settings.config
+            # Patch wipe tower settings in project_settings.config
             if ($null -ne $srcWipeTowerX) {
                 $projE = $outZip.Entries | Where-Object { $_.FullName -eq 'Metadata/project_settings.config' } | Select-Object -First 1
                 if ($null -ne $projE) {
                     $srOut = New-Object System.IO.StreamReader($projE.Open())
                     $projOut = $srOut.ReadToEnd(); $srOut.Dispose()
-                    $projOut = [regex]::Replace($projOut, '("wipe_tower_x"\s*:\s*\[)[^\]]*(\])', "`$1$srcWipeTowerX`$2")
-                    $projOut = [regex]::Replace($projOut, '("wipe_tower_y"\s*:\s*\[)[^\]]*(\])', "`$1$srcWipeTowerY`$2")
+                    $projOut = [regex]::Replace($projOut, '("wipe_tower_x"\s*:\s*\[)[^\]]*(\])',        "`$1$srcWipeTowerX`$2")
+                    $projOut = [regex]::Replace($projOut, '("wipe_tower_y"\s*:\s*\[)[^\]]*(\])',        "`$1$srcWipeTowerY`$2")
+                    if ($null -ne $srcWipeTowerWidth) {
+                        $projOut = [regex]::Replace($projOut, '("wipe_tower_width"\s*:\s*\[)[^\]]*(\])',    "`$1$srcWipeTowerWidth`$2")
+                    }
+                    if ($null -ne $srcWipeTowerRotation) {
+                        $projOut = [regex]::Replace($projOut, '("wipe_tower_rotation"\s*:\s*\[)[^\]]*(\])', "`$1$srcWipeTowerRotation`$2")
+                    }
                     $projE.Delete()
                     $newProj     = $outZip.CreateEntry('Metadata/project_settings.config')
                     $projStream  = $newProj.Open()
                     $projBytes   = [System.Text.Encoding]::UTF8.GetBytes($projOut)
                     try { $projStream.Write($projBytes, 0, $projBytes.Length) }
                     finally { $projStream.Dispose() }
-                    Write-Host "project_settings.config patched: wipe_tower x=[$srcWipeTowerX] y=[$srcWipeTowerY]"
+                    Write-Host "project_settings.config patched: wipe_tower x=[$srcWipeTowerX] y=[$srcWipeTowerY] width=[$srcWipeTowerWidth] rotation=[$srcWipeTowerRotation]"
                 }
             }
         } finally { $outZip.Dispose() }
