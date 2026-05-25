@@ -579,8 +579,12 @@ if ($args.Count -gt 0) {
                 </StackPanel>
 
                 <Grid Grid.Column="2" Margin="0,0,15,0">
-                    <StackPanel Name="TopModeBar" HorizontalAlignment="Center" VerticalAlignment="Center" Orientation="Horizontal"/>
-                    <StackPanel HorizontalAlignment="Right" VerticalAlignment="Center" Orientation="Horizontal">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Name="TopModeBar" Grid.Column="0" HorizontalAlignment="Center" VerticalAlignment="Center" Orientation="Horizontal"/>
+                    <StackPanel Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center" Orientation="Horizontal">
                         <Button Name="BtnImportSkus" Content="Import SKUs" Background="#7A5C2E" Foreground="White" FontWeight="Bold" Width="110" Height="30" BorderThickness="0" Cursor="Hand" Margin="0,0,8,0"/>
                         <Button Name="BtnProcessAll" Content="Process All Tasks" Background="#4CAF72" Foreground="White" FontWeight="Bold" Width="150" Height="30" BorderThickness="0" Cursor="Hand"/>
                     </StackPanel>
@@ -2738,7 +2742,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $reviewPanelBorder.Visibility = "Collapsed"
     $reviewStack = New-Object System.Windows.Controls.StackPanel
     $reviewPanelBorder.Child = $reviewStack
-    $filePrepPanel.Children.Add($reviewPanelBorder) | Out-Null
+    $rightStack.Children.Add($reviewPanelBorder) | Out-Null
     $pJob.ReviewPanel = $reviewPanelBorder; $pJob.ReviewStack = $reviewStack
 
     # Files list
@@ -2797,7 +2801,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $reviewStatusLabel.HorizontalAlignment = "Center"; $reviewStatusLabel.TextAlignment = "Center"
     $reviewStatusLabel.Margin = New-Object System.Windows.Thickness(0,10,0,0)
     $reviewStatusLabel.Visibility = "Collapsed"
-    $filePrepPanel.Children.Add($reviewStatusLabel) | Out-Null
+    $rightStack.Children.Add($reviewStatusLabel) | Out-Null
     $pJob.ReviewStatusLabel = $reviewStatusLabel
 
     # ══════════════════════════════════════════════════════════════════════════
