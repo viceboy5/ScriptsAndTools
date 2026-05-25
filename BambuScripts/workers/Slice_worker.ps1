@@ -34,12 +34,12 @@ function Write-SliceProgress([string]$sf, [int]$phasePct, [int]$phaseStart, [int
 }
 
 # ---------------------------------------------------------------------------
-# -DiagnoseFiles helper
-# Starts FileSystemWatchers on every folder Bambu Studio might write to, in
-# a background runspace.  Returns a handle hashtable; call Stop-FileWatcher
-# to terminate and get the event log.
+# -DiagnoseFiles helpers
+# Snapshot-diff approach: no background threads, no runspaces, no delegates.
+# Take a file inventory before Bambu starts, poll every tick of the existing
+# progress loop to catch transient files, then diff again after exit.
 # ---------------------------------------------------------------------------
-function Start-FileWatcher([string]$workDir, [string]$bambuDir) {
+function Start-FileSnapshot([string]$workDir, [string]$bambuDir) {
     $watchDirs = @(
         $workDir,
         $env:TEMP,
@@ -48,58 +48,58 @@ function Start-FileWatcher([string]$workDir, [string]$bambuDir) {
         "$env:LOCALAPPDATA\Temp"
     ) | Where-Object { $_ -ne "" -and (Test-Path $_) } | Select-Object -Unique
 
-    # Shared synchronized list the background runspace will write into
-    $events = [System.Collections.Concurrent.ConcurrentBag[string]]::new()
-
-    $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
-    $rs.Open()
-    $rs.SessionStateProxy.SetVariable("watchDirs", $watchDirs)
-    $rs.SessionStateProxy.SetVariable("events",    $events)
-
-    $ps = [System.Management.Automation.PowerShell]::Create()
-    $ps.Runspace = $rs
-    [void]$ps.AddScript({
-        $watchers = @()
-        foreach ($dir in $watchDirs) {
-            $w = New-Object System.IO.FileSystemWatcher $dir
-            $w.IncludeSubdirectories = $true
-            $w.NotifyFilter = [System.IO.NotifyFilters]::FileName -bor [System.IO.NotifyFilters]::LastWrite
-
-            # Use GetNewClosure() so the delegate captures $events from this scope,
-            # not from whatever scope the ThreadPool thread happens to be in.
-            $handler = {
-                param($src, $e)
-                $ts = (Get-Date).ToString("HH:mm:ss.fff")
-                $events.Add("[$ts] $($e.ChangeType)  $($e.FullPath)")
-            }.GetNewClosure()
-
-            $w.add_Created($handler)
-            $w.add_Deleted($handler)
-            $w.add_Changed($handler)
-            $w.EnableRaisingEvents = $true
-            $watchers += $w
-        }
-        # Keep the runspace alive until the flag file appears
-        $stopFlag = Join-Path $env:TEMP "_slice_diag_stop"
-        while (-not (Test-Path $stopFlag)) { Start-Sleep -Milliseconds 200 }
-        foreach ($w in $watchers) { $w.EnableRaisingEvents = $false; $w.Dispose() }
-    })
-    $handle = $ps.BeginInvoke()
-
-    return @{ PS = $ps; RS = $rs; Handle = $handle; Events = $events }
+    $snapshot = @{}
+    foreach ($dir in $watchDirs) {
+        try {
+            Get-ChildItem $dir -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+                $snapshot[$_.FullName] = $_.LastWriteTimeUtc
+            }
+        } catch {}
+    }
+    return @{ WatchDirs = $watchDirs; Snapshot = $snapshot; Seen = [ordered]@{} }
 }
 
-function Stop-FileWatcher($watcher) {
-    # Signal the runspace loop to exit
-    $stopFlag = Join-Path $env:TEMP "_slice_diag_stop"
-    Set-Content -Path $stopFlag -Value "stop" -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 600    # let watchers drain final events
-    try { $watcher.PS.EndInvoke($watcher.Handle) } catch {}
-    $watcher.RS.Close()
-    Remove-Item $stopFlag -Force -ErrorAction SilentlyContinue
+# Called inside the progress loop — catches files that appear and disappear
+# between the before and after snapshots.
+function Update-FileSnapshot($state) {
+    foreach ($dir in $state.WatchDirs) {
+        try {
+            Get-ChildItem $dir -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+                $fp = $_.FullName
+                if (-not $state.Snapshot.ContainsKey($fp) -and -not $state.Seen.Contains($fp)) {
+                    $ts = (Get-Date).ToString("HH:mm:ss")
+                    $state.Seen[$fp] = "[$ts] Created  $fp"
+                }
+            }
+        } catch {}
+    }
+}
 
-    $log = @($watcher.Events | Sort-Object)
-    return $log
+# Called after process exits — final diff merged with any transient hits
+function Stop-FileSnapshot($state) {
+    $events = [System.Collections.Generic.List[string]]::new()
+    foreach ($dir in $state.WatchDirs) {
+        try {
+            Get-ChildItem $dir -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+                $fp  = $_.FullName
+                $lwt = $_.LastWriteTimeUtc
+                if (-not $state.Snapshot.ContainsKey($fp)) {
+                    if (-not $state.Seen.Contains($fp)) {
+                        $ts = (Get-Date).ToString("HH:mm:ss")
+                        $events.Add("[$ts] Created  $fp")
+                    }
+                    # Already in Seen — will be merged below
+                } elseif ($state.Snapshot[$fp] -ne $lwt) {
+                    $ts = (Get-Date).ToString("HH:mm:ss")
+                    $events.Add("[$ts] Modified $fp")
+                }
+            }
+        } catch {}
+    }
+    # Merge transient hits from polling
+    foreach ($line in $state.Seen.Values) { $events.Add($line) }
+
+    return @($events | Sort-Object -Unique)
 }
 
 function Invoke-SliceFile([string]$filePath, [string]$label, [string]$sf, [int]$phaseStart, [int]$phaseEnd) {
@@ -116,11 +116,12 @@ function Invoke-SliceFile([string]$filePath, [string]$label, [string]$sf, [int]$
     $startTime  = Get-Date
     Write-SliceProgress $sf 0 $phaseStart $phaseEnd
 
-    # Start file-system watcher BEFORE launching Bambu so we catch every file event
-    $diagWatcher = $null
+    # Snapshot all watched directories BEFORE launching Bambu
+    $diagState = $null
     if ($DiagnoseFiles) {
-        Write-Host "`n  [DIAG] Starting file watchers..." -ForegroundColor Yellow
-        $diagWatcher = Start-FileWatcher $workDir (Split-Path $BambuPath -Parent)
+        Write-Host "`n  [DIAG] Snapshotting file system..." -ForegroundColor Yellow
+        $diagState = Start-FileSnapshot $workDir (Split-Path $BambuPath -Parent)
+        Write-Host "  [DIAG] Watching $($diagState.WatchDirs.Count) directories for new files." -ForegroundColor Yellow
     }
 
     # Added --uptodate and --allow-newer-file to bypass all version mismatch prompts.
@@ -162,21 +163,23 @@ function Invoke-SliceFile([string]$filePath, [string]$label, [string]$sf, [int]$
 
         Write-SliceProgress $sf $filePct $phaseStart $phaseEnd
         Write-Host "." -ForegroundColor Cyan -NoNewline
+        # Poll for new files every tick so transient files aren't missed
+        if ($null -ne $diagState) { Update-FileSnapshot $diagState }
         Start-Sleep -Seconds 3
     }
     Write-Host " [DONE]" -ForegroundColor Green
 
-    # Stop the watcher now that Bambu has fully exited, then dump the report
-    if ($null -ne $diagWatcher) {
-        $diagLog = Stop-FileWatcher $diagWatcher
+    # Final snapshot diff + report
+    if ($null -ne $diagState) {
+        $diagLog = Stop-FileSnapshot $diagState
         $diagReportPath = Join-Path $workDir "${baseName}_DiagFiles.txt"
-        Write-Host "`n  [DIAG] File events during slice ($($diagLog.Count) total):" -ForegroundColor Yellow
+        Write-Host "`n  [DIAG] New/modified files during slice ($($diagLog.Count) total):" -ForegroundColor Yellow
         if ($diagLog.Count -gt 0) {
             $diagLog | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkYellow }
         } else {
             Write-Host "    (none detected)" -ForegroundColor DarkGray
         }
-        # Also check stdout log for JSON content (in case Bambu pipes result to stdout)
+        # Also check stdout for JSON in case Bambu pipes the result there
         if (Test-Path $logOut) {
             $stdoutContent = Get-Content $logOut -Raw -ErrorAction SilentlyContinue
             if ($stdoutContent -match '^\s*\{') {
