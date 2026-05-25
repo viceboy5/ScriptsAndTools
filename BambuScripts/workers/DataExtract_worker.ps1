@@ -387,6 +387,42 @@ if (-not $SkipExtraction) {
             }
         }
 
+        # ── FAST OVERRIDE (result.json) ───────────────────────────────────────
+        # If Bambu wrote result.json to $env:TEMP, override the slow-path values
+        # for H/M, color swaps, and model grams before building $outputValues.
+        # These are more accurate from result.json (swaps matches Bambu UI; time
+        # is essentially identical to the gcode comment).  TimeAdd is NOT overridden
+        # — result.json total_predication diverges on single-object plates (~61 min
+        # on Arthropleura) while the gcode comment matches what Bambu Studio shows.
+        # Falls back silently to slow-path values if result.json is absent.
+        # -----------------------------------------------------------------------
+        $inputBase      = (Split-Path $InputFile -Leaf) -replace '\.gcode\.3mf$', ''
+        $resultJsonPath = Join-Path $env:TEMP "${inputBase}_result.json"
+        $resultJson     = $null
+        if (Test-Path $resultJsonPath) {
+            try { $resultJson = Get-Content $resultJsonPath -Raw -ErrorAction Stop | ConvertFrom-Json } catch { $resultJson = $null }
+            Remove-Item $resultJsonPath -Force -ErrorAction SilentlyContinue
+        }
+        # Single-object result.json not used — delete from TEMP
+        if ($SingleFile -ne "") {
+            $singleBase    = (Split-Path $SingleFile -Leaf) -replace '\.gcode\.3mf$', ''
+            $singleResPath = Join-Path $env:TEMP "${singleBase}_result.json"
+            if (Test-Path $singleResPath) { Remove-Item $singleResPath -Force -ErrorAction SilentlyContinue }
+        }
+        if ($null -ne $resultJson -and $resultJson.return_code -eq 0 -and $resultJson.sliced_plates.Count -gt 0) {
+            $rPlate   = $resultJson.sliced_plates[0]
+            $rPredSec = [double]$rPlate.total_predication
+            $rH = [int]($rPredSec / 3600)
+            $rM = [int](($rPredSec % 3600) / 60)
+            if (($rPredSec % 60) -ge 30) { $rM++ }
+            if ($rM -ge 60) { $rM -= 60; $rH++ }
+            $h                = $rH
+            $m                = $rM
+            $actualColorSwaps = [int]$rPlate.filament_change_times
+            $modelGrams       = [math]::Round(($rPlate.filaments | Measure-Object -Property main_used_g -Sum).Sum, 2)
+            Write-Host "  -> result.json: overriding H/M/Swaps/ModelGrams with fast values" -ForegroundColor DarkCyan
+        }
+
         # Always output all 8 filament slots; unused slots get empty strings so columns stay consistent
         # Columns: Printer, FileType, FileName, SKU, Theme, Date, H, M, [8x (grams, color)], ColorSwaps, ObjCount, ModelGrams, TotalGrams, TimeAdd
         $outputValues = @($printerPrefix, $fileTypeLabel, $fileNameClean, $existingSku, $themeOutput, (Get-Date).ToString("M/d/yyyy"), $h, $m)

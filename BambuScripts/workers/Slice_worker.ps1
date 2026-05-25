@@ -3,8 +3,7 @@ param(
     [string[]]$InputPaths = @(),
     [string]$IsolatedPath = "",
     [string]$BambuPath = "C:\Program Files\Bambu Studio\bambu-studio.exe",
-    [string]$StatusFile = "",
-    [switch]$DiagnoseFiles   # Watch for any files Bambu creates/deletes during slicing
+    [string]$StatusFile = ""
 )
 $ErrorActionPreference = 'Stop'
 
@@ -33,75 +32,6 @@ function Write-SliceProgress([string]$sf, [int]$phasePct, [int]$phaseStart, [int
     try { Set-Content -Path $sf -Value "SLICING... $overall%" -Force -ErrorAction SilentlyContinue } catch {}
 }
 
-# ---------------------------------------------------------------------------
-# -DiagnoseFiles helpers
-# Snapshot-diff approach: no background threads, no runspaces, no delegates.
-# Take a file inventory before Bambu starts, poll every tick of the existing
-# progress loop to catch transient files, then diff again after exit.
-# ---------------------------------------------------------------------------
-function Start-FileSnapshot([string]$workDir, [string]$bambuDir) {
-    $watchDirs = @(
-        $workDir,
-        $env:TEMP,
-        "$env:APPDATA\BambuStudio",
-        $bambuDir,
-        "$env:LOCALAPPDATA\Temp"
-    ) | Where-Object { $_ -ne "" -and (Test-Path $_) } | Select-Object -Unique
-
-    $snapshot = @{}
-    foreach ($dir in $watchDirs) {
-        try {
-            Get-ChildItem $dir -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
-                $snapshot[$_.FullName] = $_.LastWriteTimeUtc
-            }
-        } catch {}
-    }
-    return @{ WatchDirs = $watchDirs; Snapshot = $snapshot; Seen = [ordered]@{} }
-}
-
-# Called inside the progress loop — catches files that appear and disappear
-# between the before and after snapshots.
-function Update-FileSnapshot($state) {
-    foreach ($dir in $state.WatchDirs) {
-        try {
-            Get-ChildItem $dir -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
-                $fp = $_.FullName
-                if (-not $state.Snapshot.ContainsKey($fp) -and -not $state.Seen.Contains($fp)) {
-                    $ts = (Get-Date).ToString("HH:mm:ss")
-                    $state.Seen[$fp] = "[$ts] Created  $fp"
-                }
-            }
-        } catch {}
-    }
-}
-
-# Called after process exits — final diff merged with any transient hits
-function Stop-FileSnapshot($state) {
-    $events = [System.Collections.Generic.List[string]]::new()
-    foreach ($dir in $state.WatchDirs) {
-        try {
-            Get-ChildItem $dir -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
-                $fp  = $_.FullName
-                $lwt = $_.LastWriteTimeUtc
-                if (-not $state.Snapshot.ContainsKey($fp)) {
-                    if (-not $state.Seen.Contains($fp)) {
-                        $ts = (Get-Date).ToString("HH:mm:ss")
-                        $events.Add("[$ts] Created  $fp")
-                    }
-                    # Already in Seen — will be merged below
-                } elseif ($state.Snapshot[$fp] -ne $lwt) {
-                    $ts = (Get-Date).ToString("HH:mm:ss")
-                    $events.Add("[$ts] Modified $fp")
-                }
-            }
-        } catch {}
-    }
-    # Merge transient hits from polling
-    foreach ($line in $state.Seen.Values) { $events.Add($line) }
-
-    return @($events | Sort-Object -Unique)
-}
-
 function Invoke-SliceFile([string]$filePath, [string]$label, [string]$sf, [int]$phaseStart, [int]$phaseEnd) {
     $workDir   = Split-Path $filePath -Parent
     $baseName  = (Get-Item $filePath).BaseName
@@ -116,20 +46,12 @@ function Invoke-SliceFile([string]$filePath, [string]$label, [string]$sf, [int]$
     $startTime  = Get-Date
     Write-SliceProgress $sf 0 $phaseStart $phaseEnd
 
-    # Snapshot all watched directories BEFORE launching Bambu
-    $diagState = $null
-    if ($DiagnoseFiles) {
-        Write-Host "`n  [DIAG] Snapshotting file system..." -ForegroundColor Yellow
-        $diagState = Start-FileSnapshot $workDir (Split-Path $BambuPath -Parent)
-        Write-Host "  [DIAG] Watching $($diagState.WatchDirs.Count) directories for new files." -ForegroundColor Yellow
-    }
-
     # Added --uptodate and --allow-newer-file to bypass all version mismatch prompts.
-    # WorkingDirectory is set explicitly so Bambu writes result.json into the design
-    # folder rather than wherever the calling shell's CWD happens to be.
+    # WorkingDirectory is set to TEMP so result.json (written by Bambu v02.05+) lands
+    # there instead of in the design folder, keeping design folders clean.
     $procArgs = "--debug 3 --no-check --uptodate --allow-newer-file --slice 1 --min-save --export-3mf `"$slicedOut`" `"$filePath`""
     $proc = Start-Process -FilePath $BambuPath -ArgumentList $procArgs `
-        -WorkingDirectory $workDir `
+        -WorkingDirectory $env:TEMP `
         -RedirectStandardOutput $logOut -RedirectStandardError $logErr -WindowStyle Hidden -PassThru
 
     while (-not $proc.HasExited) {
@@ -163,35 +85,9 @@ function Invoke-SliceFile([string]$filePath, [string]$label, [string]$sf, [int]$
 
         Write-SliceProgress $sf $filePct $phaseStart $phaseEnd
         Write-Host "." -ForegroundColor Cyan -NoNewline
-        # Poll for new files every tick so transient files aren't missed
-        if ($null -ne $diagState) { Update-FileSnapshot $diagState }
         Start-Sleep -Seconds 3
     }
     Write-Host " [DONE]" -ForegroundColor Green
-
-    # Final snapshot diff + report
-    if ($null -ne $diagState) {
-        $diagLog = Stop-FileSnapshot $diagState
-        $diagReportPath = Join-Path $workDir "${baseName}_DiagFiles.txt"
-        Write-Host "`n  [DIAG] New/modified files during slice ($($diagLog.Count) total):" -ForegroundColor Yellow
-        if ($diagLog.Count -gt 0) {
-            $diagLog | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkYellow }
-        } else {
-            Write-Host "    (none detected)" -ForegroundColor DarkGray
-        }
-        # Also check stdout for JSON in case Bambu pipes the result there
-        if (Test-Path $logOut) {
-            $stdoutContent = Get-Content $logOut -Raw -ErrorAction SilentlyContinue
-            if ($stdoutContent -match '^\s*\{') {
-                Write-Host "`n  [DIAG] Stdout contains JSON!" -ForegroundColor Cyan
-                $diagLog += ""
-                $diagLog += "=== STDOUT JSON ==="
-                $diagLog += $stdoutContent
-            }
-        }
-        $diagLog | Set-Content -Path $diagReportPath -Encoding UTF8
-        Write-Host "  [DIAG] Report saved: $diagReportPath" -ForegroundColor Yellow
-    }
 
     if (-not (Test-Path $slicedOut)) {
         Write-Host "`n  [!] ERROR: Bambu Studio failed to generate $slicedOut" -ForegroundColor Red
@@ -202,11 +98,12 @@ function Invoke-SliceFile([string]$filePath, [string]$label, [string]$sf, [int]$
         return $false
     }
 
-    # Bambu Studio writes result.json to its working directory after a successful slice.
-    # Rename it to {baseName}_result.json so it stays associated with this specific file
-    # and doesn't get overwritten when the Isolated file is sliced next.
-    $genericResult = Join-Path $workDir "result.json"
-    $namedResult   = Join-Path $workDir "${baseName}_result.json"
+    # Bambu Studio (v02.05+) writes result.json to WorkingDirectory ($env:TEMP) after a
+    # successful slice.  Rename it to {baseName}_result.json so a second slice (Isolated
+    # object) doesn't overwrite the first.  DataExtract_worker reads from $env:TEMP and
+    # deletes the file after use.
+    $genericResult = Join-Path $env:TEMP "result.json"
+    $namedResult   = Join-Path $env:TEMP "${baseName}_result.json"
     if (Test-Path $genericResult) {
         Move-Item -Path $genericResult -Destination $namedResult -Force -ErrorAction SilentlyContinue
     }

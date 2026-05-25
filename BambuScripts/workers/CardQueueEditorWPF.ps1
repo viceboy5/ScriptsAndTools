@@ -1176,10 +1176,6 @@ function Start-NextProcess {
     if ($doLogs) { [void]$sb.AppendLine("Start-Transcript -Path `"$dir\Worker_PS_Log.txt`" -Force") }
     [void]$sb.AppendLine("Add-Type -AssemblyName System.IO.Compression.FileSystem")
 
-    # When Create Logs is on, pass -DiagnoseFiles to every Slice_worker call so
-    # a FileSystemWatcher report lands next to the output alongside the transcript.
-    $diagFlag = if ($doLogs) { " -DiagnoseFiles" } else { "" }
-
     if ($doMerge) {
         [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value 'MERGING...' -Force")
         [void]$sb.AppendLine("& `"$scriptDir\merge_3mf_worker.ps1`" -WorkDir `"$($pJob.TempWork)`" -InputPath `"$anchorPath`" -OutputPath `"$tempOut`" -DoColors `"0`"")
@@ -1208,7 +1204,7 @@ function Start-NextProcess {
         [void]$sb.AppendLine("    & `"$scriptDir\create_bod_worker.ps1`" -InputPath `$bodFullPath -OutputPath `"$bodTempPath`"")
         [void]$sb.AppendLine("    if (Test-Path `"$bodTempPath`") {")
         [void]$sb.AppendLine("        Set-Content -Path `"$statusFile`" -Value 'SLICING BOD... 0%' -Force")
-        [void]$sb.AppendLine("        & `"$scriptDir\Slice_worker.ps1`" -InputPath `"$bodTempPath`" -StatusFile `"$statusFile`"$diagFlag")
+        [void]$sb.AppendLine("        & `"$scriptDir\Slice_worker.ps1`" -InputPath `"$bodTempPath`" -StatusFile `"$statusFile`"")
         [void]$sb.AppendLine("        if (Test-Path `"$bodGcodeTemp`") {")
         [void]$sb.AppendLine("            `$bodDest = Join-Path `$bodFolder `"$($basePrefix)BOD.gcode.3mf`"")
         [void]$sb.AppendLine("            Move-Item `"$bodGcodeTemp`" `$bodDest -Force")
@@ -1224,9 +1220,9 @@ function Start-NextProcess {
         [void]$sb.AppendLine("Start-Sleep -Seconds 3")
         if ($jobWrapper.SliceOnly) {
             # Editing-mode slice: no isolated Final.3mf gcode needed
-            [void]$sb.AppendLine("& `"$scriptDir\Slice_worker.ps1`" -InputPath `"$anchorPath`" -StatusFile `"$statusFile`"$diagFlag")
+            [void]$sb.AppendLine("& `"$scriptDir\Slice_worker.ps1`" -InputPath `"$anchorPath`" -StatusFile `"$statusFile`"")
         } else {
-            [void]$sb.AppendLine("& `"$scriptDir\Slice_worker.ps1`" -InputPath `"$anchorPath`" -IsolatedPath `"$finalPath`" -StatusFile `"$statusFile`"$diagFlag")
+            [void]$sb.AppendLine("& `"$scriptDir\Slice_worker.ps1`" -InputPath `"$anchorPath`" -IsolatedPath `"$finalPath`" -StatusFile `"$statusFile`"")
         }
     } elseif ($doExtract -or $doImage) {
         [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value 'RE-SLICING FINAL FOR DATA...' -Force")
@@ -1239,7 +1235,7 @@ function Start-NextProcess {
         [void]$sb.AppendLine("}")
         [void]$sb.AppendLine("if (Test-Path `"$finalPath`") {")
         [void]$sb.AppendLine("    Start-Sleep -Seconds 3")
-        [void]$sb.AppendLine("    & `"$scriptDir\Slice_worker.ps1`" -InputPath `"$finalPath`"$diagFlag")
+        [void]$sb.AppendLine("    & `"$scriptDir\Slice_worker.ps1`" -InputPath `"$finalPath`"")
         [void]$sb.AppendLine("}")
     }
 
