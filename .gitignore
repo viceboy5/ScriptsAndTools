@@ -15,3 +15,5 @@ BambuScripts/workers/CardQueueEditor_debug.txt
 BambuScripts/workers/CardQueueEditor_debug_transcript.txt
 
 BambuScripts/workers/sv_debug.log
+
+BambuScripts/launchers/result.json
