@@ -1589,7 +1589,8 @@ function Find-SiblingSkU([string]$folderPath, [string]$designName) {
     if ([string]::IsNullOrWhiteSpace($themeRoot) -or -not (Test-Path $themeRoot)) { return $null }
 
     $datePat = '^\d{1,2}/\d{1,2}/\d{4}$'
-    $currentTsv = (Get-ChildItem $folderPath -Filter "*_Data.tsv" -ErrorAction SilentlyContinue | Select-Object -First 1)?.FullName
+    $currentTsvItem = Get-ChildItem $folderPath -Filter "*_Data.tsv" -ErrorAction SilentlyContinue | Select-Object -First 1
+    $currentTsv = if ($null -ne $currentTsvItem) { $currentTsvItem.FullName } else { '' }
 
     foreach ($tsv in (Get-ChildItem $themeRoot -Recurse -Filter "*_Data.tsv" -ErrorAction SilentlyContinue)) {
         if ($tsv.FullName -eq $currentTsv) { continue }
@@ -2513,24 +2514,52 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $txtSku.Margin = New-Object System.Windows.Thickness(0,0,8,0); $txtSku.VerticalContentAlignment = "Center"
     $txtSku.IsReadOnly = $true
 
-    # Pre-populate SKU from existing TSV if present
-    # Guard against old-format TSVs where col 3 is Theme, not SKU (old Date at col 4, new Date at col 5)
+    # Pre-populate SKU from existing TSV; also capture design name for sibling lookup.
+    # Handles three TSV formats:
+    #   New format    : Printer | FileType | DesignName | SKU | Theme | Date | ...
+    #   Old format    : Printer | FileType | DesignName | Theme | Date | ...  (Date at col 4)
+    #   Very old fmt  : FullFolderName | Theme | Date | H | M | ...           (Date at col 2)
+    # For the very old format col[2] is a date, so we fall back to deriving
+    # the design name from the folder leaf (strip leading Printer prefix token).
+    $skuDesignName      = ''
     $existingSkuTsvFile = Get-ChildItem -Path $pJob.FolderPath -Filter "*_Data.tsv" -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($existingSkuTsvFile) {
         try {
             $skuSeedLine = Get-Content $existingSkuTsvFile.FullName -ErrorAction SilentlyContinue | Select-Object -Last 1
             if ($skuSeedLine) {
-                $skuSeedCols = $skuSeedLine -split "`t"
-                $skuDatePat  = '^\d{1,2}/\d{1,2}/\d{4}$'
-                $skuOldFmt   = $skuSeedCols.Count -gt 4 -and $skuSeedCols[4] -match $skuDatePat
-                # Accept any value matching the shared SKU pattern (3+ non-whitespace chars).
-                # Old-format TSV guard above already prevents Theme text landing here.
+                $skuSeedCols   = $skuSeedLine -split "`t"
+                $skuDatePat    = '^\d{1,2}/\d{1,2}/\d{4}$'
+                $skuOldFmt     = $skuSeedCols.Count -gt 4 -and $skuSeedCols[4] -match $skuDatePat
+                # Design name at col[2] only when col[2] is not a date (very old format guard)
+                if ($skuSeedCols.Count -ge 3 -and $skuSeedCols[2].Trim() -notmatch $skuDatePat) {
+                    $skuDesignName = $skuSeedCols[2].Trim()
+                } else {
+                    # Very old format: derive design name from folder leaf by stripping printer prefix
+                    $folderLeaf    = Split-Path $pJob.FolderPath -Leaf
+                    $prefixEnd     = $folderLeaf.IndexOf('_')
+                    $skuDesignName = if ($prefixEnd -ge 0) { $folderLeaf.Substring($prefixEnd + 1) } else { $folderLeaf }
+                }
                 if (-not $skuOldFmt -and $skuSeedCols.Count -ge 4 -and $skuSeedCols[3].Trim() -match $script:SkuPattern) {
                     $txtSku.Text = $skuSeedCols[3].Trim()
                 }
             }
         } catch {}
     }
+
+    # If no SKU yet, look for one in a sibling printer variant under the same theme root
+    $siblingSkuInfo = $null
+    if ($txtSku.Text -eq '' -and $skuDesignName -ne '') {
+        $siblingSkuInfo = Find-SiblingSkU $pJob.FolderPath $skuDesignName
+    }
+
+    # Sync SKU button — visible only when a sibling SKU is available and this card has none
+    $btnSyncSku = New-Object System.Windows.Controls.Button
+    $btnSyncSku.Content    = if ($null -ne $siblingSkuInfo) { "Sync from $($siblingSkuInfo.Printer)" } else { "Sync SKU" }
+    $btnSyncSku.Height     = 26; $btnSyncSku.Padding = New-Object System.Windows.Thickness(8,0,8,0)
+    $btnSyncSku.Background = Get-WpfColor "#2A5A7A"; $btnSyncSku.Foreground = Get-WpfColor "#FFFFFF"
+    $btnSyncSku.BorderThickness = 0; $btnSyncSku.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnSyncSku.Margin     = New-Object System.Windows.Thickness(0,0,4,0)
+    $btnSyncSku.Visibility = if ($null -ne $siblingSkuInfo) { "Visible" } else { "Collapsed" }
 
     # Edit button — shown when locked; unlocks the box for manual entry
     $btnEditSku = New-Object System.Windows.Controls.Button
@@ -2559,14 +2588,33 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
     $skuTag = @{
         TxtSku      = $txtSku
+        BtnSync     = $btnSyncSku
         BtnEdit     = $btnEditSku
         BtnSave     = $btnSaveSku
         BtnCancel   = $btnCancelSku
         LblStatus   = $lblSkuStatus
         FolderPath  = $pJob.FolderPath
         AnchorFile  = $pJob.AnchorFile
+        SiblingInfo = $siblingSkuInfo
         OriginalVal = ""
     }
+
+    $btnSyncSku.Tag = $skuTag
+    $btnSyncSku.Add_Click({
+        $t = $this.Tag
+        if ($null -eq $t.SiblingInfo) { return }
+        try {
+            Save-SkuToTsv $t.SiblingInfo.SKU $t.FolderPath $t.AnchorFile
+            $t.TxtSku.Text = $t.SiblingInfo.SKU
+            $t.LblStatus.Text = "Synced from $($t.SiblingInfo.Printer)"
+            $t.LblStatus.Foreground = Get-WpfColor "#4CAF72"
+            $this.Visibility = "Collapsed"
+            $t.BtnEdit.Visibility = "Visible"
+        } catch {
+            $t.LblStatus.Text = "Sync failed: $($_.Exception.Message)"
+            $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"
+        }
+    }.GetNewClosure())
 
     $btnEditSku.Tag = $skuTag
     $btnEditSku.Add_Click({
@@ -2577,6 +2625,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $t.TxtSku.Foreground = Get-WpfColor "#FFFFFF"
         $t.TxtSku.BorderBrush = Get-WpfColor "#5A78C4"
         $this.Visibility = "Collapsed"
+        $t.BtnSync.Visibility = "Collapsed"
         $t.BtnSave.Visibility = "Visible"
         $t.BtnCancel.Visibility = "Visible"
         $t.LblStatus.Text = ""
@@ -2617,6 +2666,10 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $t.TxtSku.Foreground = Get-WpfColor "#888888"
         $t.TxtSku.BorderBrush = Get-WpfColor "#333333"
         $t.BtnEdit.Visibility = "Visible"
+        # Restore Sync button if SKU is still empty and sibling info is available
+        if ($null -ne $t.SiblingInfo -and $t.TxtSku.Text -eq '') {
+            $t.BtnSync.Visibility = "Visible"
+        }
         $t.BtnSave.Visibility = "Collapsed"
         $this.Visibility = "Collapsed"
         $t.LblStatus.Text = ""
@@ -2624,6 +2677,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
     $tasksRow3.Children.Add($lblSku) | Out-Null
     $tasksRow3.Children.Add($txtSku) | Out-Null
+    $tasksRow3.Children.Add($btnSyncSku) | Out-Null
     $tasksRow3.Children.Add($btnEditSku) | Out-Null
     $tasksRow3.Children.Add($btnSaveSku) | Out-Null
     $tasksRow3.Children.Add($btnCancelSku) | Out-Null
@@ -2635,7 +2689,10 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pJob.TasksBox = $tasksBox
 
     $pJob.ChkRename = $chkRename; $pJob.ChkMerge = $chkMerge; $pJob.ChkSlice = $chkSlice; $pJob.ChkExtract = $chkExtract; $pJob.ChkImage = $chkImage; $pJob.ChkLogs = $chkLogs; $pJob.ChkBOD = $chkBOD; $pJob.ChkPrintQ = $chkPrintQ
-    $pJob.TxtSKU = $txtSku
+    $pJob.TxtSKU     = $txtSku
+    $pJob.DesignName = $skuDesignName
+    $pJob.BtnSyncSku = $btnSyncSku
+    $pJob.SkuTag     = $skuTag
     if ($nestExists) {
         $chkMerge.IsChecked = $false; $chkMerge.IsEnabled = $false; $chkMerge.Foreground = Get-WpfColor "#555555"
         $chkMerge.ToolTip = "Remove Nest.3mf or Revert Merge before merging again"
@@ -3613,7 +3670,67 @@ function Build-GpJob($gpPath, $parentDict) {
     $btnThProcess    = New-Object System.Windows.Controls.Button; $btnThProcess.Content    = "Process Theme";  $btnThProcess.Background    = Get-WpfColor "#4CAF72"; $btnThProcess.Foreground    = Get-WpfColor "#FFFFFF"; $btnThProcess.Width    = 115; $btnThProcess.Height = 25; $btnThProcess.BorderThickness    = 0; $btnThProcess.Cursor    = [System.Windows.Input.Cursors]::Hand; $btnThProcess.Margin    = New-Object System.Windows.Thickness(0,0,8,0)
     $btnThRenameOnly = New-Object System.Windows.Controls.Button; $btnThRenameOnly.Content = "Rename Theme";   $btnThRenameOnly.Background = Get-WpfColor "#5A6A8A"; $btnThRenameOnly.Foreground = Get-WpfColor "#FFFFFF"; $btnThRenameOnly.Width = 110; $btnThRenameOnly.Height = 25; $btnThRenameOnly.BorderThickness = 0; $btnThRenameOnly.Cursor = [System.Windows.Input.Cursors]::Hand; $btnThRenameOnly.Margin = New-Object System.Windows.Thickness(0,0,8,0)
     $btnThRenameOnly.ToolTip = "Rename all cards in this theme, skipping color validation and heavy tasks"
-    $btnThRefresh    = New-Object System.Windows.Controls.Button; $btnThRefresh.Content    = "Refresh Theme";  $btnThRefresh.Background    = Get-WpfColor "#5A78C4"; $btnThRefresh.Foreground    = Get-WpfColor "#FFFFFF"; $btnThRefresh.Width    = 115; $btnThRefresh.Height = 25; $btnThRefresh.BorderThickness    = 0; $btnThRefresh.Cursor    = [System.Windows.Input.Cursors]::Hand
+    $btnThRefresh    = New-Object System.Windows.Controls.Button; $btnThRefresh.Content    = "Refresh Theme";  $btnThRefresh.Background    = Get-WpfColor "#5A78C4"; $btnThRefresh.Foreground    = Get-WpfColor "#FFFFFF"; $btnThRefresh.Width    = 115; $btnThRefresh.Height = 25; $btnThRefresh.BorderThickness    = 0; $btnThRefresh.Cursor    = [System.Windows.Input.Cursors]::Hand; $btnThRefresh.Margin = New-Object System.Windows.Thickness(0,0,8,0)
+
+    $btnThSyncSkus = New-Object System.Windows.Controls.Button
+    $btnThSyncSkus.Content = "Sync SKUs"; $btnThSyncSkus.Height = 25; $btnThSyncSkus.Padding = New-Object System.Windows.Thickness(10,0,10,0)
+    $btnThSyncSkus.Background = Get-WpfColor "#2A5A7A"; $btnThSyncSkus.Foreground = Get-WpfColor "#FFFFFF"
+    $btnThSyncSkus.BorderThickness = 0; $btnThSyncSkus.Cursor = [System.Windows.Input.Cursors]::Hand
+
+    $btnThSyncSkus.Tag = $gpJob
+    $btnThSyncSkus.Add_Click({
+        $gp = $this.Tag
+
+        # Scan all cards in the theme for missing SKUs that have a sibling match
+        $pending = [System.Collections.Generic.List[hashtable]]::new()
+        foreach ($pj in $gp.Parents) {
+            if ($pj.TxtSKU.Text -ne '') { continue }
+            if ([string]::IsNullOrWhiteSpace($pj.DesignName)) { continue }
+            $sib = Find-SiblingSkU $pj.FolderPath $pj.DesignName
+            if ($null -eq $sib) { continue }
+            $pending.Add(@{ PJob = $pj; SiblingInfo = $sib })
+        }
+
+        if ($pending.Count -eq 0) {
+            [System.Windows.MessageBox]::Show(
+                "All designs in this theme already have SKUs assigned, or no sibling printer variants with SKUs were found.",
+                "Sync SKUs", "OK", "Information") | Out-Null
+            return
+        }
+
+        # Build confirmation preview
+        $sb = New-Object System.Text.StringBuilder
+        [void]$sb.AppendLine("Sync $($pending.Count) SKU(s) from sibling printer variants?")
+        [void]$sb.AppendLine("")
+        foreach ($item in $pending) {
+            [void]$sb.AppendLine("  $($item.SiblingInfo.SKU)   <--   $($item.PJob.DesignName)   (from $($item.SiblingInfo.Printer))")
+        }
+
+        $result = [System.Windows.MessageBox]::Show(
+            $sb.ToString(), "Sync SKUs - Confirm",
+            [System.Windows.MessageBoxButton]::YesNo,
+            [System.Windows.MessageBoxImage]::Question)
+        if ($result -ne [System.Windows.MessageBoxResult]::Yes) { return }
+
+        # Apply all syncs and update per-card UI
+        $errors = 0
+        foreach ($item in $pending) {
+            $pj  = $item.PJob
+            $sib = $item.SiblingInfo
+            try {
+                Save-SkuToTsv $sib.SKU $pj.FolderPath $pj.AnchorFile
+                $pj.TxtSKU.Text = $sib.SKU
+                if ($null -ne $pj.BtnSyncSku) { $pj.BtnSyncSku.Visibility = "Collapsed" }
+                if ($null -ne $pj.SkuTag)     { $pj.SkuTag.BtnEdit.Visibility = "Visible" }
+            } catch {
+                $errors++
+                Write-Log "Theme Sync SKU error ($($pj.FolderPath)): $($_.Exception.Message)" "ERROR"
+            }
+        }
+
+        $msg = if ($errors -eq 0) { "Successfully synced $($pending.Count) SKU(s)." } else { "Synced $($pending.Count - $errors) SKU(s).  $errors error(s) - see log." }
+        [System.Windows.MessageBox]::Show($msg, "Sync SKUs", "OK", "Information") | Out-Null
+    }.GetNewClosure())
 
     $themeBarStack.Children.Add($chkThRename)    | Out-Null
     $themeBarStack.Children.Add($chkThMerge)     | Out-Null
@@ -3626,6 +3743,7 @@ function Build-GpJob($gpPath, $parentDict) {
     $themeBarStack.Children.Add($btnThProcess)   | Out-Null
     $themeBarStack.Children.Add($btnThRenameOnly)| Out-Null
     $themeBarStack.Children.Add($btnThRefresh)   | Out-Null
+    $themeBarStack.Children.Add($btnThSyncSkus)  | Out-Null
     $themeBar.Child = $themeBarStack
     $gpStack.Children.Add($themeBar) | Out-Null
     $gpJob.ThemeBar = $themeBar
