@@ -255,6 +255,14 @@ try {
 } catch {}
 
 # --- 3. HELPER FUNCTIONS ---
+
+# SKU validation pattern — used everywhere a SKU is read, displayed, or saved.
+# Accepts any non-whitespace string of 3 or more characters so numeric SKUs
+# (e.g. 00096), dash-format SKUs (e.g. fud-sw-2623), and any future formats
+# all pass without code changes.  The old-format TSV guard (Date at col 4)
+# is the real safety net against Theme text being mistaken for a SKU.
+$script:SkuPattern = '^[^\s]{3,}$'
+
 function Get-WpfColor([string]$hex) {
     if ([string]::IsNullOrWhiteSpace($hex)) { $hex = "#808080" }
     if ($hex.Length -eq 9) { $hex = "#" + $hex.Substring(1,6) }
@@ -1570,6 +1578,35 @@ function Save-SkuToTsv([string]$skuVal, [string]$folderPath, $anchorFile) {
     }
 }
 
+# Searches sibling printer folders under the same theme root for a Data TSV
+# that shares the same design name and already has a SKU assigned.
+# Returns a hashtable { SKU; Printer; FilePath } or $null if nothing found.
+# Theme root is 3 levels up from the design folder:
+#   ThemeRoot / {Printer}_{Theme} / {Printer}_{Type}_{Theme} / {Printer}_{Design}_{Theme}
+function Find-SiblingSkU([string]$folderPath, [string]$designName) {
+    if ([string]::IsNullOrWhiteSpace($designName)) { return $null }
+    $themeRoot = Split-Path (Split-Path (Split-Path $folderPath -Parent) -Parent) -Parent
+    if ([string]::IsNullOrWhiteSpace($themeRoot) -or -not (Test-Path $themeRoot)) { return $null }
+
+    $datePat = '^\d{1,2}/\d{1,2}/\d{4}$'
+    $currentTsv = (Get-ChildItem $folderPath -Filter "*_Data.tsv" -ErrorAction SilentlyContinue | Select-Object -First 1)?.FullName
+
+    foreach ($tsv in (Get-ChildItem $themeRoot -Recurse -Filter "*_Data.tsv" -ErrorAction SilentlyContinue)) {
+        if ($tsv.FullName -eq $currentTsv) { continue }
+        try {
+            $line = Get-Content $tsv.FullName -ErrorAction SilentlyContinue | Select-Object -Last 1
+            if (-not $line) { continue }
+            $cols = $line -split "`t"
+            if ($cols.Count -lt 4 -or $cols[2].Trim() -ne $designName) { continue }
+            $isOld = $cols.Count -gt 4 -and $cols[4] -match $datePat
+            $sku   = if (-not $isOld -and $cols[3].Trim() -match $script:SkuPattern) { $cols[3].Trim() } else { '' }
+            if ($sku -eq '') { continue }
+            return @{ SKU = $sku; Printer = $cols[0].Trim(); FilePath = $tsv.FullName }
+        } catch { continue }
+    }
+    return $null
+}
+
 function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $tempWork = Join-Path $env:TEMP ("LiveCard_" + [guid]::NewGuid().ToString().Substring(0,8))
     New-Item -ItemType Directory -Path $tempWork | Out-Null
@@ -2486,9 +2523,9 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
                 $skuSeedCols = $skuSeedLine -split "`t"
                 $skuDatePat  = '^\d{1,2}/\d{1,2}/\d{4}$'
                 $skuOldFmt   = $skuSeedCols.Count -gt 4 -and $skuSeedCols[4] -match $skuDatePat
-                # Only accept 5-digit values as SKUs — guards against old-format TSVs where
-                # col 3 may contain Theme text, hours, or other non-SKU data.
-                if (-not $skuOldFmt -and $skuSeedCols.Count -ge 4 -and $skuSeedCols[3].Trim() -match '^\d{5}$') {
+                # Accept any value matching the shared SKU pattern (3+ non-whitespace chars).
+                # Old-format TSV guard above already prevents Theme text landing here.
+                if (-not $skuOldFmt -and $skuSeedCols.Count -ge 4 -and $skuSeedCols[3].Trim() -match $script:SkuPattern) {
                     $txtSku.Text = $skuSeedCols[3].Trim()
                 }
             }
@@ -2552,8 +2589,8 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $t = $this.Tag
         try {
             $skuVal = $t.TxtSku.Text.Trim()
-            if ($skuVal -notmatch '^\d{5}$') {
-                $t.LblStatus.Text = "Must be 5 digits"
+            if ($skuVal -notmatch $script:SkuPattern) {
+                $t.LblStatus.Text = "SKU must be 3+ chars, no spaces"
                 $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"
                 return
             }
@@ -4259,19 +4296,20 @@ $btnImportSkus.Add_Click({
     if ($ofd.ShowDialog() -ne $true) { return }
 
     try {
-        # Read CSV — expect a header row "SKU" then 5-digit values, one per line
+        # Read CSV — optional header row "SKU", then one SKU value per line.
+        # Accepts any format matching the shared SKU pattern (3+ non-whitespace chars).
         $csvLines    = Get-Content $ofd.FileName -ErrorAction Stop
         $skusFromCsv = [System.Collections.Generic.List[string]]::new()
         $firstLine   = $true
         foreach ($line in $csvLines) {
             $val = $line.Trim().Trim('"')
             if ($firstLine) { $firstLine = $false; if ($val -ieq 'SKU') { continue } }
-            if ($val -match '^\d{5}$') { $skusFromCsv.Add($val) }
+            if ($val -match $script:SkuPattern) { $skusFromCsv.Add($val) }
         }
 
         if ($skusFromCsv.Count -eq 0) {
             [System.Windows.MessageBox]::Show(
-                "No valid 5-digit SKUs found in:`n$($ofd.FileName)",
+                "No valid SKUs found in:`n$($ofd.FileName)",
                 "Import SKUs", "OK", "Warning") | Out-Null
             return
         }

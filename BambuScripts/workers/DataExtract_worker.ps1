@@ -195,7 +195,7 @@ if ($IndividualTsvPath -ne "" -and (Test-Path $IndividualTsvPath)) {
         # Also require a 5-digit value so hours/minutes/theme text from older TSV layouts
         # are never mistaken for a SKU.
         $isOldFormat = $skuCols.Count -gt 4 -and $skuCols[4] -match $datePattern
-        if (-not $isOldFormat -and $skuCols.Count -ge 4 -and $skuCols[3].Trim() -match '^\d{5}$') {
+        if (-not $isOldFormat -and $skuCols.Count -ge 4 -and $skuCols[3].Trim() -match '^[^\s]{3,}$') {
             $existingSku = $skuCols[3].Trim()
         }
     } catch {}
