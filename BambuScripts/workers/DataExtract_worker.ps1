@@ -1,4 +1,4 @@
-param (
+﻿param (
     [Parameter(Mandatory=$true, Position=0)]
     [ValidateNotNullOrEmpty()]
     [string]$InputFile,
@@ -64,6 +64,7 @@ using System.Globalization;
 public class GcodeAnalyzer {
     public double FlushGrams { get; set; }
     public double TowerGrams { get; set; }
+    public double VirtualFlushMm { get; set; }  // linear mm of filament for P2S virtual flush
     public string PrintTime { get; set; }
     public int ColorChanges { get; set; }
 
@@ -78,8 +79,15 @@ public class GcodeAnalyzer {
             double currentE = 0;
             double maxE = 0;
 
+            // Virtual flush tracking (P2S): flush_volumes_matrix + T toolchange commands
+            double[] flushMatrix = null;
+            int matrixSize = 0;
+            int currentFilament = -1;
+            const double filamentArea = 2.4053; // pi * (1.75/2)^2 mm^2 for 1.75mm filament
+
             this.PrintTime = "Not found";
             this.ColorChanges = 0;
+            this.VirtualFlushMm = 0;
 
             while ((line = reader.ReadLine()) != null) {
                 line = line.TrimStart();
@@ -132,13 +140,28 @@ public class GcodeAnalyzer {
                     }
                 }
                 else if (c == ';') {
-                    if (line.StartsWith("; FLUSH_START")) inFlush = true;
-                    else if (line.StartsWith("; FLUSH_END")) inFlush = false;
+                    if (line.StartsWith("; FLUSH_START") || line.StartsWith("; VFLUSH_START")) inFlush = true;
+                    else if (line.StartsWith("; FLUSH_END") || line.StartsWith("; VFLUSH_END")) inFlush = false;
                     else if (line.StartsWith("; WIPE_TOWER_START")) inTower = true;
                     else if (line.StartsWith("; WIPE_TOWER_END")) inTower = false;
                     else if (line.StartsWith("; TYPE:")) {
                         if (line.Contains("Wipe tower") || line.Contains("Prime tower")) inTower = true;
                         else inTower = false;
+                    }
+                    else if (line.StartsWith("; flush_volumes_matrix = ")) {
+                        // Parse NxN flush volume matrix (mm^3 per filament A->B transition)
+                        string matStr = line.Substring(25).Trim();
+                        string[] parts = matStr.Split(',');
+                        int n = (int)Math.Sqrt(parts.Length);
+                        if (n > 0 && n * n == parts.Length) {
+                            matrixSize = n;
+                            flushMatrix = new double[parts.Length];
+                            for (int i = 0; i < parts.Length; i++) {
+                                double v = 0;
+                                double.TryParse(parts[i].Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out v);
+                                flushMatrix[i] = v;
+                            }
+                        }
                     }
                     else if (line.Contains("total estimated time:")) {
                         int colIdx = line.IndexOf("total estimated time:");
@@ -163,6 +186,22 @@ public class GcodeAnalyzer {
                     if (line.StartsWith("M83")) isRelative = true;
                     else if (line.StartsWith("M82")) isRelative = false;
                     else if (line.StartsWith("M620 S")) this.ColorChanges++;
+                }
+                else if (c == 'T' && line.Length >= 2 && char.IsDigit(line[1])) {
+                    // T0 / T1 / T2 / T3 — filament toolchange
+                    // Used to track A->B transitions for virtual flush volume (P2S)
+                    string numStr = line.Substring(1);
+                    int sp = numStr.IndexOf(' ');  if (sp > 0) numStr = numStr.Substring(0, sp);
+                    int sc = numStr.IndexOf(';');  if (sc > 0) numStr = numStr.Substring(0, sc);
+                    int nextFil;
+                    if (int.TryParse(numStr.Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out nextFil)) {
+                        if (flushMatrix != null && currentFilament >= 0 && nextFil != currentFilament
+                            && currentFilament < matrixSize && nextFil < matrixSize) {
+                            double vol = flushMatrix[currentFilament * matrixSize + nextFil]; // mm^3
+                            this.VirtualFlushMm += vol / filamentArea; // convert to linear mm
+                        }
+                        currentFilament = nextFil;
+                    }
                 }
             }
 
@@ -339,7 +378,18 @@ if (-not $SkipExtraction) {
         $zipArchive.Dispose()
 
         # --- 5. Crunch Final Math & Format ---
-        $modelGrams = $totalGrams - $analyzer.FlushGrams - $analyzer.TowerGrams
+        # X1C: FlushGrams > 0 (FLUSH_START/END detected in gcode) — subtract directly.
+        # P2S: FlushGrams = 0 (virtual flush has no gcode E-moves) — fall back to the
+        #      flush_volumes_matrix + T-command path which gives VirtualFlushMm.
+        #      result.json will override ModelGrams later if available (most accurate).
+        if ($analyzer.FlushGrams -gt 0) {
+            $modelGrams = $totalGrams - $analyzer.FlushGrams - $analyzer.TowerGrams
+            Write-Host "  -> Gcode flush path (X1C): FlushGrams=$([math]::Round($analyzer.FlushGrams,2))g  TowerGrams=$([math]::Round($analyzer.TowerGrams,2))g  ModelGrams=$([math]::Round($modelGrams,2))g" -ForegroundColor DarkCyan
+        } else {
+            $virtualFlushGrams = [math]::Round($analyzer.VirtualFlushMm * $gramsPerMm, 2)
+            $modelGrams = $totalGrams - $virtualFlushGrams - $analyzer.TowerGrams
+            Write-Host "  -> Virtual flush path (P2S): VirtualFlushGrams=${virtualFlushGrams}g  TowerGrams=$([math]::Round($analyzer.TowerGrams,2))g  ModelGrams=$([math]::Round($modelGrams,2))g" -ForegroundColor DarkCyan
+        }
 
         $d = 0; $h = 0; $m = 0
         if ($analyzer.PrintTime -match '(\d+)d') { $d = [int]$matches[1] }
@@ -387,40 +437,31 @@ if (-not $SkipExtraction) {
             }
         }
 
-        # ── FAST OVERRIDE (result.json) ───────────────────────────────────────
-        # If Bambu wrote result.json to $env:TEMP, override the slow-path values
-        # for H/M, color swaps, and model grams before building $outputValues.
-        # These are more accurate from result.json (swaps matches Bambu UI; time
-        # is essentially identical to the gcode comment).  TimeAdd is NOT overridden
-        # — result.json total_predication diverges on single-object plates (~61 min
-        # on Arthropleura) while the gcode comment matches what Bambu Studio shows.
-        # Falls back silently to slow-path values if result.json is absent.
-        # -----------------------------------------------------------------------
+        # ── result.json: model grams only ────────────────────────────────────
+        # Bambu writes result.json to the same folder as the gcode.3mf after
+        # slicing.  main_used_g is the slicer's own model-only gram figure —
+        # it excludes purge and prime-tower waste for ALL printer types (X1C
+        # physical flush and P2S virtual flush alike).  total_used_g matches
+        # the XML used_g values we already read, so only ModelGrams changes.
+        # H/M, per-slot grams, and TimeAdd all stay on the gcode/XML path.
+        # Falls back silently to the gcode-derived value when absent.
         $inputBase      = (Split-Path $InputFile -Leaf) -replace '\.gcode\.3mf$', ''
-        $resultJsonPath = Join-Path $env:TEMP "${inputBase}_result.json"
-        $resultJson     = $null
+        $resultJsonPath = Join-Path (Split-Path $InputFile -Parent) "${inputBase}_result.json"
+        if (-not (Test-Path $resultJsonPath)) {
+            $resultJsonPath = Join-Path $env:TEMP "${inputBase}_result.json"
+        }
         if (Test-Path $resultJsonPath) {
-            try { $resultJson = Get-Content $resultJsonPath -Raw -ErrorAction Stop | ConvertFrom-Json } catch { $resultJson = $null }
-            Remove-Item $resultJsonPath -Force -ErrorAction SilentlyContinue
-        }
-        # Single-object result.json not used — delete from TEMP
-        if ($SingleFile -ne "") {
-            $singleBase    = (Split-Path $SingleFile -Leaf) -replace '\.gcode\.3mf$', ''
-            $singleResPath = Join-Path $env:TEMP "${singleBase}_result.json"
-            if (Test-Path $singleResPath) { Remove-Item $singleResPath -Force -ErrorAction SilentlyContinue }
-        }
-        if ($null -ne $resultJson -and $resultJson.return_code -eq 0 -and $resultJson.sliced_plates.Count -gt 0) {
-            $rPlate   = $resultJson.sliced_plates[0]
-            $rPredSec = [double]$rPlate.total_predication
-            $rH = [int]($rPredSec / 3600)
-            $rM = [int](($rPredSec % 3600) / 60)
-            if (($rPredSec % 60) -ge 30) { $rM++ }
-            if ($rM -ge 60) { $rM -= 60; $rH++ }
-            $h                = $rH
-            $m                = $rM
-            $actualColorSwaps = [int]$rPlate.filament_change_times
-            $modelGrams       = [math]::Round(($rPlate.filaments | Measure-Object -Property main_used_g -Sum).Sum, 2)
-            Write-Host "  -> result.json: overriding H/M/Swaps/ModelGrams with fast values" -ForegroundColor DarkCyan
+            try {
+                $rj = Get-Content $resultJsonPath -Raw -ErrorAction Stop | ConvertFrom-Json
+                if ($rj.return_code -eq 0 -and $rj.sliced_plates.Count -gt 0) {
+                    $rPlate = $rj.sliced_plates[0]
+                    $rModel = [math]::Round(($rPlate.filaments | Measure-Object -Property main_used_g -Sum).Sum, 2)
+                    if ($rModel -gt 0) {
+                        $modelGrams = $rModel
+                        Write-Host "  -> result.json: ModelGrams overridden with main_used_g ($modelGrams g)" -ForegroundColor DarkCyan
+                    }
+                }
+            } catch {}
         }
 
         # Always output all 8 filament slots; unused slots get empty strings so columns stay consistent
