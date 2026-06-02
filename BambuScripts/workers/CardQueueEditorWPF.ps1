@@ -594,6 +594,7 @@ if ($args.Count -gt 0) {
                     <StackPanel Name="TopModeBar" Grid.Column="0" HorizontalAlignment="Center" VerticalAlignment="Center" Orientation="Horizontal"/>
                     <StackPanel Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center" Orientation="Horizontal">
                         <Button Name="BtnImportSkus" Content="Import SKUs" Background="#7A5C2E" Foreground="White" FontWeight="Bold" Width="110" Height="30" BorderThickness="0" Cursor="Hand" Margin="0,0,8,0"/>
+                        <Button Name="BtnStopQueue" Content="Stop Queue" Background="#8B3A3A" Foreground="White" FontWeight="Bold" Width="120" Height="30" BorderThickness="0" Cursor="Hand" Margin="0,0,8,0"/>
                         <Button Name="BtnProcessAll" Content="Process All Tasks" Background="#4CAF72" Foreground="White" FontWeight="Bold" Width="150" Height="30" BorderThickness="0" Cursor="Hand"/>
                     </StackPanel>
                 </Grid>
@@ -621,6 +622,7 @@ Write-Log "Window created, dispatcher hooked"
 
 $lblGlobalTitle = $window.FindName("LblGlobalTitle")
 $btnProcessAll  = $window.FindName("BtnProcessAll")
+$btnStopQueue   = $window.FindName("BtnStopQueue")
 $btnImportSkus  = $window.FindName("BtnImportSkus")
 $btnBrowse      = $window.FindName("BtnBrowse") # <--- ADD THIS LINE BACK
 $mainStack      = $window.FindName("MainStack")
@@ -4388,6 +4390,93 @@ $btnProcessAll.Add_Click({
     if ($script:activeProcess -eq $null -and $script:processQueue.Count -gt 0) {
         Start-NextProcess
     }
+})
+
+$btnStopQueue.Add_Click({
+    $hasActive  = ($null -ne $script:activeProcess -and -not $script:activeProcess.HasExited)
+    $hasQueued  = $script:processQueue.Count -gt 0
+
+    if (-not $hasActive -and -not $hasQueued) {
+        [System.Windows.MessageBox]::Show("There are no active or queued tasks to stop.", "Stop Queue", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        return
+    }
+
+    # Build a confirmation message showing what will be stopped
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine("Stop the current task and clear all remaining queued tasks?")
+    if ($hasActive -and $null -ne $script:activeProcessJob) {
+        [void]$sb.AppendLine("")
+        [void]$sb.AppendLine("Currently running:")
+        [void]$sb.AppendLine("  $($script:activeProcessJob.PJob.AnchorFile.BaseName)")
+    }
+    if ($hasQueued) {
+        [void]$sb.AppendLine("")
+        [void]$sb.AppendLine("Queued ($($script:processQueue.Count) task(s)):")
+        foreach ($jw in $script:processQueue) {
+            [void]$sb.AppendLine("  $($jw.PJob.AnchorFile.BaseName)")
+        }
+    }
+
+    $result = [System.Windows.MessageBox]::Show(
+        $sb.ToString().TrimEnd(),
+        "Stop Queue",
+        [System.Windows.MessageBoxButton]::YesNo,
+        [System.Windows.MessageBoxImage]::Warning
+    )
+    if ($result -ne [System.Windows.MessageBoxResult]::Yes) { return }
+
+    # Helper: reset one pJob's UI back to ready state
+    $resetPJob = {
+        param($pj)
+        $pj.IsQueued = $false
+        $pj.BtnApply.Content    = "Add to Queue"
+        $pj.BtnApply.Background = Get-WpfColor "#4CAF72"
+        $pj.BtnApply.IsEnabled  = $true
+        $pj.BtnApply.Width      = 100
+        $pj.RowPanel.IsEnabled  = $true
+        $pj.ProcessingOverlay.Visibility     = "Collapsed"
+        $pj.PickProcessingOverlay.Visibility = "Collapsed"
+        if ($null -ne $pj.RenestStatusLbl)  { $pj.RenestStatusLbl.Text  = "Stopped"; $pj.RenestStatusLbl.Foreground  = Get-WpfColor "#E8A135" }
+        if ($null -ne $pj.LblEdQueueStatus) { $pj.LblEdQueueStatus.Text = ""       ; $pj.LblEdQueueStatus.Foreground = Get-WpfColor "#888A9A" }
+    }
+
+    # Kill the active worker process
+    if ($hasActive) {
+        try { $script:activeProcess.Kill() } catch {}
+    }
+
+    # Reset the currently running job card
+    if ($null -ne $script:activeProcessJob) {
+        & $resetPJob $script:activeProcessJob.PJob
+    }
+
+    # Drain the queue, resetting each card
+    $affectedGpJobs = [System.Collections.Generic.HashSet[object]]::new()
+    if ($null -ne $script:activeProcessJob) { [void]$affectedGpJobs.Add($script:activeProcessJob.GpJob) }
+    while ($script:processQueue.Count -gt 0) {
+        $jw = $script:processQueue.Dequeue()
+        & $resetPJob $jw.PJob
+        [void]$affectedGpJobs.Add($jw.GpJob)
+    }
+
+    # Re-enable theme/prefix/tag controls on affected grandparent groups
+    # so the user can adjust settings and re-queue if needed
+    foreach ($gp in $affectedGpJobs) {
+        $gp.GpRenameConfirmed = $false
+        if ($null -ne $gp.TBTheme)  { $gp.TBTheme.IsEnabled  = $true }
+        if ($null -ne $gp.CbPrefix) { $gp.CbPrefix.IsEnabled = $true }
+        if ($null -ne $gp.ChkSkip)  { $gp.ChkSkip.IsEnabled  = $true }
+    }
+
+    $script:activeProcess    = $null
+    $script:activeProcessJob = $null
+
+    [System.Windows.MessageBox]::Show(
+        "Queue stopped.  All active and queued tasks have been cleared.",
+        "Stop Queue",
+        [System.Windows.MessageBoxButton]::OK,
+        [System.Windows.MessageBoxImage]::Information
+    ) | Out-Null
 })
 
 # --- 10. STARTUP ---
