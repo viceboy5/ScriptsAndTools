@@ -3636,6 +3636,45 @@ function Build-GpJob($gpPath, $parentDict) {
 
     # (Review Mode is now a global top-bar button — no per-group toggle needed)
 
+    $btnCombineGp = New-Object System.Windows.Controls.Button
+    $btnCombineGp.Content = "Copy TSV Data"; $btnCombineGp.Background = Get-WpfColor "#7B4FBF"; $btnCombineGp.Foreground = Get-WpfColor "#FFFFFF"
+    $btnCombineGp.FontWeight = [System.Windows.FontWeights]::Bold; $btnCombineGp.Width = 130; $btnCombineGp.Height = 30; $btnCombineGp.BorderThickness = 0
+    $btnCombineGp.Margin = New-Object System.Windows.Thickness(0,0,10,0); $btnCombineGp.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnCombineGp.Tag = $gpJob
+    $btnCombineGp.Add_Click({
+        $gp = $this.Tag
+        $targetDir = $gp.GpPath
+        if ([string]::IsNullOrWhiteSpace($targetDir) -or -not (Test-Path $targetDir)) {
+            [System.Windows.MessageBox]::Show("Group folder path is not valid.", "Copy TSV Data", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            return
+        }
+        $tsvFiles = Get-ChildItem -Path $targetDir -Filter "*_Data.tsv" -Recurse -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -notmatch "(?i)^.*_Design_Data\.tsv$" }
+        if ($tsvFiles.Count -eq 0) {
+            [System.Windows.MessageBox]::Show("No TSV data files found in:`n$targetDir", "Nothing to Copy", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            return
+        }
+        $combined = [ordered]@{}
+        foreach ($tsv in $tsvFiles) {
+            $line = Get-Content $tsv.FullName -ErrorAction SilentlyContinue | Select-Object -Last 1
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $key = ($line -split "`t")[2]   # DesignName as dedup key (col 2)
+            $combined[$key] = $line
+        }
+        if ($combined.Count -eq 0) {
+            [System.Windows.MessageBox]::Show("No TSV data rows found to copy.", "Nothing to Copy", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            return
+        }
+        [System.Windows.Clipboard]::SetText($combined.Values -join "`r`n")
+        [System.Windows.MessageBox]::Show(
+            "Copied $($combined.Count) row(s) to clipboard.",
+            "Copy TSV Data",
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Information
+        ) | Out-Null
+    }.GetNewClosure())
+    $gpRightBtnStack.Children.Add($btnCombineGp) | Out-Null
+
     $btnRemoveGp = New-Object System.Windows.Controls.Button
     $btnRemoveGp.Content = "Remove Group"; $btnRemoveGp.Background = Get-WpfColor "#D95F5F"; $btnRemoveGp.Foreground = Get-WpfColor "#FFFFFF"
     $btnRemoveGp.Width = 140; $btnRemoveGp.Height = 30; $btnRemoveGp.BorderThickness = 0
