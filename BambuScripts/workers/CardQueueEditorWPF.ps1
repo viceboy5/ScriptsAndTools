@@ -568,36 +568,37 @@ if ($args.Count -gt 0) {
         Background="#16171B" WindowStartupLocation="CenterScreen" AllowDrop="True">
     <Grid>
         <Grid.RowDefinitions>
-            <RowDefinition Height="60"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
         <Border Background="#1C1D23" Grid.Row="0">
             <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="60"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
 
-                <TextBlock Grid.Column="0" Name="LblGlobalTitle" Text="Loading files into queue..." Foreground="White" FontSize="18" FontWeight="Bold" VerticalAlignment="Center" Margin="15,0,0,0"/>
+                <TextBlock Grid.Row="0" Grid.Column="0" Name="LblGlobalTitle" Text="Loading files into queue..." Foreground="White" FontSize="18" FontWeight="Bold" VerticalAlignment="Center" Margin="15,0,0,0"/>
 
-                <StackPanel Grid.Column="1" HorizontalAlignment="Center" VerticalAlignment="Center" Orientation="Vertical">
+                <StackPanel Grid.Row="0" Grid.Column="1" HorizontalAlignment="Center" VerticalAlignment="Center" Orientation="Vertical">
                     <Button Name="BtnBrowse" Content="Browse Files" Background="#5A78C4" Foreground="White" FontWeight="Bold" Width="140" Height="30" BorderThickness="0" Cursor="Hand"/>
                     <TextBlock Text="Browse or drop files to add" Foreground="#888888" FontSize="10" HorizontalAlignment="Center" Margin="0,4,0,0"/>
                 </StackPanel>
 
-                <Grid Grid.Column="2" Margin="0,0,15,0">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-                    <StackPanel Name="TopModeBar" Grid.Column="0" HorizontalAlignment="Center" VerticalAlignment="Center" Orientation="Horizontal"/>
-                    <StackPanel Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center" Orientation="Horizontal">
-                        <Button Name="BtnImportSkus" Content="Import SKUs" Background="#7A5C2E" Foreground="White" FontWeight="Bold" Width="110" Height="30" BorderThickness="0" Cursor="Hand" Margin="0,0,8,0"/>
-                        <Button Name="BtnStopQueue" Content="Stop Queue" Background="#8B3A3A" Foreground="White" FontWeight="Bold" Width="120" Height="30" BorderThickness="0" Cursor="Hand" Margin="0,0,8,0"/>
-                        <Button Name="BtnProcessAll" Content="Process All Tasks" Background="#4CAF72" Foreground="White" FontWeight="Bold" Width="150" Height="30" BorderThickness="0" Cursor="Hand"/>
-                    </StackPanel>
-                </Grid>
+                <StackPanel Grid.Row="0" Grid.Column="2" HorizontalAlignment="Right" VerticalAlignment="Center" Orientation="Horizontal" Margin="0,0,15,0">
+                    <Button Name="BtnImportSkus" Content="Import SKUs" Background="#7A5C2E" Foreground="White" FontWeight="Bold" Width="110" Height="30" BorderThickness="0" Cursor="Hand" Margin="0,0,8,0"/>
+                    <Button Name="BtnStopQueue" Content="Stop Queue" Background="#8B3A3A" Foreground="White" FontWeight="Bold" Width="120" Height="30" BorderThickness="0" Cursor="Hand" Margin="0,0,8,0"/>
+                    <Button Name="BtnProcessAll" Content="Process All Tasks" Background="#4CAF72" Foreground="White" FontWeight="Bold" Width="150" Height="30" BorderThickness="0" Cursor="Hand"/>
+                </StackPanel>
+
+                <Border Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3" Background="#14151A" BorderBrush="#2A2C35" BorderThickness="0,1,0,0" Padding="12,6,12,6">
+                    <StackPanel Name="TopModeBar" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </Border>
             </Grid>
         </Border>
         <ScrollViewer Grid.Row="1" Background="#0D0E10" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
@@ -1490,18 +1491,19 @@ function Set-GlobalMode([string]$mode) {
     if ($isLibraries) {
         # Update top-bar button styles then return — no card panels to iterate
         if ($null -ne $script:BtnModeFilePr) {
-            $activeStyle   = @{ bg = "#3A5080"; fg = "#FFFFFF" }
-            $inactiveStyle = @{ bg = "#252630"; fg = "#7A7D90" }
-            $libStyle      = @{ bg = "#5A3A80"; fg = "#FFFFFF" }
+            $activeStyle   = @{ bg = "#3A5080"; fg = "#FFFFFF"; border = "#5A78C4" }
+            $inactiveStyle = @{ bg = "#252630"; fg = "#7A7D90"; border = "#3A3D50" }
+            $libStyle      = @{ bg = "#5A3A80"; fg = "#FFFFFF"; border = "#8A5AC4" }
             foreach ($pair in @(
                 @{ Btn=$script:BtnModeFilePr;   Active=($false); Style=$inactiveStyle },
                 @{ Btn=$script:BtnModeEditing;  Active=($false); Style=$inactiveStyle },
                 @{ Btn=$script:BtnModeReview;   Active=($false); Style=$inactiveStyle },
                 @{ Btn=$script:BtnModeLibraries;Active=($true);  Style=$libStyle }
             )) {
-                $pair.Btn.Background = Get-WpfColor $pair.Style.bg
-                $pair.Btn.Foreground = Get-WpfColor $pair.Style.fg
-                $pair.Btn.IsEnabled  = -not $pair.Active
+                $pair.Btn.Background  = Get-WpfColor $pair.Style.bg
+                $pair.Btn.Foreground  = Get-WpfColor $pair.Style.fg
+                $pair.Btn.BorderBrush = Get-WpfColor $pair.Style.border
+                $pair.Btn.IsEnabled   = -not $pair.Active
             }
         }
         return
@@ -1533,10 +1535,10 @@ function Set-GlobalMode([string]$mode) {
     }
     # Update top-bar button styles
     if ($null -ne $script:BtnModeFilePr -and $null -ne $script:BtnModeEditing -and $null -ne $script:BtnModeReview) {
-        $activeStyle   = @{ bg = "#3A5080"; fg = "#FFFFFF" }
-        $inactiveStyle = @{ bg = "#252630"; fg = "#7A7D90" }
-        $reviewActive  = @{ bg = "#7A5A2A"; fg = "#FFFFFF" }
-        $libActive     = @{ bg = "#5A3A80"; fg = "#FFFFFF" }
+        $activeStyle   = @{ bg = "#3A5080"; fg = "#FFFFFF"; border = "#5A78C4" }
+        $inactiveStyle = @{ bg = "#252630"; fg = "#7A7D90"; border = "#3A3D50" }
+        $reviewActive  = @{ bg = "#7A5A2A"; fg = "#FFFFFF"; border = "#C4943A" }
+        $libActive     = @{ bg = "#5A3A80"; fg = "#FFFFFF"; border = "#8A5AC4" }
         foreach ($pair in @(
             @{ Btn=$script:BtnModeFilePr;   Active=($mode -eq "FilePr");   Style=$activeStyle  },
             @{ Btn=$script:BtnModeEditing;  Active=($mode -eq "Editing");  Style=$activeStyle  },
@@ -1545,9 +1547,10 @@ function Set-GlobalMode([string]$mode) {
         )) {
             if ($null -eq $pair.Btn) { continue }
             $s = if ($pair.Active) { $pair.Style } else { $inactiveStyle }
-            $pair.Btn.Background = Get-WpfColor $s.bg
-            $pair.Btn.Foreground = Get-WpfColor $s.fg
-            $pair.Btn.IsEnabled  = -not $pair.Active
+            $pair.Btn.Background   = Get-WpfColor $s.bg
+            $pair.Btn.Foreground   = Get-WpfColor $s.fg
+            $pair.Btn.BorderBrush  = Get-WpfColor $s.border
+            $pair.Btn.IsEnabled    = -not $pair.Active
         }
     }
 }
@@ -5646,11 +5649,14 @@ function Build-LibrariesPanel {
 
 function New-ModeButton([string]$label, [int]$width, [string]$bg, [string]$fg, [bool]$active) {
     $b = New-Object System.Windows.Controls.Button
-    $b.Content = $label; $b.Width = $width; $b.Height = 30
-    $b.FontWeight = [System.Windows.FontWeights]::Bold; $b.FontSize = 11
+    $b.Content = $label; $b.Width = $width; $b.Height = 34
+    $b.FontWeight = [System.Windows.FontWeights]::Bold; $b.FontSize = 12
     $b.Background = Get-WpfColor $bg; $b.Foreground = Get-WpfColor $fg
-    $b.BorderThickness = 0; $b.Cursor = [System.Windows.Input.Cursors]::Hand
-    $b.Margin = New-Object System.Windows.Thickness(0,0,4,0)
+    $b.BorderThickness = New-Object System.Windows.Thickness(1)
+    $borderColor = if ($active) { "#5A78C4" } else { "#3A3D50" }
+    $b.BorderBrush = Get-WpfColor $borderColor
+    $b.Cursor = [System.Windows.Input.Cursors]::Hand
+    $b.Margin = New-Object System.Windows.Thickness(4,0,4,0)
     $b.IsEnabled = -not $active
     return $b
 }
