@@ -1,37 +1,20 @@
-# Progress Log — claude/FeaturesAndEdits
+# Progress Log — main
 
-Worktree: `BambuScripts/.claude/worktrees/FeaturesAndEdits/`
-Branch: `claude/FeaturesAndEdits`
-Purpose: Features and general edits to the main PS1/WPF toolset
+Branch: `main`
 
-Branched from `main` at: `039693a removing unused scripts`
-
-Newest entries at top. See main `BambuScripts/PROGRESS.md` for the summary view.
+Newest entries at top.
 
 ---
 
-### WORKTREE `claude/FeaturesAndEdits` — Summary
+### Session 2026-06-03
 
-**Status:** Active — features and general edits to the PS1/WPF toolset
-**Detailed log:** `BambuScripts/.claude/worktrees/FeaturesAndEdits/BambuScripts/PROGRESS.md`
-**Branched from:** `main` at `039693a`
+**Status:** Active
 
-**This session:** Worktree created.
+**Recent commits on main:**
+- `86eaa13` re-introduced combine TSV Button
+- `10bd85c` added stop Queue button
+- `feddc70` fixed P2S gcode parsing for model filament and purge filament
+- `8bba3f7` ignore results
+- `4b453e4` SKU Edits, Data Format, Prehistoric changed to Dinos, SKU Syncing
 
 **Next up:** _(to be filled in)_
-
----
-
-### WORKTREE `claude/upbeat-grothendieck` — Summary
-
-### Completed this session
-
-- Worktree created and `PROGRESS.md` initialised
-
-### Immediate next steps
-
-_(to be filled in as work begins)_
-
-### Open questions / blockers
-
-_(none yet)_
