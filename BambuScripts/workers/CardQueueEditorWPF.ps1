@@ -916,6 +916,69 @@ function Enqueue-PJob($pJob, $gpJob) {
     $script:processQueue.Enqueue(@{ PJob = $pJob; GpJob = $gpJob; SliceOnly = $false })
 }
 
+# Apply hex color substitutions directly to every non-gcode .3mf in the folder.
+# $SubMap is a hashtable of OldHex7 -> @{ Old7; Old9; New7; New9 }
+function Invoke-ColorPatchAllFiles($FolderPath, $SubMap, $SkipPath) {
+    if ($SubMap.Count -eq 0) { return }
+    $files3mf = Get-ChildItem -Path $FolderPath -Filter "*.3mf" -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -notmatch '(?i)\.gcode\.3mf$' -and $_.FullName -ne $SkipPath }
+    foreach ($f3 in $files3mf) {
+        $tmpPath = [System.IO.Path]::GetTempFileName() + ".3mf"
+        try {
+            $srcStream = [System.IO.File]::OpenRead($f3.FullName)
+            $srcZip    = [System.IO.Compression.ZipArchive]::new($srcStream, [System.IO.Compression.ZipArchiveMode]::Read)
+            $anyChange = $false
+            $entryData = @{}
+            foreach ($entry in $srcZip.Entries) {
+                if ($entry.Name -match '\.(xml|model|config|json)$') {
+                    $sr      = [System.IO.StreamReader]::new($entry.Open())
+                    $content = $sr.ReadToEnd(); $sr.Dispose()
+                    $changed = $false
+                    foreach ($sm in $SubMap.Values) {
+                        if ($sm.Old9 -ne $sm.New9 -and $content -match "(?i)$([regex]::Escape($sm.Old9))") { $content = $content -ireplace [regex]::Escape($sm.Old9), $sm.New9; $changed = $true }
+                        if ($sm.Old7 -ne $sm.New7 -and $content -match "(?i)$([regex]::Escape($sm.Old7))") { $content = $content -ireplace [regex]::Escape($sm.Old7), $sm.New7; $changed = $true }
+                    }
+                    if ($changed) { $anyChange = $true }
+                    $entryData[$entry.FullName] = @{ Text = $content; Changed = $changed }
+                }
+            }
+            if ($anyChange) {
+                $dstStream = [System.IO.File]::Open($tmpPath, [System.IO.FileMode]::Create)
+                $dstZip    = [System.IO.Compression.ZipArchive]::new($dstStream, [System.IO.Compression.ZipArchiveMode]::Create)
+                foreach ($entry in $srcZip.Entries) {
+                    $dstEntry       = $dstZip.CreateEntry($entry.FullName, [System.IO.Compression.CompressionLevel]::Optimal)
+                    $dstEntryStream = $dstEntry.Open()
+                    if ($entryData.ContainsKey($entry.FullName)) {
+                        $bytes = [System.Text.Encoding]::UTF8.GetBytes($entryData[$entry.FullName].Text)
+                        $dstEntryStream.Write($bytes, 0, $bytes.Length)
+                    } else {
+                        $srcEntryStream = $entry.Open(); $srcEntryStream.CopyTo($dstEntryStream); $srcEntryStream.Dispose()
+                    }
+                    $dstEntryStream.Dispose()
+                }
+                $dstZip.Dispose(); $dstStream.Dispose()
+                $srcZip.Dispose(); $srcStream.Dispose()
+                [System.IO.File]::Copy($tmpPath, $f3.FullName, $true)
+            } else {
+                $srcZip.Dispose(); $srcStream.Dispose()
+            }
+        } catch {}
+        finally { if (Test-Path $tmpPath) { Remove-Item $tmpPath -Force } }
+        [System.GC]::Collect(); [System.GC]::WaitForPendingFinalizers()
+    }
+}
+
+# Color-only enqueue — saves current color selections to the .3mf files, no other tasks run
+function Enqueue-ColorOnlyJob($pJob, $gpJob) {
+    if ($pJob.IsQueued -or $pJob.IsDone) { return }
+    $pJob.ColorOnlyBypass    = $true
+    $gpJob.GpRenameConfirmed = $true
+    $pJob.IsQueued = $true
+    $pJob.CardStatusLabel.Text = "[ PREPARING ]"; $pJob.ProcessingOverlay.Visibility = "Visible"
+    $pJob.PickStatusLabel.Text = "[ PREPARING ]"; $pJob.PickProcessingOverlay.Visibility = "Visible"
+    $script:processQueue.Enqueue(@{ PJob = $pJob; GpJob = $gpJob; SliceOnly = $false })
+}
+
 # Slice-only enqueue — bypasses color matching and rename-confirm checks (used by Editing mode)
 function Enqueue-SliceOnlyJob($pJob, $gpJob) {
     if ($pJob.IsQueued -or $pJob.IsDone) { return }
@@ -988,7 +1051,23 @@ function Start-NextProcess {
     }
 
     # RenameOnlyBypass: user confirmed rename despite unmatched colors — skip all heavy tasks
-    if ($pJob.RenameOnlyBypass) {
+    if ($pJob.ColorOnlyBypass) {
+        $doRename = $false; $doMerge = $false; $doSlice = $false; $doExtract = $false; $doImage = $false; $doLogs = $false; $doBOD = $false; $doPrintQ = $false
+        $pJob.ColorOnlyBypass = $false
+        $pJob.ProcessedAnchorPath = $pJob.AnchorFile.FullName
+        # Build sub map and patch all other .3mf files in the folder
+        $colorSubMap = @{}
+        foreach ($slot in $pJob.UISlots) {
+            $selName = $slot.Combo.Text
+            if ($script:LibraryColors.Contains($selName)) {
+                $newHex = $script:LibraryColors[$selName].ToUpper(); $oldHex = $slot.OldHex.ToUpper()
+                $old7 = $oldHex.Substring(0,7); $old9 = if ($oldHex.Length -eq 7) { $oldHex + "FF" } else { $oldHex }
+                $new7 = $newHex.Substring(0,7); $new9 = if ($newHex.Length -eq 7) { $newHex + "FF" } else { $newHex }
+                $colorSubMap[$old7] = @{ Old7 = $old7; Old9 = $old9; New7 = $new7; New9 = $new9 }
+            }
+        }
+        Invoke-ColorPatchAllFiles $pJob.FolderPath $colorSubMap $pJob.AnchorFile.FullName
+    } elseif ($pJob.RenameOnlyBypass) {
         $doRename = $true; $doMerge = $false; $doSlice = $false; $doExtract = $false; $doImage = $false; $doLogs = $false; $doBOD = $false; $doPrintQ = $false
         $pJob.RenameOnlyBypass = $false
     } elseif ($pJob.SliceOnlyBypass) {
@@ -996,6 +1075,22 @@ function Start-NextProcess {
         $doRename = $false; $doMerge = $false; $doSlice = $true; $doExtract = $false; $doImage = $false; $doLogs = $false; $doBOD = $false; $doPrintQ = $false
         $pJob.SliceOnlyBypass = $false
         $pJob.ProcessedAnchorPath = $pJob.AnchorFile.FullName
+    } elseif ([bool]$pJob.ChkColors.IsChecked -and -not ([bool]$pJob.ChkRename.IsChecked -or [bool]$pJob.ChkMerge.IsChecked -or [bool]$pJob.ChkSlice.IsChecked -or [bool]$pJob.ChkExtract.IsChecked -or [bool]$pJob.ChkImage.IsChecked -or [bool]$pJob.ChkLogs.IsChecked -or [bool]$pJob.ChkBOD.IsChecked -or [bool]$pJob.ChkPrintQ.IsChecked)) {
+        # Save Colors only — no heavy tasks
+        $doRename = $false; $doMerge = $false; $doSlice = $false; $doExtract = $false; $doImage = $false; $doLogs = $false; $doBOD = $false; $doPrintQ = $false
+        $pJob.ProcessedAnchorPath = $pJob.AnchorFile.FullName
+        # Build sub map and patch all other .3mf files in the folder
+        $colorSubMap = @{}
+        foreach ($slot in $pJob.UISlots) {
+            $selName = $slot.Combo.Text
+            if ($script:LibraryColors.Contains($selName)) {
+                $newHex = $script:LibraryColors[$selName].ToUpper(); $oldHex = $slot.OldHex.ToUpper()
+                $old7 = $oldHex.Substring(0,7); $old9 = if ($oldHex.Length -eq 7) { $oldHex + "FF" } else { $oldHex }
+                $new7 = $newHex.Substring(0,7); $new9 = if ($newHex.Length -eq 7) { $newHex + "FF" } else { $newHex }
+                $colorSubMap[$old7] = @{ Old7 = $old7; Old9 = $old9; New7 = $new7; New9 = $new9 }
+            }
+        }
+        Invoke-ColorPatchAllFiles $pJob.FolderPath $colorSubMap $pJob.AnchorFile.FullName
     } else {
         $doRename  = [bool]$pJob.ChkRename.IsChecked
         $doMerge   = [bool]$pJob.ChkMerge.IsChecked
@@ -1744,11 +1839,11 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         UISlots = New-Object System.Collections.ArrayList
         FileRows = New-Object System.Collections.ArrayList
         IsDone = $false; IsQueued = $false; HasCollision = $false
-        RenameOnlyBypass = $false; SliceOnlyBypass = $false
+        RenameOnlyBypass = $false; SliceOnlyBypass = $false; ColorOnlyBypass = $false
         ReviewBuilt = $false
         GcodeImgPath = ""; ReviewCardOverlay = $null; ReviewPanel = $null; ReviewStack = $null
         TasksBox = $null; EditBox = $null; ApplyRow = $null
-        BtnApply = $null; BtnRenameOnly = $null
+        BtnApply = $null; BtnRenameOnly = $null; BtnColorOnly = $null
         BtnRefresh = $null; BtnRemoveP = $null; BtnKeepReview = $null; BtnRevertReview = $null
         ReviewStatusLabel = $null
         BtnRunRenest = $null; RenestStatusLbl = $null
@@ -2479,13 +2574,15 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $chkSlice   = New-Object System.Windows.Controls.CheckBox; $chkSlice.Content   = "Slice / Export Gcode"; $chkSlice.IsChecked   = $false; $chkSlice.Foreground   = Get-WpfColor "#FFFFFF"; $chkSlice.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
     $chkExtract = New-Object System.Windows.Controls.CheckBox; $chkExtract.Content = "Extract Data";         $chkExtract.IsChecked = $false; $chkExtract.Foreground = Get-WpfColor "#FFFFFF"; $chkExtract.Margin = New-Object System.Windows.Thickness(0,0,15,0)
     $chkImage   = New-Object System.Windows.Controls.CheckBox; $chkImage.Content   = "Generate Image Card";  $chkImage.IsChecked   = $false; $chkImage.Foreground   = Get-WpfColor "#FFFFFF"; $chkImage.Margin = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkColors  = New-Object System.Windows.Controls.CheckBox; $chkColors.Content  = "Save Colors";          $chkColors.IsChecked  = $false; $chkColors.Foreground  = Get-WpfColor "#FFFFFF"; $chkColors.Margin = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkColors.ToolTip = "Write current color selections to the .3mf files only, skipping all other tasks"
     $chkLogs    = New-Object System.Windows.Controls.CheckBox; $chkLogs.Content    = "Create Logs";          $chkLogs.IsChecked    = $false; $chkLogs.Foreground    = Get-WpfColor "#FFFFFF"; $chkLogs.Margin = New-Object System.Windows.Thickness(0,0,15,0)
     $chkBOD     = New-Object System.Windows.Controls.CheckBox; $chkBOD.Content     = "Create BOD";           $chkBOD.IsChecked     = $false; $chkBOD.Foreground     = Get-WpfColor "#FFFFFF"; $chkBOD.Margin = New-Object System.Windows.Thickness(0,0,15,0)
     $chkBOD.ToolTip = "Reduces the merged Full.3mf to the 5 pairs closest to centre and exports a BOD.gcode.3mf to the Printing Queue"
     $chkPrintQ  = New-Object System.Windows.Controls.CheckBox; $chkPrintQ.Content  = "Printing Queue";       $chkPrintQ.IsChecked  = $false; $chkPrintQ.Foreground  = Get-WpfColor "#FFFFFF"
     $chkPrintQ.ToolTip = "Copies the existing Full.gcode.3mf to the Printing Queue folder with today's date"
     $tasksRow1.Children.Add($chkRename) | Out-Null; $tasksRow1.Children.Add($chkMerge) | Out-Null; $tasksRow1.Children.Add($chkSlice) | Out-Null
-    $tasksRow1.Children.Add($chkExtract) | Out-Null; $tasksRow1.Children.Add($chkImage) | Out-Null
+    $tasksRow1.Children.Add($chkExtract) | Out-Null; $tasksRow1.Children.Add($chkImage) | Out-Null; $tasksRow1.Children.Add($chkColors) | Out-Null
     $tasksRow1.Children.Add($chkLogs) | Out-Null; $tasksRow1.Children.Add($chkBOD) | Out-Null; $tasksRow1.Children.Add($chkPrintQ) | Out-Null
     $tasksOuter.Children.Add($tasksRow1) | Out-Null
 
@@ -2693,7 +2790,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $filePrepPanel.Children.Add($tasksBox) | Out-Null
     $pJob.TasksBox = $tasksBox
 
-    $pJob.ChkRename = $chkRename; $pJob.ChkMerge = $chkMerge; $pJob.ChkSlice = $chkSlice; $pJob.ChkExtract = $chkExtract; $pJob.ChkImage = $chkImage; $pJob.ChkLogs = $chkLogs; $pJob.ChkBOD = $chkBOD; $pJob.ChkPrintQ = $chkPrintQ
+    $pJob.ChkRename = $chkRename; $pJob.ChkMerge = $chkMerge; $pJob.ChkSlice = $chkSlice; $pJob.ChkExtract = $chkExtract; $pJob.ChkImage = $chkImage; $pJob.ChkColors = $chkColors; $pJob.ChkLogs = $chkLogs; $pJob.ChkBOD = $chkBOD; $pJob.ChkPrintQ = $chkPrintQ
     $pJob.TxtSKU     = $txtSku
     $pJob.DesignName = $skuDesignName
     $pJob.BtnSyncSku = $btnSyncSku
@@ -2709,7 +2806,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $chkRename.Add_Unchecked({ Validate-PJob $this.Tag })
 
     # Checkbox interdependencies
-    $tasksData = @{ Rename = $chkRename; Merge = $chkMerge; Slice = $chkSlice; Extract = $chkExtract; Image = $chkImage; Logs = $chkLogs; BOD = $chkBOD; PrintQ = $chkPrintQ; PJob = $pJob; GpJob = $gpJob }
+    $tasksData = @{ Rename = $chkRename; Merge = $chkMerge; Slice = $chkSlice; Extract = $chkExtract; Image = $chkImage; Colors = $chkColors; Logs = $chkLogs; BOD = $chkBOD; PrintQ = $chkPrintQ; PJob = $pJob; GpJob = $gpJob }
 
     $chkSlice.Tag = $tasksData
     $chkSlice.Add_Checked({ if ($this.IsChecked) { $this.Tag.Extract.IsChecked = $true } })
@@ -2742,7 +2839,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnDeselAll.Tag = $tasksData
     $btnDeselAll.Add_Click({
         $t = $this.Tag
-        $t.Rename.IsChecked = $false; $t.Slice.IsChecked = $false; $t.Extract.IsChecked = $false; $t.Image.IsChecked = $false; $t.Logs.IsChecked = $false; $t.BOD.IsChecked = $false; $t.PrintQ.IsChecked = $false
+        $t.Rename.IsChecked = $false; $t.Slice.IsChecked = $false; $t.Extract.IsChecked = $false; $t.Image.IsChecked = $false; $t.Colors.IsChecked = $false; $t.Logs.IsChecked = $false; $t.BOD.IsChecked = $false; $t.PrintQ.IsChecked = $false
         if ($t.Merge.IsEnabled) { $t.Merge.IsChecked = $false }
     })
 
@@ -2873,6 +2970,13 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             [System.Windows.MessageBox]::Show("No log files found in this folder.", "No Logs", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
         }
     })
+
+    $btnColorOnly = New-Object System.Windows.Controls.Button
+    $btnColorOnly.Content = "Save Colors"; $btnColorOnly.Background = Get-WpfColor "#4A7A9B"; $btnColorOnly.Foreground = Get-WpfColor "#FFFFFF"
+    $btnColorOnly.FontWeight = [System.Windows.FontWeights]::Bold; $btnColorOnly.Width = 110; $btnColorOnly.Height = 35; $btnColorOnly.BorderThickness = 0; $btnColorOnly.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnColorOnly.Margin = New-Object System.Windows.Thickness(0,0,10,0)
+    $btnColorOnly.ToolTip = "Write current color selections to the .3mf files only, skipping all other tasks"
+    $applyRow.Children.Add($btnColorOnly) | Out-Null; $pJob.BtnColorOnly = $btnColorOnly
 
     $btnRenameOnly = New-Object System.Windows.Controls.Button
     $btnRenameOnly.Content = "Rename Only"; $btnRenameOnly.Background = Get-WpfColor "#5A6A8A"; $btnRenameOnly.Foreground = Get-WpfColor "#FFFFFF"
@@ -3391,6 +3495,12 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         }
     })
 
+    $btnColorOnly.Tag = @{ P = $pJob; G = $gpJob }
+    $btnColorOnly.Add_Click({
+        $t = $this.Tag
+        Enqueue-ColorOnlyJob $t.P $t.G
+    })
+
     $btnRenameOnly.Tag = @{ P = $pJob; G = $gpJob }
     $btnRenameOnly.Add_Click({
         $t = $this.Tag
@@ -3706,7 +3816,9 @@ function Build-GpJob($gpPath, $parentDict) {
     $chkThMerge   = New-Object System.Windows.Controls.CheckBox; $chkThMerge.Content   = "Merge";   $chkThMerge.IsChecked   = $false; $chkThMerge.Foreground   = Get-WpfColor "#CCCCCC"; $chkThMerge.VerticalAlignment   = "Center"; $chkThMerge.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
     $chkThSlice   = New-Object System.Windows.Controls.CheckBox; $chkThSlice.Content   = "Slice";   $chkThSlice.IsChecked   = $false; $chkThSlice.Foreground   = Get-WpfColor "#CCCCCC"; $chkThSlice.VerticalAlignment   = "Center"; $chkThSlice.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
     $chkThExtract = New-Object System.Windows.Controls.CheckBox; $chkThExtract.Content = "Extract"; $chkThExtract.IsChecked = $false; $chkThExtract.Foreground = Get-WpfColor "#CCCCCC"; $chkThExtract.VerticalAlignment = "Center"; $chkThExtract.Margin = New-Object System.Windows.Thickness(0,0,15,0)
-    $chkThImage   = New-Object System.Windows.Controls.CheckBox; $chkThImage.Content   = "Image";   $chkThImage.IsChecked   = $false; $chkThImage.Foreground   = Get-WpfColor "#CCCCCC"; $chkThImage.VerticalAlignment   = "Center"; $chkThImage.Margin   = New-Object System.Windows.Thickness(0,0,20,0)
+    $chkThImage   = New-Object System.Windows.Controls.CheckBox; $chkThImage.Content   = "Image";   $chkThImage.IsChecked   = $false; $chkThImage.Foreground   = Get-WpfColor "#CCCCCC"; $chkThImage.VerticalAlignment   = "Center"; $chkThImage.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkThColors  = New-Object System.Windows.Controls.CheckBox; $chkThColors.Content  = "Save Colors"; $chkThColors.IsChecked = $false; $chkThColors.Foreground = Get-WpfColor "#CCCCCC"; $chkThColors.VerticalAlignment = "Center"; $chkThColors.Margin = New-Object System.Windows.Thickness(0,0,20,0)
+    $chkThColors.ToolTip = "Write current color selections to the .3mf files for all cards in this theme"
 
     $btnThSelAll   = New-Object System.Windows.Controls.Button; $btnThSelAll.Content   = "Select All";   $btnThSelAll.Background   = Get-WpfColor "#2A2C35"; $btnThSelAll.Foreground   = Get-WpfColor "#FFFFFF"; $btnThSelAll.Width   = 85;  $btnThSelAll.Height   = 25; $btnThSelAll.BorderThickness   = 0; $btnThSelAll.Cursor   = [System.Windows.Input.Cursors]::Hand; $btnThSelAll.Margin   = New-Object System.Windows.Thickness(0,0,8,0)
     $btnThDeselAll = New-Object System.Windows.Controls.Button; $btnThDeselAll.Content = "Deselect All"; $btnThDeselAll.Background = Get-WpfColor "#2A2C35"; $btnThDeselAll.Foreground = Get-WpfColor "#FFFFFF"; $btnThDeselAll.Width = 85;  $btnThDeselAll.Height = 25; $btnThDeselAll.BorderThickness = 0; $btnThDeselAll.Cursor = [System.Windows.Input.Cursors]::Hand; $btnThDeselAll.Margin = New-Object System.Windows.Thickness(0,0,20,0)
@@ -3781,6 +3893,7 @@ function Build-GpJob($gpPath, $parentDict) {
     $themeBarStack.Children.Add($chkThSlice)     | Out-Null
     $themeBarStack.Children.Add($chkThExtract)   | Out-Null
     $themeBarStack.Children.Add($chkThImage)     | Out-Null
+    $themeBarStack.Children.Add($chkThColors)    | Out-Null
     $themeBarStack.Children.Add($btnThSelAll)    | Out-Null
     $themeBarStack.Children.Add($btnThDeselAll)  | Out-Null
     $themeBarStack.Children.Add($btnThRevert)    | Out-Null
@@ -3864,7 +3977,10 @@ function Build-GpJob($gpPath, $parentDict) {
     $chkThImage.Tag = $gpJob
     $chkThImage.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { $p.ChkImage.IsChecked = $s } })
 
-    $btnThSelAll.Tag = @{ GpJob = $gpJob; Chks = @{ Rename = $chkThRename; Merge = $chkThMerge; Slice = $chkThSlice; Extract = $chkThExtract; Image = $chkThImage } }
+    $chkThColors.Tag = $gpJob
+    $chkThColors.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { $p.ChkColors.IsChecked = $s } })
+
+    $btnThSelAll.Tag = @{ GpJob = $gpJob; Chks = @{ Rename = $chkThRename; Merge = $chkThMerge; Slice = $chkThSlice; Extract = $chkThExtract; Image = $chkThImage; Colors = $chkThColors } }
     $btnThSelAll.Add_Click({
         $t = $this.Tag
         foreach ($p in $t.GpJob.Parents) {
@@ -3876,15 +3992,15 @@ function Build-GpJob($gpPath, $parentDict) {
         $t.Chks.Slice.IsChecked = $true; $t.Chks.Extract.IsChecked = $true; $t.Chks.Image.IsChecked = $true
     })
 
-    $btnThDeselAll.Tag = @{ GpJob = $gpJob; Chks = @{ Rename = $chkThRename; Merge = $chkThMerge; Slice = $chkThSlice; Extract = $chkThExtract; Image = $chkThImage } }
+    $btnThDeselAll.Tag = @{ GpJob = $gpJob; Chks = @{ Rename = $chkThRename; Merge = $chkThMerge; Slice = $chkThSlice; Extract = $chkThExtract; Image = $chkThImage; Colors = $chkThColors } }
     $btnThDeselAll.Add_Click({
         $t = $this.Tag
         foreach ($p in $t.GpJob.Parents) {
             $p.ChkRename.IsChecked = $false; $p.ChkMerge.IsChecked = $false; $p.ChkSlice.IsChecked = $false
-            $p.ChkExtract.IsChecked = $false; $p.ChkImage.IsChecked = $false; $p.ChkLogs.IsChecked = $false
+            $p.ChkExtract.IsChecked = $false; $p.ChkImage.IsChecked = $false; $p.ChkColors.IsChecked = $false; $p.ChkLogs.IsChecked = $false
         }
         $t.Chks.Rename.IsChecked = $false; $t.Chks.Merge.IsChecked = $false
-        $t.Chks.Slice.IsChecked = $false; $t.Chks.Extract.IsChecked = $false; $t.Chks.Image.IsChecked = $false
+        $t.Chks.Slice.IsChecked = $false; $t.Chks.Extract.IsChecked = $false; $t.Chks.Image.IsChecked = $false; $t.Chks.Colors.IsChecked = $false
     })
 
     $btnThRevert.Tag = $gpJob
