@@ -65,7 +65,7 @@ function Resolve-FilamentName {
 # ------------------------------------------------------------
 $PurgeDict = @{}
 
-foreach ($row in (Import-Csv $PURGE_DICT -Delimiter "`t")) {
+foreach ($row in (Import-Csv $PURGE_DICT)) {
     $src = $row.Source_Filament.Trim()
     $tgt = $row.Target_Filament.Trim()
     $vol = $row.Tuned_Volume.Trim()

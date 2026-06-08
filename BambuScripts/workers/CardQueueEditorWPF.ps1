@@ -41,6 +41,100 @@ $colorCsvPath = Join-Path $scriptDir "..\libraries\FilamentLibrary.csv"
 $namesLibPath  = Join-Path $scriptDir "..\libraries\NamesLibrary.ps1"
 $purgeDictPath = Join-Path $scriptDir "..\libraries\PurgeDictionary.csv"
 
+# Row type for the Purge Dictionary grid — tracks original values so edited
+# cells can be highlighted and the Save button enabled only when something changed.
+Add-Type -TypeDefinition @"
+using System.ComponentModel;
+
+public class PurgeDictRow : INotifyPropertyChanged {
+    public event PropertyChangedEventHandler PropertyChanged;
+    private void Raise(string name) {
+        var h = PropertyChanged;
+        if (h != null) h(this, new PropertyChangedEventArgs(name));
+    }
+
+    private string _source = "";
+    private string _target = "";
+    private bool   _tuned;
+    private string _tunedVolume = "";
+    private string _baseVolume = "";
+    private string _sourceHex = "#3A3C4A";
+    private string _targetHex = "#3A3C4A";
+
+    private string _origSource = "";
+    private string _origTarget = "";
+    private bool   _origTuned;
+    private string _origTunedVolume = "";
+    private string _origBaseVolume = "";
+
+    public string Source_Filament {
+        get { return _source; }
+        set { _source = value; Raise("Source_Filament"); Raise("FromDirty"); Raise("IsDirty"); }
+    }
+    public string Target_Filament {
+        get { return _target; }
+        set { _target = value; Raise("Target_Filament"); Raise("ToDirty"); Raise("IsDirty"); }
+    }
+    public bool Tuned {
+        get { return _tuned; }
+        set { _tuned = value; Raise("Tuned"); Raise("TunedDirty"); Raise("IsDirty"); Raise("Savings_Pct"); }
+    }
+    public string Tuned_Volume {
+        get { return _tunedVolume; }
+        set { _tunedVolume = value; Raise("Tuned_Volume"); Raise("TunedVolumeDirty"); Raise("IsDirty"); Raise("Savings_Pct"); }
+    }
+    public string Base_Volume {
+        get { return _baseVolume; }
+        set { _baseVolume = value; Raise("Base_Volume"); Raise("BaseVolumeDirty"); Raise("IsDirty"); Raise("Savings_Pct"); }
+    }
+    public string Source_Hex { get { return _sourceHex; } set { _sourceHex = value; Raise("Source_Hex"); } }
+    public string Target_Hex { get { return _targetHex; } set { _targetHex = value; Raise("Target_Hex"); } }
+
+    // Percent of purge volume saved by the tuned value vs. the untuned base - blank for untuned/unparseable rows
+    public string Savings_Pct {
+        get {
+            double baseV, tunedV;
+            if (!_tuned) return "";
+            if (!double.TryParse(_baseVolume, out baseV) || !double.TryParse(_tunedVolume, out tunedV)) return "";
+            if (baseV <= 0) return "";
+            double pct = (baseV - tunedV) / baseV * 100.0;
+            return pct.ToString("0.0") + "%";
+        }
+    }
+    public double? SavingsValue {
+        get {
+            double baseV, tunedV;
+            if (!_tuned) return null;
+            if (!double.TryParse(_baseVolume, out baseV) || !double.TryParse(_tunedVolume, out tunedV)) return null;
+            if (baseV <= 0) return null;
+            return (baseV - tunedV) / baseV * 100.0;
+        }
+    }
+
+    public bool FromDirty        { get { return _source != _origSource; } }
+    public bool ToDirty          { get { return _target != _origTarget; } }
+    public bool TunedDirty       { get { return _tuned != _origTuned; } }
+    public bool TunedVolumeDirty { get { return _tunedVolume != _origTunedVolume; } }
+    public bool BaseVolumeDirty  { get { return _baseVolume != _origBaseVolume; } }
+    public bool IsDirty {
+        get { return FromDirty || ToDirty || TunedDirty || TunedVolumeDirty || BaseVolumeDirty; }
+    }
+
+    public void Load(string source, string target, bool tuned, string tunedVolume, string baseVolume, string sourceHex, string targetHex) {
+        _source = source; _target = target; _tuned = tuned; _tunedVolume = tunedVolume; _baseVolume = baseVolume;
+        _origSource = source; _origTarget = target; _origTuned = tuned; _origTunedVolume = tunedVolume; _origBaseVolume = baseVolume;
+        _sourceHex = sourceHex; _targetHex = targetHex;
+    }
+
+    public void CommitBaseline() {
+        _origSource = _source; _origTarget = _target; _origTuned = _tuned;
+        _origTunedVolume = _tunedVolume; _origBaseVolume = _baseVolume;
+        Raise("FromDirty"); Raise("ToDirty"); Raise("TunedDirty");
+        Raise("TunedVolumeDirty"); Raise("BaseVolumeDirty"); Raise("IsDirty");
+    }
+}
+"@
+
 $script:LibraryColors = [ordered]@{}
 $script:HexToName = @{}
 if (Test-Path $colorCsvPath) {
@@ -4803,13 +4897,15 @@ function Save-FilamentLibrary {
 function Save-PurgeDictionary {
     Write-Log "Save-PurgeDictionary: start ($($script:PurgeDict.Count) entries)"
     try {
+        # Comma-delimited with a UTF-8 BOM — this is the format Excel expects for .csv;
+        # a tab-delimited file (even named .csv) gets crammed into a single column on open.
         $lines = [System.Collections.Generic.List[string]]::new()
-        $lines.Add("Source_Filament`tTarget_Filament`tTuned`tTuned_Volume`tBase Volume")
+        $lines.Add("Source_Filament,Target_Filament,Tuned,Tuned_Volume,Base Volume")
         foreach ($row in $script:PurgeDict) {
             $tunedStr = if ($row.Tuned) { "TRUE" } else { "" }
-            $lines.Add("$($row.Source_Filament)`t$($row.Target_Filament)`t$tunedStr`t$($row.Tuned_Volume)`t$($row.Base_Volume)")
+            $lines.Add("$($row.Source_Filament),$($row.Target_Filament),$tunedStr,$($row.Tuned_Volume),$($row.Base_Volume)")
         }
-        [System.IO.File]::WriteAllLines($purgeDictPath, $lines, (New-Object System.Text.UTF8Encoding($false)))
+        [System.IO.File]::WriteAllLines($purgeDictPath, $lines, (New-Object System.Text.UTF8Encoding($true)))
         Write-Log "Save-PurgeDictionary: success"
         return $true
     } catch {
@@ -4825,15 +4921,18 @@ function Load-PurgeDictionary {
     $lines = Get-Content -Path $purgeDictPath
     if ($lines.Count -eq 0) { return }
 
-    $header = $lines[0] -split "`t"
+    # Accept either delimiter on read (older/hand-edited copies may be tab-delimited) but
+    # always rewrite as comma-delimited — that's the format Excel expects for .csv files.
+    $delim = if ($lines[0] -match "`t") { "`t" } else { "," }
+    $header = $lines[0] -split $delim
     $colIndex = @{}
     for ($i = 0; $i -lt $header.Count; $i++) { $colIndex[$header[$i].Trim()] = $i }
     # Old format carried Test_Volume/Iterations columns we no longer need; migrate them away on load.
-    $needsMigration = ($colIndex.ContainsKey("Iterations") -or $colIndex.ContainsKey("Test_Volume")) -and (-not $colIndex.ContainsKey("Tuned"))
+    $needsMigration = ($delim -eq "`t") -or (($colIndex.ContainsKey("Iterations") -or $colIndex.ContainsKey("Test_Volume")) -and (-not $colIndex.ContainsKey("Tuned")))
 
     foreach ($line in ($lines | Select-Object -Skip 1)) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
-        $parts = $line -split "`t"
+        $parts = $line -split $delim
         $get = {
             param($col)
             if ($colIndex.ContainsKey($col) -and $colIndex[$col] -lt $parts.Count) { $parts[$colIndex[$col]].Trim() } else { "" }
@@ -4850,13 +4949,12 @@ function Load-PurgeDictionary {
             $tuned = $tunedRaw -match '(?i)^(true|yes|1|x)$'
         }
 
-        $script:PurgeDict.Add([PSCustomObject]@{
-            Source_Filament = $src
-            Target_Filament = $tgt
-            Tuned           = $tuned
-            Tuned_Volume    = $tunedVol
-            Base_Volume     = $baseVol
-        }) | Out-Null
+        $srcHex = if ($script:LibraryColors.Contains($src)) { $script:LibraryColors[$src].Substring(0,7) } else { "#3A3C4A" }
+        $tgtHex = if ($script:LibraryColors.Contains($tgt)) { $script:LibraryColors[$tgt].Substring(0,7) } else { "#3A3C4A" }
+
+        $row = New-Object PurgeDictRow
+        $row.Load($src, $tgt, $tuned, $tunedVol, $baseVol, $srcHex, $tgtHex)
+        $script:PurgeDict.Add($row) | Out-Null
     }
 
     if ($needsMigration) {
@@ -5849,10 +5947,21 @@ function Build-LibrariesPanel {
     $purgeContainer.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{ Height = "Auto" })) | Out-Null
     $secPurge.Children.Add($purgeContainer) | Out-Null
 
+    $purgeHdrBar = New-Object System.Windows.Controls.DockPanel
+    $purgeHdrBar.LastChildFill = $false; $purgeHdrBar.Margin = New-Object System.Windows.Thickness(0,0,0,10)
+    [System.Windows.Controls.Grid]::SetRow($purgeHdrBar, 0); $purgeContainer.Children.Add($purgeHdrBar) | Out-Null
+
     $purgeHdr = New-Object System.Windows.Controls.TextBlock; $purgeHdr.Text = "Purge Dictionary"
     $purgeHdr.FontSize = 14; $purgeHdr.FontWeight = [System.Windows.FontWeights]::Bold
-    $purgeHdr.Foreground = Get-WpfColor "#C8CFDD"; $purgeHdr.Margin = New-Object System.Windows.Thickness(0,0,0,10)
-    [System.Windows.Controls.Grid]::SetRow($purgeHdr, 0); $purgeContainer.Children.Add($purgeHdr) | Out-Null
+    $purgeHdr.Foreground = Get-WpfColor "#C8CFDD"
+    [System.Windows.Controls.DockPanel]::SetDock($purgeHdr, [System.Windows.Controls.Dock]::Left)
+    $purgeHdrBar.Children.Add($purgeHdr) | Out-Null
+
+    $purgeAvgSavings = New-Object System.Windows.Controls.TextBlock; $purgeAvgSavings.Text = "Avg Savings (tuned): -"
+    $purgeAvgSavings.FontSize = 13; $purgeAvgSavings.FontWeight = [System.Windows.FontWeights]::SemiBold
+    $purgeAvgSavings.Foreground = Get-WpfColor "#7FD8A0"; $purgeAvgSavings.VerticalAlignment = "Center"
+    [System.Windows.Controls.DockPanel]::SetDock($purgeAvgSavings, [System.Windows.Controls.Dock]::Right)
+    $purgeHdrBar.Children.Add($purgeAvgSavings) | Out-Null
 
     # ── Filter bar ────────────────────────────────────────────────────────────
     $purgeFilterPanel = New-Object System.Windows.Controls.StackPanel
@@ -5885,20 +5994,98 @@ function Build-LibrariesPanel {
         return $cmb
     }
 
-    $cmbPurgeFrom = New-PurgeFilterCombo "From" 220
-    [void]$cmbPurgeFrom.Items.Add("(All)")
-    foreach ($srcName in @($script:PurgeDict | Select-Object -ExpandProperty Source_Filament -Unique | Sort-Object)) {
-        [void]$cmbPurgeFrom.Items.Add($srcName)
+    # Make a filter combo typable/searchable - mirrors the filament color-picker combo pattern:
+    # IsEditable + manual CollectionView filtering as the user types, with Enter/Tab/Escape handling.
+    function Enable-PurgeComboTypeAhead([System.Windows.Controls.ComboBox]$combo, [string[]]$options) {
+        $items = New-Object System.Collections.ObjectModel.ObservableCollection[string]
+        foreach ($opt in $options) { [void]$items.Add($opt) }
+        $combo.ItemsSource = $items
+        $view = [System.Windows.Data.CollectionViewSource]::GetDefaultView($items)
+
+        $combo.IsEditable = $true
+        $combo.IsTextSearchEnabled = $false
+        $combo.SelectedIndex = 0
+
+        $state = @{ Filtering = $false; NeedsFilter = $false; View = $view }
+        $combo.Tag = $state
+
+        $combo.Add_PreviewTextInput({
+            param($s, $e)
+            $s.Tag.NeedsFilter = $true
+        }) | Out-Null
+
+        $combo.Add_PreviewKeyDown({
+            param($s, $e)
+            $st = $s.Tag
+            switch ($e.Key) {
+                { $_ -eq [System.Windows.Input.Key]::Back -or $_ -eq [System.Windows.Input.Key]::Delete } { $st.NeedsFilter = $true }
+                { $_ -eq [System.Windows.Input.Key]::Down -or $_ -eq [System.Windows.Input.Key]::Up } {
+                    if (-not $s.IsDropDownOpen -and $s.Items.Count -gt 0) { $s.IsDropDownOpen = $true; $e.Handled = $true }
+                }
+                { $_ -eq [System.Windows.Input.Key]::Enter -or $_ -eq [System.Windows.Input.Key]::Tab } {
+                    if ($s.IsDropDownOpen -and $s.Items.Count -gt 0) {
+                        $accepted = if ($s.SelectedItem) { $s.SelectedItem.ToString() } else { $s.Items[0].ToString() }
+                        $st.Filtering = $true
+                        $s.IsDropDownOpen = $false
+                        $st.View.Filter = $null
+                        $st.Filtering = $false
+                        $s.SelectedItem = $accepted
+                        $tb = $s.Template.FindName("PART_EditableTextBox", $s)
+                        if ($tb) { $tb.SelectAll() }
+                        $e.Handled = $true
+                    }
+                }
+                { $_ -eq [System.Windows.Input.Key]::Escape } {
+                    if ($s.IsDropDownOpen) {
+                        $st.Filtering = $true
+                        $s.IsDropDownOpen = $false
+                        $st.View.Filter = $null
+                        $st.Filtering = $false
+                        if ($s.SelectedItem) { $s.Text = $s.SelectedItem.ToString() }
+                        $e.Handled = $true
+                    }
+                }
+            }
+        }) | Out-Null
+
+        $textChangedHandler = [System.Windows.Controls.TextChangedEventHandler]{
+            param($s, $e)
+            $st = $s.Tag
+            if ($st.Filtering -or -not $st.NeedsFilter) { return }
+            $st.NeedsFilter = $false
+            $st.Filtering = $true
+            $typed = $s.Text
+            if ([string]::IsNullOrWhiteSpace($typed)) {
+                $st.View.Filter = $null
+                $s.IsDropDownOpen = $false
+            } else {
+                $tl = $typed.ToLower()
+                $st.View.Filter = [Predicate[object]]{ param($item) $item.ToString().ToLower().Contains($tl) }.GetNewClosure()
+                $s.IsDropDownOpen = (-not $st.View.IsEmpty)
+            }
+            $st.Filtering = $false
+        }
+        $combo.AddHandler([System.Windows.Controls.Primitives.TextBoxBase]::TextChangedEvent, $textChangedHandler)
+
+        $combo.Add_DropDownClosed({
+            param($s, $e)
+            $st = $s.Tag
+            if ($st.Filtering) { return }
+            $st.Filtering = $true
+            $st.View.Filter = $null
+            $st.Filtering = $false
+        }) | Out-Null
     }
-    $cmbPurgeFrom.SelectedIndex = 0
+
+    $cmbPurgeFrom = New-PurgeFilterCombo "From" 220
+    $purgeFromOptions = @("(All)") + @($script:PurgeDict | Select-Object -ExpandProperty Source_Filament -Unique | Sort-Object)
+    Enable-PurgeComboTypeAhead $cmbPurgeFrom $purgeFromOptions
 
     $cmbPurgeTuned = New-PurgeFilterCombo "Tuned" 130
-    foreach ($opt in @("(All)","Tuned only","Not tuned")) { [void]$cmbPurgeTuned.Items.Add($opt) }
-    $cmbPurgeTuned.SelectedIndex = 0
+    Enable-PurgeComboTypeAhead $cmbPurgeTuned @("(All)","Tuned only","Not tuned")
 
     $cmbPurgeVol = New-PurgeFilterCombo "Tuned Volume" 150
-    foreach ($opt in @("(All)","Has value","Empty")) { [void]$cmbPurgeVol.Items.Add($opt) }
-    $cmbPurgeVol.SelectedIndex = 0
+    Enable-PurgeComboTypeAhead $cmbPurgeVol @("(All)","Has value","Empty")
 
     $purgeGrid = New-Object System.Windows.Controls.DataGrid
     $purgeGrid.AutoGenerateColumns = $false
@@ -5924,34 +6111,104 @@ function Build-LibrariesPanel {
     $purgeHdrStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Primitives.DataGridColumnHeader]::BorderThicknessProperty, (New-Object System.Windows.Thickness(0,0,1,1)))))
     $purgeGrid.ColumnHeaderStyle = $purgeHdrStyle
 
-    $colFrom = New-Object System.Windows.Controls.DataGridTextColumn
-    $colFrom.Header = "From"; $colFrom.Binding = New-Object System.Windows.Data.Binding("Source_Filament")
+    # Cell highlight — orange background while a cell's value differs from what's on disk
+    function New-PurgeDirtyCellStyle([string]$dirtyProp) {
+        $style = New-Object System.Windows.Style([System.Windows.Controls.DataGridCell])
+        $trig  = New-Object System.Windows.DataTrigger
+        $trig.Binding = New-Object System.Windows.Data.Binding($dirtyProp)
+        $trig.Value = $true
+        $trig.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::BackgroundProperty, (Get-WpfColor "#B9711F")))) | Out-Null
+        $trig.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::ForegroundProperty, (Get-WpfColor "#1A1A1A")))) | Out-Null
+        $style.Triggers.Add($trig) | Out-Null
+        return $style
+    }
+
+    # Swatch + name template for the From/To columns
+    function New-PurgeSwatchTemplate([string]$hexProp, [string]$textProp) {
+        $xaml = @"
+<DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <StackPanel Orientation="Horizontal" Margin="6,2,6,2">
+    <Border Width="14" Height="14" CornerRadius="2" Margin="0,0,8,0" VerticalAlignment="Center"
+            BorderBrush="#3A3C4A" BorderThickness="1">
+      <Border.Background>
+        <SolidColorBrush Color="{Binding $hexProp}"/>
+      </Border.Background>
+    </Border>
+    <TextBlock Text="{Binding $textProp}" Foreground="#E0E3EC" VerticalAlignment="Center"/>
+  </StackPanel>
+</DataTemplate>
+"@
+        $xr = [System.Xml.XmlReader]::Create((New-Object System.IO.StringReader($xaml)))
+        return [System.Windows.Markup.XamlReader]::Load($xr)
+    }
+
+    # Centered text for numeric-style columns
+    $purgeCenterStyle = New-Object System.Windows.Style([System.Windows.Controls.TextBlock])
+    $purgeCenterStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.TextBlock]::TextAlignmentProperty, [System.Windows.TextAlignment]::Center))) | Out-Null
+    $purgeCenterEditStyle = New-Object System.Windows.Style([System.Windows.Controls.TextBox])
+    $purgeCenterEditStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.TextBox]::TextAlignmentProperty, [System.Windows.TextAlignment]::Center))) | Out-Null
+
+    $colFrom = New-Object System.Windows.Controls.DataGridTemplateColumn
+    $colFrom.Header = "From"; $colFrom.CellTemplate = New-PurgeSwatchTemplate "Source_Hex" "Source_Filament"
+    $colFrom.SortMemberPath = "Source_Filament"
     $colFrom.Width = New-Object System.Windows.Controls.DataGridLength(220)
+    $colFrom.CellStyle = New-PurgeDirtyCellStyle "FromDirty"
     $purgeGrid.Columns.Add($colFrom) | Out-Null
 
-    $colTo = New-Object System.Windows.Controls.DataGridTextColumn
-    $colTo.Header = "To"; $colTo.Binding = New-Object System.Windows.Data.Binding("Target_Filament")
+    $colTo = New-Object System.Windows.Controls.DataGridTemplateColumn
+    $colTo.Header = "To"; $colTo.CellTemplate = New-PurgeSwatchTemplate "Target_Hex" "Target_Filament"
+    $colTo.SortMemberPath = "Target_Filament"
     $colTo.Width = New-Object System.Windows.Controls.DataGridLength(220)
+    $colTo.CellStyle = New-PurgeDirtyCellStyle "ToDirty"
     $purgeGrid.Columns.Add($colTo) | Out-Null
 
     $colTuned = New-Object System.Windows.Controls.DataGridCheckBoxColumn
     $colTuned.Header = "Tuned"; $colTuned.Binding = New-Object System.Windows.Data.Binding("Tuned")
     $colTuned.Width = 60
+    $colTuned.CellStyle = New-PurgeDirtyCellStyle "TunedDirty"
     $purgeGrid.Columns.Add($colTuned) | Out-Null
 
     $colTunedVol = New-Object System.Windows.Controls.DataGridTextColumn
     $colTunedVol.Header = "Tuned Volume"; $colTunedVol.Binding = New-Object System.Windows.Data.Binding("Tuned_Volume")
     $colTunedVol.Width = 110
+    $colTunedVol.ElementStyle = $purgeCenterStyle; $colTunedVol.EditingElementStyle = $purgeCenterEditStyle
+    $colTunedVol.CellStyle = New-PurgeDirtyCellStyle "TunedVolumeDirty"
     $purgeGrid.Columns.Add($colTunedVol) | Out-Null
 
     $colBaseVol = New-Object System.Windows.Controls.DataGridTextColumn
     $colBaseVol.Header = "Base Volume"; $colBaseVol.Binding = New-Object System.Windows.Data.Binding("Base_Volume")
     $colBaseVol.Width = 110
+    $colBaseVol.ElementStyle = $purgeCenterStyle; $colBaseVol.EditingElementStyle = $purgeCenterEditStyle
+    $colBaseVol.CellStyle = New-PurgeDirtyCellStyle "BaseVolumeDirty"
     $purgeGrid.Columns.Add($colBaseVol) | Out-Null
+
+    $colSavings = New-Object System.Windows.Controls.DataGridTextColumn
+    $colSavings.Header = "% Savings"; $colSavings.Binding = New-Object System.Windows.Data.Binding("Savings_Pct")
+    $colSavings.Width = 100; $colSavings.IsReadOnly = $true
+    $colSavings.ElementStyle = $purgeCenterStyle
+    $purgeGrid.Columns.Add($colSavings) | Out-Null
 
     $purgeGrid.ItemsSource = $script:PurgeDict
     $purgeView = [System.Windows.Data.CollectionViewSource]::GetDefaultView($script:PurgeDict)
     $purgeView.SortDescriptions.Add((New-Object System.ComponentModel.SortDescription("Source_Filament", [System.ComponentModel.ListSortDirection]::Ascending))) | Out-Null
+
+    # Rolling average % savings across tuned combos (untuned/unparseable rows are excluded)
+    $capturedPurgeAvgSavings = $purgeAvgSavings
+    $capturedPurgeDictForAvg = $script:PurgeDict
+    $updatePurgeAvgSavings = {
+        $vals = @()
+        foreach ($r in $capturedPurgeDictForAvg) {
+            if ($r.SavingsValue -ne $null) { $vals += [double]$r.SavingsValue }
+        }
+        if ($vals.Count -gt 0) {
+            $avg = ($vals | Measure-Object -Average).Average
+            $capturedPurgeAvgSavings.Text = "Avg Savings (tuned): {0:N1}% across {1} combo{2}" -f $avg, $vals.Count, $(if ($vals.Count -eq 1) { "" } else { "s" })
+        } else {
+            $capturedPurgeAvgSavings.Text = "Avg Savings (tuned): -"
+        }
+    }.GetNewClosure()
+    & $updatePurgeAvgSavings
 
     # ── Filter predicate — re-applied whenever a filter combo changes ────────
     $capturedPurgeView      = $purgeView
@@ -5988,15 +6245,31 @@ function Build-LibrariesPanel {
     $btnSavePurge.Height = 32; $btnSavePurge.FontSize = 12; $btnSavePurge.FontWeight = [System.Windows.FontWeights]::Bold
     $btnSavePurge.Background = Get-WpfColor "#3A5080"; $btnSavePurge.Foreground = Get-WpfColor "#FFFFFF"
     $btnSavePurge.BorderThickness = 0; $btnSavePurge.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnSavePurge.IsEnabled = $false
     [System.Windows.Controls.Grid]::SetColumn($btnSavePurge, 0); $purgeBtnGrid.Children.Add($btnSavePurge) | Out-Null
 
-    $capturedPurgeGrid = $purgeGrid
+    $capturedPurgeGrid     = $purgeGrid
+    $capturedBtnSavePurge  = $btnSavePurge
+
+    # Re-evaluate whether anything is dirty after each cell commits, and toggle Save accordingly
+    $purgeGrid.Add_CellEditEnding({
+        $grid = $capturedPurgeGrid
+        $grid.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background, [action]{
+            $anyDirty = $false
+            foreach ($r in $script:PurgeDict) { if ($r.IsDirty) { $anyDirty = $true; break } }
+            $capturedBtnSavePurge.IsEnabled = $anyDirty
+            & $updatePurgeAvgSavings
+        }) | Out-Null
+    }.GetNewClosure())
+
     $btnSavePurge.Add_Click({
         Write-Log "btnSavePurge: clicked"
         try {
             $capturedPurgeGrid.CommitEdit([System.Windows.Controls.DataGridEditingUnit]::Row, $true) | Out-Null
             if (Save-PurgeDictionary) {
+                foreach ($r in $script:PurgeDict) { $r.CommitBaseline() }
                 $this.Background = Get-WpfColor "#4CAF72"
+                $this.IsEnabled = $false
             } else {
                 $this.Background = Get-WpfColor "#D95F5F"
             }
