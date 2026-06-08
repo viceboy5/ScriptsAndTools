@@ -10,6 +10,13 @@ Newest entries at top.
 
 **Status:** Active
 
+**Feature — BOD object-count rules now branch on which source files exist (`CardQueueEditorWPF.ps1` ~line 1471-1500):**
+Replaced the old binary Full-vs-Grid mode pick (which always asked `create_bod_worker.ps1` for 5 pairs in Full mode) with a three-way rule based on which of `Nest`/`Full`/`Final` exist in the design folder:
+- **Nest + Full exist** -> merged design (the normal merge pipeline always produces a Nest as an intermediate); Full mode, `-PairCount 7` -> keeps the 7 `MergedGroup_*` pairs closest to plate centre.
+- **Full + Final exist, no Nest** -> the Full.3mf was never run through the merge pipeline (no Nest = no merge ever happened), so its build items are lone/unmerged objects rather than `MergedGroup_*` pairs; still uses Full mode (its centre-distance ranking + `Get-ItemClass` "unknown name -> pair" fallback naturally selects individual objects when there are no merge-worker name tags to match), but with `-PairCount 15` -> keeps the 15 lone objects closest to plate centre.
+- **Final only** -> Grid mode, the 15-copy grid-layout path documented below.
+Added `$bodNestPath`/`$bodHasNest`/`$bodHasFull`/`$bodHasFinal` detection variables to the generated worker script and now pass `-PairCount` through to `create_bod_worker.ps1` (which already accepted it via its `param()` block, just was never given a non-default value).
+
 **Bug fix — BOD creation for Final-only design folders (`CardQueueEditorWPF.ps1` ~line 1435/1471):**
 - Symptom: BOD.3mf appeared briefly in the design folder, a dated folder was created in the Printing Queue, but the sliced gcode never got moved there.
 - Root cause: `$basePrefix` was computed as `$baseName + "_"` for any anchor not ending in "Full". For a Final-only folder the anchor is `..._Final.3mf`, so `$baseName = "..._Final"` and `$basePrefix` became `"..._Final_"`, which made `$bodFullPath` (`"$baseName.3mf"` = `"..._Final.3mf"`) coincidentally equal the *actual* Final.3mf path — tricking the mode-detection `if (Test-Path $bodFullPath) { 'Full' }` into always picking **Full mode** instead of **Grid mode** for Final-only designs. Full-mode `create_bod_worker.ps1` then ran its pair-pruning logic against a single isolated object, producing a malformed/empty BOD whose slice never emitted gcode (matching the existing `(?i)_Final$` stem-stripping convention used elsewhere, e.g. lines 3363/3561/4356).

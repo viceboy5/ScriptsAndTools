@@ -1,6 +1,6 @@
-# ════════════════════════════════════════════════════════════════════════════════
+﻿# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # FULL WPF BATCH PRE-FLIGHT EDITOR ENGINE
-# ════════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
@@ -12,7 +12,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $ErrorActionPreference = 'Stop'
 
-# ── DEBUG LOGGING ─────────────────────────────────────────────────────────────
+# â”€â”€ DEBUG LOGGING â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 $script:DebugLog = Join-Path $PSScriptRoot "CardQueueEditor_debug.txt"
 Set-Content -Path $script:DebugLog -Value "=== CardQueueEditor Debug Log  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ===" -Encoding UTF8
 function Write-Log {
@@ -41,7 +41,7 @@ $colorCsvPath = Join-Path $scriptDir "..\libraries\FilamentLibrary.csv"
 $namesLibPath  = Join-Path $scriptDir "..\libraries\NamesLibrary.ps1"
 $purgeDictPath = Join-Path $scriptDir "..\libraries\PurgeDictionary.csv"
 
-# Row type for the Purge Dictionary grid — tracks original values so edited
+# Row type for the Purge Dictionary grid â€” tracks original values so edited
 # cells can be highlighted and the Save button enabled only when something changed.
 Add-Type -TypeDefinition @"
 using System.ComponentModel;
@@ -351,7 +351,7 @@ try {
 
 # --- 3. HELPER FUNCTIONS ---
 
-# SKU validation pattern — used everywhere a SKU is read, displayed, or saved.
+# SKU validation pattern â€” used everywhere a SKU is read, displayed, or saved.
 # Accepts any non-whitespace string of 3 or more characters so numeric SKUs
 # (e.g. 00096), dash-format SKUs (e.g. fud-sw-2623), and any future formats
 # all pass without code changes.  The old-format TSV guard (Date at col 4)
@@ -507,7 +507,7 @@ function SmartFill([string]$anchorName, [string]$gpName) {
 
     # Positional fallback: if theme wasn't matched via gpName AND we still have 3+ tokens,
     # treat the last token as the theme and strip it.
-    # Convention: Prefix_Char_Adj_Theme_Suffix — after stripping prefix+suffix, max 3 remain.
+    # Convention: Prefix_Char_Adj_Theme_Suffix â€” after stripping prefix+suffix, max 3 remain.
     $parts = [string[]]($prefix -split '_' | Where-Object { $_ -ne '' })
     if (-not $themeStripped -and $parts.Count -ge 3) {
         $parts = $parts[0..($parts.Count-2)]
@@ -945,7 +945,7 @@ function Refresh-PJob($pJob, $gpJob) {
     $newAnchor = Find-AnchorFile $folderPath
     if (-not $newAnchor) { Update-GpFileCount $gpJob; return }
 
-    # Rebuild from scratch — re-parses slots, SmartFill, full card UI
+    # Rebuild from scratch â€” re-parses slots, SmartFill, full card UI
     $newPJob = Build-PJob $folderPath $newAnchor $gpJob
 
     # Reinsert at the original position
@@ -1013,8 +1013,8 @@ function Enqueue-PJob($pJob, $gpJob) {
 
 # Apply hex color substitutions directly to every non-gcode .3mf in the folder.
 # $SubMap is a hashtable of OldHex7 -> @{ Old7; Old9; New7; New9 }
-function Invoke-ColorPatchAllFiles($FolderPath, $SubMap, $SkipPath) {
-    if ($SubMap.Count -eq 0) { return }
+function Invoke-ColorPatchAllFiles($FolderPath, $SubMap, $SkipPath, $NameByHex) {
+    if ($SubMap.Count -eq 0 -and ($null -eq $NameByHex -or $NameByHex.Count -eq 0)) { return }
     $files3mf = Get-ChildItem -Path $FolderPath -Filter "*.3mf" -ErrorAction SilentlyContinue |
                 Where-Object { $_.Name -notmatch '(?i)\.gcode\.3mf$' -and $_.FullName -ne $SkipPath }
     foreach ($f3 in $files3mf) {
@@ -1032,6 +1032,10 @@ function Invoke-ColorPatchAllFiles($FolderPath, $SubMap, $SkipPath) {
                     foreach ($sm in $SubMap.Values) {
                         if ($sm.Old9 -ne $sm.New9 -and $content -match "(?i)$([regex]::Escape($sm.Old9))") { $content = $content -ireplace [regex]::Escape($sm.Old9), $sm.New9; $changed = $true }
                         if ($sm.Old7 -ne $sm.New7 -and $content -match "(?i)$([regex]::Escape($sm.Old7))") { $content = $content -ireplace [regex]::Escape($sm.Old7), $sm.New7; $changed = $true }
+                    }
+                    if ($entry.Name -ieq 'project_settings.config' -and $null -ne $NameByHex -and $NameByHex.Count -gt 0) {
+                        $tunedJson = Update-PurgeMatrixInConfigText $content $NameByHex
+                        if ($null -ne $tunedJson) { $content = $tunedJson; $changed = $true }
                     }
                     if ($changed) { $anyChange = $true }
                     $entryData[$entry.FullName] = @{ Text = $content; Changed = $changed }
@@ -1063,7 +1067,72 @@ function Invoke-ColorPatchAllFiles($FolderPath, $SubMap, $SkipPath) {
     }
 }
 
-# Color-only enqueue — saves current color selections to the .3mf files, no other tasks run
+# Build hex(7-char, upper) -> filament name map from the current color selections, for purge tuning lookups
+function Get-PurgeNameByHexMap($UISlots) {
+    $map = @{}
+    foreach ($slot in $UISlots) {
+        $selName = $slot.Combo.Text
+        if ($script:LibraryColors.Contains($selName)) {
+            $hex7 = $script:LibraryColors[$selName].ToUpper().Substring(0,7)
+            $map[$hex7] = $selName
+        }
+    }
+    return $map
+}
+
+# Look up the tuned purge volume for a (from, to) filament pair - returns $null if untuned/unset
+function Get-PurgeTunedVolume([string]$FromName, [string]$ToName) {
+    if (-not $FromName -or -not $ToName -or $FromName -eq $ToName -or $null -eq $script:PurgeDict) { return $null }
+    foreach ($row in $script:PurgeDict) {
+        if ($row.Tuned -and $row.Source_Filament -eq $FromName -and $row.Target_Filament -eq $ToName) {
+            $v = $row.Tuned_Volume
+            if (-not [string]::IsNullOrWhiteSpace($v)) { return $v.Trim() }
+        }
+    }
+    return $null
+}
+
+# Rewrites flush_volumes_matrix entries in a project_settings.config JSON blob using tuned PurgeDictionary values.
+# Returns the updated JSON text, or $null if nothing changed (or the JSON doesn't look like a Bambu project config).
+function Update-PurgeMatrixInConfigText([string]$JsonText, [hashtable]$NameByHex) {
+    try {
+        $data = $JsonText | ConvertFrom-Json -ErrorAction Stop
+    } catch { return $null }
+    $propNames = @($data.PSObject.Properties.Name)
+    if ($propNames -notcontains 'filament_colour' -or $propNames -notcontains 'flush_volumes_matrix') { return $null }
+
+    $colors = @($data.filament_colour)
+    $matrix = @($data.flush_volumes_matrix)
+    $n = $colors.Count
+    if ($n -eq 0 -or $matrix.Count -ne ($n * $n)) { return $null }
+
+    $names = @()
+    foreach ($hex in $colors) {
+        $clean = ([string]$hex).ToUpper() -replace '^(#[0-9A-F]{6})[0-9A-F]{0,2}$', '$1'
+        $clean7 = if ($clean.Length -ge 7) { $clean.Substring(0,7) } else { $clean }
+        if ($NameByHex.ContainsKey($clean7)) { $names += $NameByHex[$clean7] }
+        elseif ($script:HexToName.ContainsKey($clean7)) { $names += $script:HexToName[$clean7] }
+        else { $names += $null }
+    }
+
+    $changed = $false
+    for ($i = 0; $i -lt $n; $i++) {
+        for ($j = 0; $j -lt $n; $j++) {
+            if ($i -eq $j) { continue }
+            $tunedVol = Get-PurgeTunedVolume $names[$i] $names[$j]
+            if ($null -ne $tunedVol) {
+                $idx = $i * $n + $j
+                if ("$($matrix[$idx])" -ne $tunedVol) { $matrix[$idx] = $tunedVol; $changed = $true }
+            }
+        }
+    }
+    if (-not $changed) { return $null }
+
+    $data.flush_volumes_matrix = $matrix
+    return ($data | ConvertTo-Json -Depth 20 -Compress:$false)
+}
+
+# Color-only enqueue â€” saves current color selections to the .3mf files, no other tasks run
 function Enqueue-ColorOnlyJob($pJob, $gpJob) {
     if ($pJob.IsQueued -or $pJob.IsDone) { return }
     $pJob.ColorOnlyBypass    = $true
@@ -1074,7 +1143,7 @@ function Enqueue-ColorOnlyJob($pJob, $gpJob) {
     $script:processQueue.Enqueue(@{ PJob = $pJob; GpJob = $gpJob; SliceOnly = $false })
 }
 
-# Slice-only enqueue — bypasses color matching and rename-confirm checks (used by Editing mode)
+# Slice-only enqueue â€” bypasses color matching and rename-confirm checks (used by Editing mode)
 function Enqueue-SliceOnlyJob($pJob, $gpJob) {
     if ($pJob.IsQueued -or $pJob.IsDone) { return }
     $pJob.SliceOnlyBypass    = $true
@@ -1123,6 +1192,7 @@ function Start-NextProcess {
     # Apply color substitutions to extracted temp files
     $allTextFiles = Get-ChildItem -Path $pJob.TempWork -Recurse -File | Where-Object { $_.Name -match '\.(xml|model|config|json)$' }
     $modifiedFiles = New-Object System.Collections.ArrayList
+    $nameByHex = Get-PurgeNameByHexMap $pJob.UISlots
 
     foreach ($file in $allTextFiles) {
         $content = [System.IO.File]::ReadAllText($file.FullName, [System.Text.Encoding]::UTF8)
@@ -1139,13 +1209,17 @@ function Start-NextProcess {
                 if ($newHex7 -ne $oldHex7 -and $content -match "(?i)$oldHex7") { $content = $content -ireplace [regex]::Escape($oldHex7), $newHex7; $modified = $true }
             }
         }
+        if ($file.Name -ieq 'project_settings.config') {
+            $tunedJson = Update-PurgeMatrixInConfigText $content $nameByHex
+            if ($null -ne $tunedJson) { $content = $tunedJson; $modified = $true }
+        }
         if ($modified) {
             [System.IO.File]::WriteAllText($file.FullName, $content, (New-Object System.Text.UTF8Encoding($false)))
             $modifiedFiles.Add($file) | Out-Null
         }
     }
 
-    # RenameOnlyBypass: user confirmed rename despite unmatched colors — skip all heavy tasks
+    # RenameOnlyBypass: user confirmed rename despite unmatched colors â€” skip all heavy tasks
     if ($pJob.ColorOnlyBypass) {
         $doRename = $false; $doMerge = $false; $doSlice = $false; $doExtract = $false; $doImage = $false; $doLogs = $false; $doBOD = $false; $doPrintQ = $false
         $pJob.ColorOnlyBypass = $false
@@ -1161,17 +1235,17 @@ function Start-NextProcess {
                 $colorSubMap[$old7] = @{ Old7 = $old7; Old9 = $old9; New7 = $new7; New9 = $new9 }
             }
         }
-        Invoke-ColorPatchAllFiles $pJob.FolderPath $colorSubMap $pJob.AnchorFile.FullName
+        Invoke-ColorPatchAllFiles $pJob.FolderPath $colorSubMap $pJob.AnchorFile.FullName $nameByHex
     } elseif ($pJob.RenameOnlyBypass) {
         $doRename = $true; $doMerge = $false; $doSlice = $false; $doExtract = $false; $doImage = $false; $doLogs = $false; $doBOD = $false; $doPrintQ = $false
         $pJob.RenameOnlyBypass = $false
     } elseif ($pJob.SliceOnlyBypass) {
-        # Editing mode slice-only — no rename, no merge, just slice using the current anchor
+        # Editing mode slice-only â€” no rename, no merge, just slice using the current anchor
         $doRename = $false; $doMerge = $false; $doSlice = $true; $doExtract = $false; $doImage = $false; $doLogs = $false; $doBOD = $false; $doPrintQ = $false
         $pJob.SliceOnlyBypass = $false
         $pJob.ProcessedAnchorPath = $pJob.AnchorFile.FullName
     } elseif ([bool]$pJob.ChkColors.IsChecked -and -not ([bool]$pJob.ChkRename.IsChecked -or [bool]$pJob.ChkMerge.IsChecked -or [bool]$pJob.ChkSlice.IsChecked -or [bool]$pJob.ChkExtract.IsChecked -or [bool]$pJob.ChkImage.IsChecked -or [bool]$pJob.ChkLogs.IsChecked -or [bool]$pJob.ChkBOD.IsChecked -or [bool]$pJob.ChkPrintQ.IsChecked)) {
-        # Save Colors only — no heavy tasks
+        # Save Colors only â€” no heavy tasks
         $doRename = $false; $doMerge = $false; $doSlice = $false; $doExtract = $false; $doImage = $false; $doLogs = $false; $doBOD = $false; $doPrintQ = $false
         $pJob.ProcessedAnchorPath = $pJob.AnchorFile.FullName
         # Build sub map and patch all other .3mf files in the folder
@@ -1185,7 +1259,7 @@ function Start-NextProcess {
                 $colorSubMap[$old7] = @{ Old7 = $old7; Old9 = $old9; New7 = $new7; New9 = $new9 }
             }
         }
-        Invoke-ColorPatchAllFiles $pJob.FolderPath $colorSubMap $pJob.AnchorFile.FullName
+        Invoke-ColorPatchAllFiles $pJob.FolderPath $colorSubMap $pJob.AnchorFile.FullName $nameByHex
     } else {
         $doRename  = [bool]$pJob.ChkRename.IsChecked
         $doMerge   = [bool]$pJob.ChkMerge.IsChecked
@@ -1358,7 +1432,9 @@ function Start-NextProcess {
 
     $dir        = $pJob.FolderPath
     $statusFile = Join-Path $dir "AsyncWorker_Status.txt"
-    $basePrefix = if ($baseName.ToLower().EndsWith("full")) { $baseName.Substring(0, $baseName.Length - 4) } else { $baseName + "_" }
+    $basePrefix = if ($baseName.ToLower().EndsWith("full")) { $baseName.Substring(0, $baseName.Length - 4) }
+                  elseif ($baseName -match '(?i)_Final$') { $baseName -replace '(?i)_Final$', '_' }
+                  else { $baseName + "_" }
 
     $anchorPath    = $pJob.ProcessedAnchorPath
     $nestPath      = Join-Path $dir "$($basePrefix)Nest.3mf"
@@ -1393,21 +1469,43 @@ function Start-NextProcess {
     }
 
     if ($doBOD) {
-        # Full.3mf path: after a merge it is $baseName.3mf; if no merge was done this run it already exists
-        $bodFullPath = Join-Path $dir "$baseName.3mf"
-        [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value 'CREATING BOD...' -Force")
+        # Full.3mf path: after a merge it is $baseName.3mf (only meaningful when the anchor is a merged "...Full" design --
+        # for Final-only designs $baseName already ends in "_Final" and this path just coincides with $bodFinalPath)
+        $bodNestPath  = Join-Path $dir "$($basePrefix)Nest.3mf"
+        $bodFullPath  = Join-Path $dir "$baseName.3mf"
         $bodFinalPath = Join-Path $dir "$($basePrefix)Final.3mf"
-        [void]$sb.AppendLine("`$bodFullPath  = `"$bodFullPath`"")
-        [void]$sb.AppendLine("`$bodFinalPath = `"$bodFinalPath`"")
-        [void]$sb.AppendLine("if (-not (Test-Path `$bodFullPath) -and -not (Test-Path `$bodFinalPath)) { Write-Host '[BOD] Neither Full.3mf nor Final.3mf found - skipping BOD.' -ForegroundColor Yellow }")
+        $bodIsFullDesign = $baseName.ToLower().EndsWith("full")
+        [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value 'CREATING BOD...' -Force")
+        [void]$sb.AppendLine("`$bodNestPath     = `"$bodNestPath`"")
+        [void]$sb.AppendLine("`$bodFullPath     = `"$bodFullPath`"")
+        [void]$sb.AppendLine("`$bodFinalPath    = `"$bodFinalPath`"")
+        [void]$sb.AppendLine("`$bodIsFullDesign = `$$bodIsFullDesign")
+        [void]$sb.AppendLine("`$bodHasNest  = Test-Path `$bodNestPath")
+        [void]$sb.AppendLine("`$bodHasFull  = `$bodIsFullDesign -and (Test-Path `$bodFullPath)")
+        [void]$sb.AppendLine("`$bodHasFinal = Test-Path `$bodFinalPath")
+        [void]$sb.AppendLine("if (-not `$bodHasFull -and -not `$bodHasFinal) { Write-Host '[BOD] Neither Full.3mf nor Final.3mf found - skipping BOD.' -ForegroundColor Yellow }")
         [void]$sb.AppendLine("else {")
-        [void]$sb.AppendLine("    `$bodMode   = if (Test-Path `$bodFullPath) { 'Full' } else { 'Grid' }")
-        [void]$sb.AppendLine("    `$bodSource = if (`$bodMode -eq 'Full') { `$bodFullPath } else { `$bodFinalPath }")
+        # Mode/count selection:
+        #   Nest + Full        -> merged design; keep the 7 pairs closest to plate centre
+        #   Full + Final (no Nest) -> Full.3mf was never merged (no Nest = no merge ever happened),
+        #                             so its build items are lone objects; keep the 15 closest to centre
+        #   Final only         -> single-object design; build a 15-copy grid (Grid mode)
+        [void]$sb.AppendLine("    `$bodPairCount = 5")
+        [void]$sb.AppendLine("    if (`$bodHasNest -and `$bodHasFull) {")
+        [void]$sb.AppendLine("        `$bodMode = 'Full'; `$bodPairCount = 7; `$bodSource = `$bodFullPath")
+        [void]$sb.AppendLine("        Write-Host '[BOD] Nest + Full found - merged design, keeping 7 pairs closest to plate centre.' -ForegroundColor Cyan")
+        [void]$sb.AppendLine("    } elseif (`$bodHasFull -and `$bodHasFinal) {")
+        [void]$sb.AppendLine("        `$bodMode = 'Full'; `$bodPairCount = 15; `$bodSource = `$bodFullPath")
+        [void]$sb.AppendLine("        Write-Host '[BOD] Full + Final found, no Nest - unmerged design, keeping 15 lone objects closest to plate centre.' -ForegroundColor Cyan")
+        [void]$sb.AppendLine("    } else {")
+        [void]$sb.AppendLine("        `$bodMode = 'Grid'; `$bodSource = `$bodFinalPath")
+        [void]$sb.AppendLine("        Write-Host '[BOD] Final only - single-object design, building a 15-copy grid.' -ForegroundColor Cyan")
+        [void]$sb.AppendLine("    }")
         [void]$sb.AppendLine("    Write-Host `"[BOD] Mode: `$bodMode  Source: `$(Split-Path `$bodSource -Leaf)`" -ForegroundColor Cyan")
         [void]$sb.AppendLine("    `$bodDate = Get-Date -Format 'MMMM d'")
         [void]$sb.AppendLine("    `$bodFolder = Join-Path `"$bodQueueBase`" `$bodDate")
         [void]$sb.AppendLine("    New-Item -ItemType Directory -Path `$bodFolder -Force | Out-Null")
-        [void]$sb.AppendLine("    & `"$scriptDir\create_bod_worker.ps1`" -InputPath `$bodSource -OutputPath `"$bodTempPath`" -Mode `$bodMode")
+        [void]$sb.AppendLine("    & `"$scriptDir\create_bod_worker.ps1`" -InputPath `$bodSource -OutputPath `"$bodTempPath`" -Mode `$bodMode -PairCount `$bodPairCount")
         [void]$sb.AppendLine("    if (Test-Path `"$bodTempPath`") {")
         [void]$sb.AppendLine("        Set-Content -Path `"$statusFile`" -Value 'SLICING BOD... 0%' -Force")
         [void]$sb.AppendLine("        & `"$scriptDir\Slice_worker.ps1`" -InputPath `"$bodTempPath`" -StatusFile `"$statusFile`"")
@@ -1415,8 +1513,8 @@ function Start-NextProcess {
         [void]$sb.AppendLine("            `$bodDest = Join-Path `$bodFolder `"$($basePrefix)BOD.gcode.3mf`"")
         [void]$sb.AppendLine("            Move-Item `"$bodGcodeTemp`" `$bodDest -Force")
         [void]$sb.AppendLine("            Write-Host `"[BOD] Exported to: `$bodDest`" -ForegroundColor Green")
-        [void]$sb.AppendLine("        } else { Write-Host '[BOD] Slice produced no gcode output.' -ForegroundColor Yellow }")
-        [void]$sb.AppendLine("        Remove-Item `"$bodTempPath`" -Force -ErrorAction SilentlyContinue")
+        [void]$sb.AppendLine("            Remove-Item `"$bodTempPath`" -Force -ErrorAction SilentlyContinue")
+        [void]$sb.AppendLine("        } else { Write-Host '[BOD] Slice produced no gcode output - keeping BOD.3mf for inspection.' -ForegroundColor Yellow }")
         [void]$sb.AppendLine("    } else { Write-Host '[BOD] create_bod_worker produced no output.' -ForegroundColor Yellow }")
         [void]$sb.AppendLine("}")
     }
@@ -1684,7 +1782,7 @@ function Set-GlobalMode([string]$mode) {
     if ($null -ne $scrollViewer)              { $scrollViewer.Visibility              = if ($isLibraries) { "Collapsed" } else { "Visible" } }
     if ($null -ne $script:LibrariesPanel)     { $script:LibrariesPanel.Visibility     = if ($isLibraries) { "Visible"   } else { "Collapsed" } }
     if ($isLibraries) {
-        # Update top-bar button styles then return — no card panels to iterate
+        # Update top-bar button styles then return â€” no card panels to iterate
         if ($null -ne $script:BtnModeFilePr) {
             $activeStyle   = @{ bg = "#3A5080"; fg = "#FFFFFF"; border = "#5A78C4" }
             $inactiveStyle = @{ bg = "#252630"; fg = "#7A7D90"; border = "#3A3D50" }
@@ -1854,7 +1952,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         }
 
         # plate_N.json contains exactly which filament slots are used on each plate
-        # (filament_ids is 0-based). Use this when available — it's more precise than
+        # (filament_ids is 0-based). Use this when available â€” it's more precise than
         # scanning the whole model, and correctly excludes slots only used on other plates.
         $plateSlots = New-Object System.Collections.Generic.HashSet[string]
         $metaDir = Join-Path $colorWorkDir "Metadata"
@@ -1870,10 +1968,10 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         }
 
         if ($plateSlots.Count -gt 0) {
-            # Plate data found — use it directly; it already represents only what's on the plates
+            # Plate data found â€” use it directly; it already represents only what's on the plates
             $UsedSlots = $plateSlots
         } else {
-            # No plate JSON — use build item positions to find on-plate objects, then read their extruders.
+            # No plate JSON â€” use build item positions to find on-plate objects, then read their extruders.
             # Bambu Studio stores off-plate objects at negative X; on-plate objects have positive X and Y
             # within reasonable bed bounds (up to ~450 mm covers all current Bambu models).
             $onPlateIds = New-Object System.Collections.Generic.HashSet[string]
@@ -1957,7 +2055,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         _GpJob = $gpJob
     }
 
-    # ── Outer row border (the RowPanel equivalent) ───────────────────────────
+    # â”€â”€ Outer row border (the RowPanel equivalent) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $pBorder = New-Object System.Windows.Controls.Border
     $pBorder.Background = Get-WpfColor "#1A1C22"; $pBorder.BorderBrush = Get-WpfColor "#2A2C35"
     $pBorder.BorderThickness = New-Object System.Windows.Thickness(1)
@@ -1972,7 +2070,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=(New-Object System.Windows.GridLength(560))}))
     $pBorder.Child = $pGrid
 
-# ── LEFT COLUMN: Card panel + Pick panel ────────────────────────
+# â”€â”€ LEFT COLUMN: Card panel + Pick panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $leftGrid = New-Object System.Windows.Controls.Grid
     $leftGrid.VerticalAlignment = "Top"
     $leftGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::Auto}))
@@ -2034,7 +2132,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $pJob.CustomImagePath = $anchorFile.FullName
         $pbModel.Source = Load-WpfImage $anchorFile.FullName
     } else {
-        $pJob.CustomImagePath = $null  # STL or unknown — no preview available
+        $pJob.CustomImagePath = $null  # STL or unknown â€” no preview available
     }
 
     # (PbPlateFinished defined below as a full-width overlay on leftGrid)
@@ -2129,7 +2227,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $colorsOverlayStack.VerticalAlignment = "Center"
     $colorsOverlayStack.Margin = New-Object System.Windows.Thickness(0, 0, 10, 0)
 
-    # Scale swatch size and spacing to fit 5–8 color slots inside the 438px card
+    # Scale swatch size and spacing to fit 5â€“8 color slots inside the 438px card
     $slotCount    = $activeSlots.Count
     $swatchSize   = if ($slotCount -le 4) { 52 } elseif ($slotCount -le 5) { 44 } elseif ($slotCount -le 6) { 38 } else { 32 }
     $rowMarginBtm = if ($slotCount -le 4) { 15 } elseif ($slotCount -le 5) { 10 } elseif ($slotCount -le 6) { 8  } else { 6  }
@@ -2159,7 +2257,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $colorCollection = New-Object System.Collections.ObjectModel.ObservableCollection[string]
         foreach ($k in $allColorKeys) { $colorCollection.Add($k) | Out-Null }
         $combo.ItemsSource = $colorCollection
-        # CollectionView filter — never touch the underlying collection, just swap predicates
+        # CollectionView filter â€” never touch the underlying collection, just swap predicates
         $comboView = [System.Windows.Data.CollectionViewSource]::GetDefaultView($colorCollection)
         if ($slotData.Name) { $combo.Text = $slotData.Name } else { $combo.Text = "Select Color..." }
 
@@ -2224,12 +2322,12 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
                     $accepted = if ($s.SelectedItem -ne $null) { $s.SelectedItem.ToString() } else { $s.Items[0].ToString() }
                     $data.Filtering = $true
                     $s.IsDropDownOpen = $false
-                    $data.ComboView.Filter = $null   # Clear filter — full list visible next open
+                    $data.ComboView.Filter = $null   # Clear filter â€” full list visible next open
                     $data.TypedText = $accepted
                     $data.NeedsFilter = $false
                     $data.Confirmed = $true           # Mark as confirmed so next keypress selects-all
                     $data.Filtering = $false          # Release BEFORE setting Text so TextChanged runs
-                    $s.Text = $accepted               # TextChanged fires → updates status/swatch/validate
+                    $s.Text = $accepted               # TextChanged fires â†’ updates status/swatch/validate
                     $tb = $s.Template.FindName("PART_EditableTextBox", $s)
                     if ($tb -ne $null) { $tb.SelectAll() }  # Select all so next search replaces cleanly
                     $e.Handled = $true
@@ -2243,7 +2341,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
                     $data.NeedsFilter = $false
                     $data.Confirmed = $true
                     $data.Filtering = $false          # Release BEFORE restoring text
-                    $s.Text = $data.TypedText         # TextChanged fires → updates status
+                    $s.Text = $data.TypedText         # TextChanged fires â†’ updates status
                     $tb = $s.Template.FindName("PART_EditableTextBox", $s)
                     if ($tb -ne $null) { $tb.SelectAll() }
                     $e.Handled = $true
@@ -2257,7 +2355,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             $data = $s.Tag
             if ($data.Filtering) { return }
             $data.Filtering = $true
-            $data.ComboView.Filter = $null   # Just clear the predicate — collection itself never changes
+            $data.ComboView.Filter = $null   # Just clear the predicate â€” collection itself never changes
             if ($script:LibraryColors.Contains($s.Text)) { $data.TypedText = $s.Text; $data.Confirmed = $true }
             $data.Filtering = $false
             # TextChanged already updated status when the item text was set
@@ -2342,7 +2440,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pJob.CardStatusLabel    = $cardStatusLbl
     $pJob.CardProgressBar    = $cardProgressBar
 
-    # Review-mode plate overlay — covers the full card area; shown only in Review mode
+    # Review-mode plate overlay â€” covers the full card area; shown only in Review mode
     $reviewCardOverlay = New-Object System.Windows.Controls.Image
     $reviewCardOverlay.Stretch = "Uniform"; $reviewCardOverlay.Visibility = "Collapsed"
     $reviewCardOverlay.Cursor = [System.Windows.Input.Cursors]::Hand
@@ -2519,7 +2617,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     }
     [System.Windows.Controls.Grid]::SetColumn($pickGrid, 1); $leftGrid.Children.Add($pickGrid) | Out-Null
 
-    # Finished image overlay — spans both card and pick columns, shown after processing completes
+    # Finished image overlay â€” spans both card and pick columns, shown after processing completes
     $finishedOverlay = New-Object System.Windows.Controls.Border
     $finishedOverlay.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(230, 16, 17, 23))
     $finishedOverlay.Visibility = "Collapsed"
@@ -2545,7 +2643,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pJob.PbPlateFinished = $pbPlateFinished
     $pJob.FinishedOverlay  = $finishedOverlay
 
-    # ── RIGHT: Controls column ───────────────────────────────────────────────
+    # â”€â”€ RIGHT: Controls column â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $rightStack = New-Object System.Windows.Controls.StackPanel
     $rightStack.Orientation = "Vertical"; $rightStack.Margin = New-Object System.Windows.Thickness(15,0,0,0)
     [System.Windows.Controls.Grid]::SetColumn($rightStack, 1); $pGrid.Children.Add($rightStack) | Out-Null
@@ -2595,7 +2693,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnHdrStack.Children.Add($btnRemoveP) | Out-Null
     $pJob.BtnRemoveP = $btnRemoveP
 
-    # Keep button (Review mode only — marks design as checked, green border)
+    # Keep button (Review mode only â€” marks design as checked, green border)
     $btnKeepReview = New-Object System.Windows.Controls.Button
     $btnKeepReview.Content = "Keep"; $btnKeepReview.Background = Get-WpfColor "#2E7D32"; $btnKeepReview.Foreground = Get-WpfColor "#FFFFFF"
     $btnKeepReview.Width = 70; $btnKeepReview.Height = 25; $btnKeepReview.BorderThickness = 0
@@ -2612,7 +2710,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnHdrStack.Children.Add($btnKeepReview) | Out-Null
     $pJob.BtnKeepReview = $btnKeepReview
 
-    # Revert button (Review mode only — runs the revert bat, marks red)
+    # Revert button (Review mode only â€” runs the revert bat, marks red)
     $btnRevertReview = New-Object System.Windows.Controls.Button
     $btnRevertReview.Content = "Revert"; $btnRevertReview.Background = Get-WpfColor "#D95F5F"; $btnRevertReview.Foreground = Get-WpfColor "#FFFFFF"
     $btnRevertReview.Width = 70; $btnRevertReview.Height = 25; $btnRevertReview.BorderThickness = 0
@@ -2648,7 +2746,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $headerStack.Children.Add($btnHdrStack) | Out-Null
     $rightStack.Children.Add($headerStack) | Out-Null
 
-    # ── Tab content panels (visibility controlled globally from the top-bar buttons)
+    # â”€â”€ Tab content panels (visibility controlled globally from the top-bar buttons)
     $filePrepPanel = New-Object System.Windows.Controls.StackPanel
     $filePrepPanel.Visibility = if ($script:GlobalMode -eq "Editing") { "Collapsed" } else { "Visible" }
     $rightStack.Children.Add($filePrepPanel) | Out-Null
@@ -2701,7 +2799,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $tasksRow2.Children.Add($btnSelAll) | Out-Null; $tasksRow2.Children.Add($btnDeselAll) | Out-Null; $tasksRow2.Children.Add($btnRevertMerge) | Out-Null
     $tasksOuter.Children.Add($tasksRow2) | Out-Null
 
-    # SKU row — locked by default; Edit button unlocks for manual entry
+    # SKU row â€” locked by default; Edit button unlocks for manual entry
     $tasksRow3 = New-Object System.Windows.Controls.StackPanel
     $tasksRow3.Orientation = "Horizontal"; $tasksRow3.Margin = New-Object System.Windows.Thickness(0,8,0,0)
 
@@ -2754,7 +2852,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $siblingSkuInfo = Find-SiblingSkU $pJob.FolderPath $skuDesignName
     }
 
-    # Sync SKU button — visible only when a sibling SKU is available and this card has none
+    # Sync SKU button â€” visible only when a sibling SKU is available and this card has none
     $btnSyncSku = New-Object System.Windows.Controls.Button
     $btnSyncSku.Content    = if ($null -ne $siblingSkuInfo) { "Sync from $($siblingSkuInfo.Printer)" } else { "Sync SKU" }
     $btnSyncSku.Height     = 26; $btnSyncSku.Padding = New-Object System.Windows.Thickness(8,0,8,0)
@@ -2763,21 +2861,21 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnSyncSku.Margin     = New-Object System.Windows.Thickness(0,0,4,0)
     $btnSyncSku.Visibility = if ($null -ne $siblingSkuInfo) { "Visible" } else { "Collapsed" }
 
-    # Edit button — shown when locked; unlocks the box for manual entry
+    # Edit button â€” shown when locked; unlocks the box for manual entry
     $btnEditSku = New-Object System.Windows.Controls.Button
     $btnEditSku.Content = "Edit"; $btnEditSku.Height = 26; $btnEditSku.Width = 46
     $btnEditSku.Background = Get-WpfColor "#3A3C45"; $btnEditSku.Foreground = Get-WpfColor "#CCCCCC"
     $btnEditSku.BorderThickness = 0; $btnEditSku.Cursor = [System.Windows.Input.Cursors]::Hand
     $btnEditSku.Margin = New-Object System.Windows.Thickness(0,0,4,0)
 
-    # Save button — hidden until editing; commits value and re-locks
+    # Save button â€” hidden until editing; commits value and re-locks
     $btnSaveSku = New-Object System.Windows.Controls.Button
     $btnSaveSku.Content = "Save"; $btnSaveSku.Height = 26; $btnSaveSku.Width = 46
     $btnSaveSku.Background = Get-WpfColor "#2E5A42"; $btnSaveSku.Foreground = Get-WpfColor "#FFFFFF"
     $btnSaveSku.BorderThickness = 0; $btnSaveSku.Cursor = [System.Windows.Input.Cursors]::Hand
     $btnSaveSku.Visibility = "Collapsed"; $btnSaveSku.Margin = New-Object System.Windows.Thickness(0,0,4,0)
 
-    # Cancel button — hidden until editing; restores original value and re-locks
+    # Cancel button â€” hidden until editing; restores original value and re-locks
     $btnCancelSku = New-Object System.Windows.Controls.Button
     $btnCancelSku.Content = "Cancel"; $btnCancelSku.Height = 26; $btnCancelSku.Width = 56
     $btnCancelSku.Background = Get-WpfColor "#3A2020"; $btnCancelSku.Foreground = Get-WpfColor "#CCCCCC"
@@ -2933,7 +3031,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $t = $this.Tag
         $t.Rename.IsChecked = $true; $t.Slice.IsChecked = $true; $t.Extract.IsChecked = $true; $t.Image.IsChecked = $true
         if ($t.Merge.IsEnabled) { $t.Merge.IsChecked = $true }
-        # BOD is intentionally left at its current value — it defaults off and is a special-purpose task
+        # BOD is intentionally left at its current value â€” it defaults off and is a special-purpose task
     })
 
     $btnDeselAll.Tag = $tasksData
@@ -3030,7 +3128,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $editBox.Child = $editStack; $filePrepPanel.Children.Add($editBox) | Out-Null
     $pJob.EditBox = $editBox
 
-    # Review panel — shown only in Review mode (lazy-populated on first toggle)
+    # Review panel â€” shown only in Review mode (lazy-populated on first toggle)
     $reviewPanelBorder = New-Object System.Windows.Controls.Border
     $reviewPanelBorder.Background = Get-WpfColor "#1C1D23"; $reviewPanelBorder.BorderBrush = Get-WpfColor "#2A2C35"
     $reviewPanelBorder.BorderThickness = New-Object System.Windows.Thickness(1)
@@ -3098,7 +3196,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $filePrepPanel.Children.Add($applyRow) | Out-Null
     $pJob.ApplyRow = $applyRow
 
-    # Review status label — shown at bottom in Review mode after Keep/Revert
+    # Review status label â€” shown at bottom in Review mode after Keep/Revert
     $reviewStatusLabel = New-Object System.Windows.Controls.TextBlock
     $reviewStatusLabel.FontSize = 16; $reviewStatusLabel.FontWeight = [System.Windows.FontWeights]::Bold
     $reviewStatusLabel.HorizontalAlignment = "Center"; $reviewStatusLabel.TextAlignment = "Center"
@@ -3107,12 +3205,12 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $rightStack.Children.Add($reviewStatusLabel) | Out-Null
     $pJob.ReviewStatusLabel = $reviewStatusLabel
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # EDITING tab content — sub-tab strip for file-edit operations.
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    # EDITING tab content â€” sub-tab strip for file-edit operations.
     # Add new sub-tab buttons/panels here as more editing tools are introduced.
-    # ══════════════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-    # ── Per-card editing queue row ─────────────────────────────────────────────
+    # â”€â”€ Per-card editing queue row â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $edQueueRow = New-Object System.Windows.Controls.Border
     $edQueueRow.Background = Get-WpfColor "#1A1C24"
     $edQueueRow.BorderBrush = Get-WpfColor "#2A2C38"; $edQueueRow.BorderThickness = New-Object System.Windows.Thickness(0,0,0,1)
@@ -3159,7 +3257,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $feContent.Margin = New-Object System.Windows.Thickness(0,0,0,4)
     $editingPanel.Children.Add($feContent) | Out-Null
 
-    # ── Re-Nest sub-tab button ────────────────────────────────────────────────
+    # â”€â”€ Re-Nest sub-tab button â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $feTabRenest = New-Object System.Windows.Controls.Button
     $feTabRenest.Content = "Re-Nest"; $feTabRenest.FontSize = 11
     $feTabRenest.FontWeight = [System.Windows.FontWeights]::Bold
@@ -3171,7 +3269,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $feTabRenest.Cursor = [System.Windows.Input.Cursors]::Hand; $feTabRenest.IsEnabled = $false
     $feTabStrip.Children.Add($feTabRenest) | Out-Null
 
-    # ── Re-Nest panel content ─────────────────────────────────────────────────
+    # â”€â”€ Re-Nest panel content â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $panelRenest = New-Object System.Windows.Controls.StackPanel
 
     $lblRenestDesc = New-Object System.Windows.Controls.TextBlock
@@ -3180,7 +3278,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $lblRenestDesc.TextWrapping = "Wrap"; $lblRenestDesc.Margin = New-Object System.Windows.Thickness(0,0,0,8)
     $panelRenest.Children.Add($lblRenestDesc) | Out-Null
 
-    # ── Info grid (Final / Source / Output) ───────────────────────────────────
+    # â”€â”€ Info grid (Final / Source / Output) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $infoGrid = New-Object System.Windows.Controls.Grid
     $igC1 = New-Object System.Windows.Controls.ColumnDefinition; $igC1.Width = "Auto"
     $igC2 = New-Object System.Windows.Controls.ColumnDefinition; $igC2.Width = "*"
@@ -3207,7 +3305,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     }
     $panelRenest.Children.Add($infoGrid) | Out-Null
 
-    # ── Run button row ────────────────────────────────────────────────────────
+    # â”€â”€ Run button row â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $renestRow = New-Object System.Windows.Controls.Grid
     $feC1 = New-Object System.Windows.Controls.ColumnDefinition; $feC1.Width = "Auto"
     $feC2 = New-Object System.Windows.Controls.ColumnDefinition; $feC2.Width = "*"
@@ -3228,7 +3326,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $renestRow.Children.Add($lblRenestStatus) | Out-Null
     $panelRenest.Children.Add($renestRow) | Out-Null
 
-    # ── Review panel (hidden until success) ───────────────────────────────────
+    # â”€â”€ Review panel (hidden until success) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $borderReview = New-Object System.Windows.Controls.Border
     $borderReview.Background = Get-WpfColor "#13151C"
     $borderReview.BorderBrush = Get-WpfColor "#3A3C4A"; $borderReview.BorderThickness = 1
@@ -3282,7 +3380,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
     $feContent.Child = $panelRenest
 
-    # ── Detect Final.3mf and sibling Source at build time ────────────────────
+    # â”€â”€ Detect Final.3mf and sibling Source at build time â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $feRenestFinal  = Get-ChildItem -Path $parentPath -Filter "*_Final.3mf" -File -ErrorAction SilentlyContinue | Select-Object -First 1
     $feRenestSource = $null
     if ($null -ne $feRenestFinal) {
@@ -3383,11 +3481,11 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             $mergeReverted = $false
 
             if ($srcBase -imatch '_Nest$') {
-                # ── Merged folder: source was Nest.3mf ──────────────────────────────
+                # â”€â”€ Merged folder: source was Nest.3mf â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                 # feRenestSource resolves to Nest.3mf when the folder is merged because
                 # it carries the individual-object transforms. The renested file now
                 # lives at Nest.3mf; we need to delete the stale Full.3mf and rename
-                # Nest → Full to restore a clean pre-merge state.
+                # Nest â†’ Full to restore a clean pre-merge state.
                 $corePrefix    = $srcBase -replace '(?i)_Nest$', ''  # e.g. X1C_Arthropleura
                 $staleFullPath = Join-Path $srcDir ($corePrefix + '_Full.3mf')
                 $staleFiles    = @(
@@ -3399,12 +3497,12 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
                 foreach ($s in $staleFiles) {
                     if (Test-Path -LiteralPath $s) { Remove-Item -LiteralPath $s -Force -ErrorAction SilentlyContinue }
                 }
-                # Rename the renested Nest.3mf → Full.3mf
+                # Rename the renested Nest.3mf â†’ Full.3mf
                 Rename-Item -LiteralPath $t.SourcePath -NewName ($corePrefix + '_Full.3mf') -Force
                 $mergeReverted = $true
 
             } elseif ($srcBase -imatch '_Full$') {
-                # ── Unmerged folder: source was Full.3mf ────────────────────────────
+                # â”€â”€ Unmerged folder: source was Full.3mf â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                 # A Nest.3mf shouldn't normally be here but handle it in case.
                 $corePrefix = $srcBase -replace '(?i)_Full$', ''
                 $nestFile   = Join-Path $srcDir ($corePrefix + '_Nest.3mf')
@@ -3498,7 +3596,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
     $pJob.BtnRunRenest = $btnRunRenest; $pJob.RenestStatusLbl = $lblRenestStatus
 
-    # ── Per-card Queue button handler ─────────────────────────────────────────
+    # â”€â”€ Per-card Queue button handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $btnEdQueue.Tag = @{ P = $pJob; G = $gpJob }
     $btnEdQueue.Add_Click({
         $t = $this.Tag
@@ -3506,8 +3604,8 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         if ($null -eq $script:editActiveJob) { Start-NextEditJob }
     }.GetNewClosure())
 
-    # ── Edit-mode overlays — always visible in Editing mode, show top_1.png from source/final ──
-    # Col 0 of leftGrid = "Nest Source" top_1.png  (static — never changes)
+    # â”€â”€ Edit-mode overlays â€” always visible in Editing mode, show top_1.png from source/final â”€â”€
+    # Col 0 of leftGrid = "Nest Source" top_1.png  (static â€” never changes)
     # Col 1 of leftGrid = "Final" top_1.png        (updated to "Re-Nest" after renesting)
     $ovInitVis = if ($script:GlobalMode -eq "Editing") { "Visible" } else { "Collapsed" }
     foreach ($ovSide in @(0, 1)) {
@@ -3663,7 +3761,7 @@ function Build-GpJob($gpPath, $parentDict) {
     $diGrand = if ($gpPath -notlike "ROOT_*") { [System.IO.DirectoryInfo]::new($gpPath) } else { $null }
     $gpName = if ($diGrand) { $diGrand.Name } else { "(No Parent Folder)" }
 
-    # ── Detect printer prefix ────────────────────────────────────────────────
+    # â”€â”€ Detect printer prefix â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Peel leading qualifier tokens (printer prefix + tags) from the GP folder
     # name; also search anchor file stems, and walk up to the great-grandparent.
     $gpDetectedPrefix = ""; $gpDetectedTag = ""; $gpNameForTheme = $gpName
@@ -3681,7 +3779,7 @@ function Build-GpJob($gpPath, $parentDict) {
         }
         $gpNameForTheme = $gpTokens -join '_'
 
-        # Prefix fallback 1 – anchor file stems
+        # Prefix fallback 1 â€“ anchor file stems
         if ($gpDetectedPrefix -eq "") {
             foreach ($pKey in $parentDict.Keys) {
                 $afParts = (($parentDict[$pKey]).BaseName -replace '(?i)_(Full|Final|Nest)$','') -split '_'
@@ -3690,14 +3788,14 @@ function Build-GpJob($gpPath, $parentDict) {
                 }
             }
         }
-        # Prefix fallback 2 – great-grandparent folder tokens
+        # Prefix fallback 2 â€“ great-grandparent folder tokens
         if ($gpDetectedPrefix -eq "" -and $diGrand -and $diGrand.Parent -and $diGrand.Parent.Parent) {
             foreach ($tok in ($diGrand.Parent.Name -split '_' | Where-Object { $_ -ne '' })) {
                 if ($script:PrinterPrefixes -icontains $tok) { $gpDetectedPrefix = $tok; break }
             }
         }
 
-        # ── Detect theme name ────────────────────────────────────────────────
+        # â”€â”€ Detect theme name â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # Try each source in priority order; stop at the first recognised match.
         # 1. GP folder (already peeled above)
         $detectedTheme = Find-ThemeMatch $gpNameForTheme
@@ -3746,7 +3844,7 @@ function Build-GpJob($gpPath, $parentDict) {
     $lblCurrentName.VerticalAlignment = "Center"; $lblCurrentName.Margin = New-Object System.Windows.Thickness(15,0,20,0)
     $headerStack.Children.Add($lblCurrentName) | Out-Null
 
-    # Renaming controls — hidden in Editing mode
+    # Renaming controls â€” hidden in Editing mode
     $renameGroup = New-Object System.Windows.Controls.StackPanel; $renameGroup.Orientation = "Horizontal"
     $renameGroup.VerticalAlignment = "Center"
     $renameGroup.Visibility = if ($script:GlobalMode -eq "Editing") { "Collapsed" } else { "Visible" }
@@ -3847,7 +3945,7 @@ function Build-GpJob($gpPath, $parentDict) {
     $gpRightBtnStack.Orientation = "Horizontal"; $gpRightBtnStack.HorizontalAlignment = "Right"
     $gpRightBtnStack.VerticalAlignment = "Center"; $gpRightBtnStack.Margin = New-Object System.Windows.Thickness(0,0,15,0)
 
-    # (Review Mode is now a global top-bar button — no per-group toggle needed)
+    # (Review Mode is now a global top-bar button â€” no per-group toggle needed)
 
     $btnCombineGp = New-Object System.Windows.Controls.Button
     $btnCombineGp.Content = "Copy TSV Data"; $btnCombineGp.Background = Get-WpfColor "#7B4FBF"; $btnCombineGp.Foreground = Get-WpfColor "#FFFFFF"
@@ -4266,7 +4364,7 @@ $script:_RenestTickSB = {
     if ($null -eq $t2 -or $null -eq $t2.Proc) { return }
     if (-not $t2.Proc.HasExited) { return }
 
-    # Process has finished — stop polling
+    # Process has finished â€” stop polling
     $t2.Timer.Stop()
     $script:_RenestActive = $null
 
@@ -4274,7 +4372,7 @@ $script:_RenestTickSB = {
     $t2.BtnRun.Content = "Run Re-Nest"; $t2.BtnRun.IsEnabled = $true
     $t2.BtnRun.Background = Get-WpfColor "#2E5A42"; $t2.BtnRun.Foreground = Get-WpfColor "#FFFFFF"
 
-    # Read exit code safely — Process.ExitCode can throw on some versions
+    # Read exit code safely â€” Process.ExitCode can throw on some versions
     $exitCode = -1
     try { $exitCode = [int]$t2.Proc.ExitCode } catch {}
 
@@ -4464,7 +4562,7 @@ $script:queueTimer.Add_Tick({
             $isSliceOnly = ($script:activeProcessJob.SliceOnly -eq $true)
 
             if ($isSliceOnly) {
-                # Editing-mode slice export finished — leave card reusable, don't touch FilePrepPanel state
+                # Editing-mode slice export finished â€” leave card reusable, don't touch FilePrepPanel state
                 $pJob.IsQueued = $false; $pJob.IsDone = $false
                 if ($null -ne $pJob.RenestStatusLbl) {
                     $pJob.RenestStatusLbl.Text = "Export GCode complete!"; $pJob.RenestStatusLbl.Foreground = Get-WpfColor "#4CAF72"
@@ -4475,7 +4573,7 @@ $script:queueTimer.Add_Tick({
                 if ($null -ne $pJob.BtnEdQueue) { $pJob.BtnEdQueue.IsEnabled = $true }
                 if ($null -ne $pJob.BtnRunRenest) { $pJob.BtnRunRenest.IsEnabled = $true }
             } else {
-                # Normal merge/process job finished — KEEP/REVERT state
+                # Normal merge/process job finished â€” KEEP/REVERT state
                 $pJob.IsDone = $true
                 $pJob.ChkRename.IsEnabled = $true; $pJob.ChkMerge.IsEnabled = $true; $pJob.ChkSlice.IsEnabled = $true
                 $pJob.ChkExtract.IsEnabled = $true; $pJob.ChkImage.IsEnabled = $true
@@ -4751,7 +4849,7 @@ $window.Add_Loaded({
     $script:queueTimer.Start()
 })
 
-# ── Import SKUs from CSV ──────────────────────────────────────────────────────
+# â”€â”€ Import SKUs from CSV â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 $btnImportSkus.Add_Click({
     # Open file picker
     $ofd = New-Object Microsoft.Win32.OpenFileDialog
@@ -4761,7 +4859,7 @@ $btnImportSkus.Add_Click({
     if ($ofd.ShowDialog() -ne $true) { return }
 
     try {
-        # Read CSV — optional header row "SKU", then one SKU value per line.
+        # Read CSV â€” optional header row "SKU", then one SKU value per line.
         # Accepts any format matching the shared SKU pattern (3+ non-whitespace chars).
         $csvLines    = Get-Content $ofd.FileName -ErrorAction Stop
         $skusFromCsv = [System.Collections.Generic.List[string]]::new()
@@ -4821,7 +4919,7 @@ $btnImportSkus.Add_Click({
             [System.Windows.MessageBoxImage]::Question)
         if ($result -ne [System.Windows.MessageBoxResult]::Yes) { return }
 
-        # Apply — bypass the lock, write to TSV, update the display box
+        # Apply â€” bypass the lock, write to TSV, update the display box
         $errors = 0
         for ($i = 0; $i -lt $assignCount; $i++) {
             $p   = $targetJobs[$i]
@@ -4861,10 +4959,10 @@ $window.Add_Closed({
     }
 })
 
-# ── Global workspace mode buttons (File Prep | Editing | Review) ─────────────
-# ════════════════════════════════════════════════════════════════════════════════
+# â”€â”€ Global workspace mode buttons (File Prep | Editing | Review) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  LIBRARIES PANEL
-# ════════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 function Save-FilamentLibrary {
     Write-Log "Save-FilamentLibrary: start ($($script:LibraryColors.Count) entries)"
     try {
@@ -4897,7 +4995,7 @@ function Save-FilamentLibrary {
 function Save-PurgeDictionary {
     Write-Log "Save-PurgeDictionary: start ($($script:PurgeDict.Count) entries)"
     try {
-        # Comma-delimited with a UTF-8 BOM — this is the format Excel expects for .csv;
+        # Comma-delimited with a UTF-8 BOM â€” this is the format Excel expects for .csv;
         # a tab-delimited file (even named .csv) gets crammed into a single column on open.
         $lines = [System.Collections.Generic.List[string]]::new()
         $lines.Add("Source_Filament,Target_Filament,Tuned,Tuned_Volume,Base Volume")
@@ -4922,7 +5020,7 @@ function Load-PurgeDictionary {
     if ($lines.Count -eq 0) { return }
 
     # Accept either delimiter on read (older/hand-edited copies may be tab-delimited) but
-    # always rewrite as comma-delimited — that's the format Excel expects for .csv files.
+    # always rewrite as comma-delimited â€” that's the format Excel expects for .csv files.
     $delim = if ($lines[0] -match "`t") { "`t" } else { "," }
     $header = $lines[0] -split $delim
     $colIndex = @{}
@@ -4973,7 +5071,7 @@ function Save-NamesLibrary {
         [void]$sb.AppendLine("# Dot-source this file from any worker script that needs these values:")
         [void]$sb.AppendLine("#   . (Join-Path `$PSScriptRoot `"..\libraries\NamesLibrary.ps1`")")
         [void]$sb.AppendLine("")
-        # Themes — wrap every 6 to match original style
+        # Themes â€” wrap every 6 to match original style
         [void]$sb.AppendLine("`$script:GpThemes = @(")
         $chunk = [System.Collections.Generic.List[string]]::new()
         foreach ($t in $script:GpThemes) {
@@ -5003,7 +5101,7 @@ function Save-NamesLibrary {
     } catch { return $false }
 }
 
-# ── Script-scope nav state (used by Set-NavSection after Build-LibrariesPanel returns) ──
+# â”€â”€ Script-scope nav state (used by Set-NavSection after Build-LibrariesPanel returns) â”€â”€
 $script:LibNavState  = @{ NavSecs = $null; NavBtns = $null }
 $script:TagEditState = @{ TagBox = $null; LblBox = $null; SelectedTag = ""; AddBtn = $null; DirtyTags = @{} }
 
@@ -5117,7 +5215,7 @@ function Rebuild-FilamentList($st) {
 function Rebuild-TagsList($stack) {
     # Remove all rows except the header (index 0)
     while ($stack.Children.Count -gt 1) { $stack.Children.RemoveAt(1) }
-    # Capture $script: variables as locals — $script: scope is NOT reliably accessible
+    # Capture $script: variables as locals â€” $script: scope is NOT reliably accessible
     # inside .GetNewClosure() closures running on the WPF dispatcher thread.
     $tes       = $script:TagEditState
     $tagLabels = $script:TagLabels
@@ -5133,7 +5231,7 @@ function Rebuild-TagsList($stack) {
         $tbLbl = New-Object System.Windows.Controls.TextBlock; $tbLbl.Text=$lbl; $tbLbl.Foreground=$fgLbl; $tbLbl.FontSize=12; $tbLbl.VerticalAlignment="Center"; [System.Windows.Controls.Grid]::SetColumn($tbLbl,1)
         $row.Children.Add($tbTag)|Out-Null; $row.Children.Add($tbLbl)|Out-Null
         $row.Cursor = [System.Windows.Input.Cursors]::Hand
-        # Capture loop variables and stack explicitly — never rely on $this.Tag inside closures
+        # Capture loop variables and stack explicitly â€” never rely on $this.Tag inside closures
         $capturedTag   = $tag
         $capturedStack = $stack
         $capturedRow   = $row
@@ -5145,7 +5243,7 @@ function Rebuild-TagsList($stack) {
         }.GetNewClosure())
         $row.Add_MouseLeftButtonDown({
             if ($tes.SelectedTag -eq $capturedTag) {
-                # Toggle off — clicking selected row again deselects it
+                # Toggle off â€” clicking selected row again deselects it
                 $capturedRow.Background = $null
                 $tes.SelectedTag = ""
                 if ($null -ne $tes.TagBox) { $tes.TagBox.Text = "" }
@@ -5174,7 +5272,7 @@ function Rebuild-TagsList($stack) {
     }
 }
 
-# ── Script-scope helpers for Naming Conventions closures ─────────────────────
+# â”€â”€ Script-scope helpers for Naming Conventions closures â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # These functions are called BY NAME from inside .GetNewClosure() closures, so
 # they execute in the main script's scope and can safely read/write $script: vars.
 function Set-GpThemes([string[]]$items)        { $script:GpThemes        = $items }
@@ -5230,7 +5328,7 @@ function Invoke-SaveTagsSection($stack) {
 }
 
 function Build-LibrariesPanel {
-    # ── Root panel: overlaps the ScrollViewer in Grid Row 1 ───────────────────
+    # â”€â”€ Root panel: overlaps the ScrollViewer in Grid Row 1 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $outerGrid = $window.Content
     $root = New-Object System.Windows.Controls.Grid
     $root.Background = Get-WpfColor "#0D0E10"
@@ -5241,7 +5339,7 @@ function Build-LibrariesPanel {
     $root.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = [System.Windows.GridLength]::new(170) })) | Out-Null
     $root.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition)) | Out-Null
 
-    # ── Left nav sidebar ──────────────────────────────────────────────────────
+    # â”€â”€ Left nav sidebar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $sidebar = New-Object System.Windows.Controls.Border
     $sidebar.Background = Get-WpfColor "#1C1D23"
     $sidebar.BorderBrush = Get-WpfColor "#2A2C38"; $sidebar.BorderThickness = New-Object System.Windows.Thickness(0,0,1,0)
@@ -5273,12 +5371,12 @@ function Build-LibrariesPanel {
     $sideStack.Children.Add($btnNavNaming)    | Out-Null
     $sideStack.Children.Add($btnNavPurge)     | Out-Null
 
-    # ── Content area ──────────────────────────────────────────────────────────
+    # â”€â”€ Content area â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $contentGrid = New-Object System.Windows.Controls.Grid
     [System.Windows.Controls.Grid]::SetColumn($contentGrid, 1)
     $root.Children.Add($contentGrid) | Out-Null
 
-    # Two overlapping section panels — show one at a time
+    # Two overlapping section panels â€” show one at a time
     $secFilaments = New-Object System.Windows.Controls.Grid; $secFilaments.Background = Get-WpfColor "#0D0E10"; $secFilaments.Visibility = "Visible"
     $secNaming    = New-Object System.Windows.Controls.Grid; $secNaming.Background    = Get-WpfColor "#0D0E10"; $secNaming.Visibility    = "Collapsed"
     $secPurge     = New-Object System.Windows.Controls.Grid; $secPurge.Background     = Get-WpfColor "#0D0E10"; $secPurge.Visibility     = "Collapsed"
@@ -5286,7 +5384,7 @@ function Build-LibrariesPanel {
     $contentGrid.Children.Add($secNaming)    | Out-Null
     $contentGrid.Children.Add($secPurge)     | Out-Null
 
-    # Nav button click logic — populate script-scope LibNavState so Set-NavSection works after this function returns
+    # Nav button click logic â€” populate script-scope LibNavState so Set-NavSection works after this function returns
     $navBtns = @{ Filaments=$btnNavFilaments; "Naming Conventions"=$btnNavNaming; "Purge Dictionary"=$btnNavPurge }
     $navSecs = @{ Filaments=$secFilaments;    "Naming Conventions"=$secNaming;    "Purge Dictionary"=$secPurge }
     $script:LibNavState.NavBtns = $navBtns
@@ -5296,13 +5394,13 @@ function Build-LibrariesPanel {
     $btnNavNaming.Add_Click({    Write-Log "btnNavNaming: clicked";    Set-NavSection "Naming Conventions" })
     $btnNavPurge.Add_Click({     Write-Log "btnNavPurge: clicked";     Set-NavSection "Purge Dictionary"   })
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     #  FILAMENTS SECTION
-    # ══════════════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     $secFilaments.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = [System.Windows.GridLength]::new(260) })) | Out-Null
     $secFilaments.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition)) | Out-Null
 
-    # ── Filament list (left) ──────────────────────────────────────────────────
+    # â”€â”€ Filament list (left) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $listBorder = New-Object System.Windows.Controls.Border
     $listBorder.BorderBrush = Get-WpfColor "#2A2C38"; $listBorder.BorderThickness = New-Object System.Windows.Thickness(0,0,1,0)
     [System.Windows.Controls.Grid]::SetColumn($listBorder, 0)
@@ -5332,7 +5430,7 @@ function Build-LibrariesPanel {
     $filamentStack = New-Object System.Windows.Controls.StackPanel
     $listScroll.Content = $filamentStack
 
-    # ── Edit panel (right) ────────────────────────────────────────────────────
+    # â”€â”€ Edit panel (right) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $editScroll = New-Object System.Windows.Controls.ScrollViewer
     $editScroll.VerticalScrollBarVisibility = "Auto"; $editScroll.HorizontalScrollBarVisibility = "Disabled"
     $editScroll.Padding = New-Object System.Windows.Thickness(20,16,20,20)
@@ -5363,7 +5461,7 @@ function Build-LibrariesPanel {
     $swatchBorder.Background = Get-WpfColor "#FF0000"; $swatchBorder.Margin = New-Object System.Windows.Thickness(0,0,0,14)
     $editStack.Children.Add($swatchBorder) | Out-Null
 
-    # Hue bar  ── rainbow gradient Canvas + indicator
+    # Hue bar  â”€â”€ rainbow gradient Canvas + indicator
     $hueLbl = New-Object System.Windows.Controls.TextBlock; $hueLbl.Text = "Hue"
     $hueLbl.Foreground = Get-WpfColor "#888A9A"; $hueLbl.FontSize = 11; $hueLbl.Margin = New-Object System.Windows.Thickness(0,0,0,4)
     $editStack.Children.Add($hueLbl) | Out-Null
@@ -5396,7 +5494,7 @@ function Build-LibrariesPanel {
     [System.Windows.Controls.Canvas]::SetTop($hueInd, 0)
     $hueCanvas.Children.Add($hueInd) | Out-Null
 
-    # Hue canvas needs to stretch — bind Width via SizeChanged and Loaded
+    # Hue canvas needs to stretch â€” bind Width via SizeChanged and Loaded
     $sizeHueRect = { if ($hueCanvas.ActualWidth -gt 0) { $hueRect.Width = $hueCanvas.ActualWidth } }.GetNewClosure()
     $hueCanvas.Add_SizeChanged($sizeHueRect)
     $hueCanvas.Add_Loaded($sizeHueRect)
@@ -5415,7 +5513,7 @@ function Build-LibrariesPanel {
     $svCanvas.Background = [System.Windows.Media.Brushes]::Transparent  # needed for hit-testing
     $svOuter.Child = $svCanvas
 
-    # Layer 1: horizontal white→hue gradient
+    # Layer 1: horizontal whiteâ†’hue gradient
     $svHueBrush = New-Object System.Windows.Media.LinearGradientBrush
     $svHueBrush.StartPoint = [System.Windows.Point]::new(0,0.5); $svHueBrush.EndPoint = [System.Windows.Point]::new(1,0.5)
     $svStopWhite = New-Object System.Windows.Media.GradientStop; $svStopWhite.Color = [System.Windows.Media.Colors]::White; $svStopWhite.Offset = 0
@@ -5425,7 +5523,7 @@ function Build-LibrariesPanel {
     [System.Windows.Controls.Canvas]::SetLeft($svColorRect,0); [System.Windows.Controls.Canvas]::SetTop($svColorRect,0)
     $svCanvas.Children.Add($svColorRect) | Out-Null
 
-    # Layer 2: vertical transparent→black gradient
+    # Layer 2: vertical transparentâ†’black gradient
     $svDarkBrush = New-Object System.Windows.Media.LinearGradientBrush
     $svDarkBrush.StartPoint = [System.Windows.Point]::new(0.5,0); $svDarkBrush.EndPoint = [System.Windows.Point]::new(0.5,1)
     $svStopTrans = New-Object System.Windows.Media.GradientStop; $svStopTrans.Color = [System.Windows.Media.Color]::FromArgb(0,0,0,0); $svStopTrans.Offset = 0
@@ -5507,12 +5605,12 @@ function Build-LibrariesPanel {
     $libStatusLbl.Margin = New-Object System.Windows.Thickness(0,4,0,0)
     $editStack.Children.Add($libStatusLbl) | Out-Null
 
-    # Capture script-scope collections as locals — $script: scope is NOT reliably
+    # Capture script-scope collections as locals â€” $script: scope is NOT reliably
     # accessible inside .GetNewClosure() closures running on the WPF dispatcher thread.
     $capturedLibColors = $script:LibraryColors
     $capturedHexToName = $script:HexToName
 
-    # ── Shared picker state ───────────────────────────────────────────────────
+    # â”€â”€ Shared picker state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $pickerState = @{
         H = 0.0; S = 1.0; V = 1.0
         Updating = $false
@@ -5528,8 +5626,8 @@ function Build-LibrariesPanel {
         SaveBtn = $btnSaveFilament; DelBtn = $btnDelFilament
     }
 
-    # ── Hue canvas mouse events ───────────────────────────────────────────────
-    # Use captured canvas/pickerState variables — avoids $this/$_ capture ambiguity
+    # â”€â”€ Hue canvas mouse events â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Use captured canvas/pickerState variables â€” avoids $this/$_ capture ambiguity
     # from .GetNewClosure(). WPF passes (sender, eventArgs) as $args[0]/$args[1];
     # those are never captured and are safe to use for position queries.
     $hueCanvas.Add_MouseLeftButtonDown({
@@ -5550,11 +5648,11 @@ function Build-LibrariesPanel {
     }.GetNewClosure())
     $hueCanvas.Add_MouseLeftButtonUp({ $hueCanvas.ReleaseMouseCapture() }.GetNewClosure())
 
-    # ── SV canvas mouse events ────────────────────────────────────────────────
-    # Uses $svOuter (Border) for hit-testing and size — more reliable than the
+    # â”€â”€ SV canvas mouse events â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Uses $svOuter (Border) for hit-testing and size â€” more reliable than the
     # Canvas whose Background was null (non-hit-testable) before children sized.
     # Position via Mouse.GetPosition to avoid any $args capture ambiguity.
-    # IMPORTANT: use 0.0/1.0 double literals in Min/Max — PowerShell selects the
+    # IMPORTANT: use 0.0/1.0 double literals in Min/Max â€” PowerShell selects the
     # Int32 overload when the first arg is an integer literal, which rounds the
     # double result to 0 or 1 and causes the "locked to quadrants" behaviour.
     $svOuter.Add_MouseLeftButtonDown({
@@ -5581,7 +5679,7 @@ function Build-LibrariesPanel {
     }.GetNewClosure())
     $svOuter.Add_MouseLeftButtonUp({ $svOuter.ReleaseMouseCapture() }.GetNewClosure())
 
-    # ── RGB box TextChanged ───────────────────────────────────────────────────
+    # â”€â”€ RGB box TextChanged â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     foreach ($box in @($tbR,$tbG,$tbB)) {
         $box.Add_TextChanged({
             if ($pickerState.Updating) { return }
@@ -5589,7 +5687,7 @@ function Build-LibrariesPanel {
         }.GetNewClosure())
     }
 
-    # ── Save / Update ─────────────────────────────────────────────────────────
+    # â”€â”€ Save / Update â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $btnSaveFilament.Add_Click({
         try {
             Write-Log "btnSaveFilament: clicked"
@@ -5627,7 +5725,7 @@ function Build-LibrariesPanel {
         }
     }.GetNewClosure())
 
-    # ── Delete ────────────────────────────────────────────────────────────────
+    # â”€â”€ Delete â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $btnDelFilament.Add_Click({
         $nm = $pickerState.EditingName
         if ([string]::IsNullOrWhiteSpace($nm) -or -not $capturedLibColors.Contains($nm)) {
@@ -5644,7 +5742,7 @@ function Build-LibrariesPanel {
         Rebuild-FilamentList $pickerState
     }.GetNewClosure())
 
-    # ── Add New button ────────────────────────────────────────────────────────
+    # â”€â”€ Add New button â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $btnAddNew.Add_Click({
         $pickerState.EditingName = ""
         $pickerState.NameBox.Text = "New Filament"
@@ -5661,9 +5759,9 @@ function Build-LibrariesPanel {
         Load-FilamentEntry $firstName $pickerState
     }
 
-    # ══════════════════════════════════════════════════════════════════════════
-    #  NAMING CONVENTIONS SECTION — Themes | Printer Prefixes | Tags & Labels
-    # ══════════════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    #  NAMING CONVENTIONS SECTION â€” Themes | Printer Prefixes | Tags & Labels
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     foreach ($w in @(240, 16, 240, 16, 1)) {
         $cd = New-Object System.Windows.Controls.ColumnDefinition
         $cd.Width = if ($w -eq 1) { [System.Windows.GridLength]::new(1,[System.Windows.GridUnitType]::Star) } `
@@ -5735,7 +5833,7 @@ function Build-LibrariesPanel {
         [System.Windows.Controls.Grid]::SetColumn($btnSave, 2); $actionGrid.Children.Add($btnSave) | Out-Null
 
         # Wire up events
-        # Click list item → populate text box + switch button to "Edit"
+        # Click list item â†’ populate text box + switch button to "Edit"
         $listBox.Tag = @{ TextBox=$tbNew; AddBtn=$btnAdd }
         $listBox.Add_SelectionChanged({
             $t = $this.Tag
@@ -5774,7 +5872,7 @@ function Build-LibrariesPanel {
             $t = $this.Tag; $v = $t.Box.Text.Trim(); if ([string]::IsNullOrWhiteSpace($v)) { return }
             $sel = $t.List.SelectedItem   # a ListBoxItem or $null
             if ($null -ne $sel -and "$($sel.Content)" -ne $v) {
-                # Rename in place — mark dirty
+                # Rename in place â€” mark dirty
                 $sel.Content = $v
                 $sel.Foreground = Get-WpfColor "#E8903A"
                 $sel.Tag = "dirty"
@@ -5818,19 +5916,19 @@ function Build-LibrariesPanel {
         return $listBox
     }
 
-    # Themes — column 0
+    # Themes â€” column 0
     Build-NameListSection $secNaming "Themes" `
         { $script:GpThemes } `
         { param($v) Set-GpThemes $v } `
         { Write-Log "Save-NamesLibrary (Themes): called"; $ok = Save-NamesLibrary; Write-Log "Save-NamesLibrary (Themes): $(if($ok){'success'}else{'FAILED'})"; $ok } 0 | Out-Null
 
-    # Printer Prefixes — column 2
+    # Printer Prefixes â€” column 2
     Build-NameListSection $secNaming "Printer Prefixes" `
         { $script:PrinterPrefixes } `
         { param($v) Set-PrinterPrefixes $v } `
         { Write-Log "Save-NamesLibrary (Prefixes): called"; $ok = Save-NamesLibrary; Write-Log "Save-NamesLibrary (Prefixes): $(if($ok){'success'}else{'FAILED'})"; $ok } 2 | Out-Null
 
-    # Tags & Labels — column 4
+    # Tags & Labels â€” column 4
     $tagsContainer = New-Object System.Windows.Controls.Grid; $tagsContainer.Margin = New-Object System.Windows.Thickness(0,16,20,16)
     $tagsContainer.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{ Height = "Auto" })) | Out-Null
     $tagsContainer.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition)) | Out-Null
@@ -5901,7 +5999,7 @@ function Build-LibrariesPanel {
     $btnSaveTags.Background=Get-WpfColor "#3A5080"; $btnSaveTags.Foreground=Get-WpfColor "#FFFFFF"; $btnSaveTags.BorderThickness=0; $btnSaveTags.Cursor=[System.Windows.Input.Cursors]::Hand
     [System.Windows.Controls.Grid]::SetColumn($btnSaveTags,2); $tagsActGrid.Children.Add($btnSaveTags)|Out-Null
 
-    # Capture $script: variables as locals — $script: scope is NOT reliably accessible
+    # Capture $script: variables as locals â€” $script: scope is NOT reliably accessible
     # inside .GetNewClosure() closures running on the WPF dispatcher thread.
     $capturedTagEditState = $script:TagEditState
     $capturedTagsStack    = $tagsListStack
@@ -5936,9 +6034,9 @@ function Build-LibrariesPanel {
         } catch { Write-Log "btnSaveTags EXCEPTION: $($_.Exception.Message)" "ERROR"; Write-Log "  STACK: $($_.ScriptStackTrace)" "ERROR"; throw }
     }.GetNewClosure())
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     #  PURGE DICTIONARY SECTION
-    # ══════════════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     $purgeContainer = New-Object System.Windows.Controls.Grid
     $purgeContainer.Margin = New-Object System.Windows.Thickness(20,16,20,20)
     $purgeContainer.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{ Height = "Auto" })) | Out-Null
@@ -5963,7 +6061,7 @@ function Build-LibrariesPanel {
     [System.Windows.Controls.DockPanel]::SetDock($purgeAvgSavings, [System.Windows.Controls.Dock]::Right)
     $purgeHdrBar.Children.Add($purgeAvgSavings) | Out-Null
 
-    # ── Filter bar ────────────────────────────────────────────────────────────
+    # â”€â”€ Filter bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $purgeFilterPanel = New-Object System.Windows.Controls.StackPanel
     $purgeFilterPanel.Orientation = "Horizontal"; $purgeFilterPanel.Margin = New-Object System.Windows.Thickness(0,0,0,12)
     [System.Windows.Controls.Grid]::SetRow($purgeFilterPanel, 1); $purgeContainer.Children.Add($purgeFilterPanel) | Out-Null
@@ -6101,7 +6199,7 @@ function Build-LibrariesPanel {
     $purgeGrid.RowHeaderWidth = 0
     [System.Windows.Controls.Grid]::SetRow($purgeGrid, 2); $purgeContainer.Children.Add($purgeGrid) | Out-Null
 
-    # Column headers default to a washed-out gray on this dark theme — force a legible style
+    # Column headers default to a washed-out gray on this dark theme â€” force a legible style
     $purgeHdrStyle = New-Object System.Windows.Style([System.Windows.Controls.Primitives.DataGridColumnHeader])
     $purgeHdrStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Primitives.DataGridColumnHeader]::BackgroundProperty, (Get-WpfColor "#252630"))))
     $purgeHdrStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Primitives.DataGridColumnHeader]::ForegroundProperty, (Get-WpfColor "#E8EBF2"))))
@@ -6111,7 +6209,7 @@ function Build-LibrariesPanel {
     $purgeHdrStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Primitives.DataGridColumnHeader]::BorderThicknessProperty, (New-Object System.Windows.Thickness(0,0,1,1)))))
     $purgeGrid.ColumnHeaderStyle = $purgeHdrStyle
 
-    # Cell highlight — orange background while a cell's value differs from what's on disk
+    # Cell highlight â€” orange background while a cell's value differs from what's on disk
     function New-PurgeDirtyCellStyle([string]$dirtyProp) {
         $style = New-Object System.Windows.Style([System.Windows.Controls.DataGridCell])
         $trig  = New-Object System.Windows.DataTrigger
@@ -6210,7 +6308,7 @@ function Build-LibrariesPanel {
     }.GetNewClosure()
     & $updatePurgeAvgSavings
 
-    # ── Filter predicate — re-applied whenever a filter combo changes ────────
+    # â”€â”€ Filter predicate â€” re-applied whenever a filter combo changes â”€â”€â”€â”€â”€â”€â”€â”€
     $capturedPurgeView      = $purgeView
     $capturedCmbPurgeFrom   = $cmbPurgeFrom
     $capturedCmbPurgeTuned  = $cmbPurgeTuned
@@ -6308,8 +6406,8 @@ $topModeBar.Children.Add($script:BtnModeFilePr)    | Out-Null
 $topModeBar.Children.Add($script:BtnModeEditing)   | Out-Null
 $topModeBar.Children.Add($script:BtnModeReview)    | Out-Null
 
-# ── Libraries button sits LEFT of the Browse button in the center column ──
-# Navigate up from BtnBrowse: StackPanel → header Grid (col 1)
+# â”€â”€ Libraries button sits LEFT of the Browse button in the center column â”€â”€
+# Navigate up from BtnBrowse: StackPanel â†’ header Grid (col 1)
 $browseStack  = $btnBrowse.Parent            # vertical StackPanel (Browse + hint text)
 $headerGrid   = $browseStack.Parent          # the Grid inside the header Border
 

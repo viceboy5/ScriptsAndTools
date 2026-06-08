@@ -43,6 +43,84 @@ function Find-File([string]$base, [string]$rel) {
     return $null
 }
 
+# -- Geometry helpers for computing a true assembled-mesh footprint -------------
+# (plate_1.json's bbox can be stale for objects that were isolated/regrouped after
+#  it was last written - e.g. multi-part "colorcut" assemblies - so we walk the
+#  actual mesh geometry through the component transform chain instead.)
+function Combine-Tx([double[]]$inner, [double[]]$outer) {
+    # Equivalent to applying $inner then $outer to a row-vector point: v * inner * outer
+    $r = New-Object double[] 12
+    for ($i = 0; $i -lt 3; $i++) {
+        for ($j = 0; $j -lt 3; $j++) {
+            $r[$i * 3 + $j] = $inner[$i*3+0]*$outer[0*3+$j] + $inner[$i*3+1]*$outer[1*3+$j] + $inner[$i*3+2]*$outer[2*3+$j]
+        }
+    }
+    for ($j = 0; $j -lt 3; $j++) {
+        $r[9 + $j] = $inner[9]*$outer[0*3+$j] + $inner[10]*$outer[1*3+$j] + $inner[11]*$outer[2*3+$j] + $outer[9+$j]
+    }
+    return [double[]]$r
+}
+function Apply-Tx([double[]]$t, [double]$x, [double]$y, [double]$z) {
+    return @(
+        ($x*$t[0] + $y*$t[3] + $z*$t[6] + $t[9]),
+        ($x*$t[1] + $y*$t[4] + $z*$t[7] + $t[10])
+    )
+}
+function Get-MeshVertices([string]$modelPath) {
+    $cache = @{}
+    [xml]$mxml = [System.IO.File]::ReadAllText($modelPath, [System.Text.Encoding]::UTF8)
+    foreach ($obj in $mxml.SelectNodes('//*[local-name()="object"]')) {
+        $verts = New-Object System.Collections.Generic.List[double[]]
+        foreach ($v in $obj.SelectNodes('.//*[local-name()="vertex"]')) {
+            $verts.Add([double[]]@([double]$v.GetAttribute('x'), [double]$v.GetAttribute('y'), [double]$v.GetAttribute('z')))
+        }
+        $cache[$obj.GetAttribute('id')] = $verts
+    }
+    return $cache
+}
+function Update-Bounds([hashtable]$b, [double]$x, [double]$y) {
+    if ($x -lt $b.MinX) { $b.MinX = $x }
+    if ($x -gt $b.MaxX) { $b.MaxX = $x }
+    if ($y -lt $b.MinY) { $b.MinY = $y }
+    if ($y -gt $b.MaxY) { $b.MaxY = $y }
+}
+function Walk-FootprintObject([System.Xml.XmlNode]$objNode, [double[]]$accTx, [hashtable]$bounds, [hashtable]$meshCache, [xml]$xml, $xns, [string]$tempDir, [string]$nsProd) {
+    $components = @($objNode.SelectNodes('m:components/m:component', $xns))
+    if ($components.Count -gt 0) {
+        foreach ($c in $components) {
+            $path = $c.GetAttribute('path', $nsProd)
+            if ([string]::IsNullOrEmpty($path)) { $path = $c.GetAttribute('p:path') }
+            if ([string]::IsNullOrEmpty($path)) { $path = $c.GetAttribute('path') }
+            $compTx     = Parse-Tx ($c.GetAttribute('transform'))
+            $childId    = $c.GetAttribute('objectid')
+            $combinedTx = Combine-Tx $compTx $accTx
+
+            if ([string]::IsNullOrEmpty($path)) {
+                $childNode = $xml.SelectSingleNode("//m:object[@id='$childId']", $xns)
+                if ($null -ne $childNode) { Walk-FootprintObject $childNode $combinedTx $bounds $meshCache $xml $xns $tempDir $nsProd }
+            } else {
+                $resolvedPath = $path.TrimStart('/')
+                if (-not $meshCache.ContainsKey($resolvedPath)) {
+                    $resourcePath = Find-File $tempDir $resolvedPath
+                    if ($null -eq $resourcePath) { continue }
+                    $meshCache[$resolvedPath] = Get-MeshVertices $resourcePath
+                }
+                $verts = $meshCache[$resolvedPath][$childId]
+                if ($null -eq $verts) { continue }
+                foreach ($v in $verts) {
+                    $p = Apply-Tx $combinedTx $v[0] $v[1] $v[2]
+                    Update-Bounds $bounds $p[0] $p[1]
+                }
+            }
+        }
+    } else {
+        foreach ($v in $objNode.SelectNodes('.//*[local-name()="vertex"]')) {
+            $p = Apply-Tx $accTx ([double]$v.GetAttribute('x')) ([double]$v.GetAttribute('y')) ([double]$v.GetAttribute('z'))
+            Update-Bounds $bounds $p[0] $p[1]
+        }
+    }
+}
+
 if (-not (Test-Path $InputPath)) {
     Write-Host "[BOD] ERROR: InputPath not found: $InputPath" -ForegroundColor Red
     exit 1
@@ -57,50 +135,13 @@ if ($Mode -eq 'Grid') {
     $PLATE_H   = 256.0
     $MARGIN    = 15.0
     $COPIES    = 15
-    $MIN_GAP   = 3.0
+    $TARGET_GAP = 3.0   # fixed spacing between adjacent copies (mm)
 
     Write-Host "[BOD-Grid] Extracting Final.3mf..."
     $tempDir = Join-Path $env:TEMP "bod_grid_$([guid]::NewGuid().ToString().Substring(0,8))"
     New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
     try { [System.IO.Compression.ZipFile]::ExtractToDirectory($InputPath, $tempDir) }
     catch { Write-Host "[BOD-Grid] ERROR extracting: $_" -ForegroundColor Red; Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue; exit 1 }
-
-    # -- Read plate_1.json for object bounding box --------------------------------
-    $plate1Path = Find-File $tempDir 'Metadata/plate_1.json'
-    if ($null -eq $plate1Path) { Write-Host "[BOD-Grid] ERROR: plate_1.json not found." -ForegroundColor Red; Remove-Item $tempDir -Recurse -Force; exit 1 }
-    $plate1 = ConvertFrom-Json ([System.IO.File]::ReadAllText($plate1Path, [System.Text.Encoding]::UTF8))
-
-    $designEntry = $plate1.bbox_objects | Where-Object { $_.name -ne 'wipe_tower' } | Select-Object -First 1
-    if ($null -eq $designEntry) { Write-Host "[BOD-Grid] ERROR: no design object found in plate_1.json." -ForegroundColor Red; Remove-Item $tempDir -Recurse -Force; exit 1 }
-
-    $bboxMinX = [double]$designEntry.bbox[0]; $bboxMinY = [double]$designEntry.bbox[1]
-    $bboxMaxX = [double]$designEntry.bbox[2]; $bboxMaxY = [double]$designEntry.bbox[3]
-    $bboxW    = $bboxMaxX - $bboxMinX
-    $bboxD    = $bboxMaxY - $bboxMinY
-    $origCX   = ($bboxMinX + $bboxMaxX) / 2.0
-    $origCY   = ($bboxMinY + $bboxMaxY) / 2.0
-
-    Write-Host ("[BOD-Grid] Design footprint: {0:F2} x {1:F2} mm  (centre {2:F2}, {3:F2})" -f $bboxW, $bboxD, $origCX, $origCY)
-
-    # -- Choose best grid layout (3, 4, or 5 columns for 15 items) ---------------
-    $avail    = $PLATE_W - 2.0 * $MARGIN
-    $best     = $null; $bestMinGap = -1
-
-    foreach ($cols in @(3, 4, 5)) {
-        $rows = [int][Math]::Ceiling($COPIES / $cols)
-        if ($cols -lt 2 -or $rows -lt 2) { continue }
-        $gX = ($avail - $cols * $bboxW) / ($cols - 1)
-        $gY = ($avail - $rows * $bboxD) / ($rows - 1)
-        $mg = [Math]::Min($gX, $gY)
-        if ($gX -ge $MIN_GAP -and $gY -ge $MIN_GAP -and $mg -gt $bestMinGap) {
-            $bestMinGap = $mg; $best = @{ Cols=$cols; Rows=$rows; GapX=$gX; GapY=$gY }
-        }
-    }
-    if ($null -eq $best) {
-        Write-Host "[BOD-Grid] ERROR: design too large to fit $COPIES copies on a ${PLATE_W}x${PLATE_H} plate with ${MARGIN}mm margins." -ForegroundColor Red
-        Remove-Item $tempDir -Recurse -Force; exit 1
-    }
-    Write-Host ("[BOD-Grid] Layout: {0} cols x {1} rows  gap {2:F1}mm x {3:F1}mm" -f $best.Cols, $best.Rows, $best.GapX, $best.GapY)
 
     # -- Parse 3dmodel.model -------------------------------------------------------
     $modelFile = (Get-ChildItem -Path $tempDir -Filter '3dmodel.model' -Recurse | Select-Object -First 1).FullName
@@ -113,7 +154,82 @@ if ($Mode -eq 'Grid') {
     Write-Host "[BOD-Grid] Original build items: $($origBuildItems.Count)"
 
     # Store original transforms indexed by position
-    $origTxList = $origBuildItems | ForEach-Object { Parse-Tx ($_.GetAttribute('transform')) }
+    $origTxList = @($origBuildItems | ForEach-Object { , (Parse-Tx ($_.GetAttribute('transform'))) })
+
+    # -- Compute the true assembled footprint by walking the mesh geometry --------
+    # plate_1.json's bbox can be stale (e.g. left over from a larger merged plate before
+    # isolate_final_worker repositioned/regrouped the design), which under/over-states the
+    # real XY extent of multi-part "colorcut" assemblies. Walk every build item's object
+    # through its component transform chain and union the transformed mesh vertex bounds.
+    $bounds = @{ MinX = [double]::MaxValue; MaxX = [double]::MinValue; MinY = [double]::MaxValue; MaxY = [double]::MinValue }
+    $meshCache = @{}
+    for ($bi = 0; $bi -lt $origBuildItems.Count; $bi++) {
+        $rootObj = $xml.SelectSingleNode("//m:object[@id='$($origBuildItems[$bi].GetAttribute('objectid'))']", $xns)
+        if ($null -ne $rootObj) { Walk-FootprintObject $rootObj $origTxList[$bi] $bounds $meshCache $xml $xns $tempDir $nsProd }
+    }
+    if ($bounds.MinX -eq [double]::MaxValue) {
+        Write-Host "[BOD-Grid] ERROR: could not compute design footprint from mesh geometry." -ForegroundColor Red
+        Remove-Item $tempDir -Recurse -Force; exit 1
+    }
+
+    $bboxW  = $bounds.MaxX - $bounds.MinX
+    $bboxD  = $bounds.MaxY - $bounds.MinY
+    $origCX = ($bounds.MinX + $bounds.MaxX) / 2.0
+    $origCY = ($bounds.MinY + $bounds.MaxY) / 2.0
+
+    Write-Host ("[BOD-Grid] Design footprint: {0:F2} x {1:F2} mm  (centre {2:F2}, {3:F2})" -f $bboxW, $bboxD, $origCX, $origCY)
+
+    # -- Choose grid layout: lay out at a fixed $TARGET_GAP (don't stretch to fill the plate) --
+    # Pick the cols x rows split that wastes the fewest empty cells while fitting in $avail at
+    # $TARGET_GAP spacing; ties broken toward the most square-ish shape, then toward wider/fewer
+    # rows (e.g. 5 cols x 3 rows over 3 cols x 5 rows). Leftover plate space just becomes extra
+    # margin once the block is centred below - it does not inflate the gaps.
+    $avail = $PLATE_W - 2.0 * $MARGIN
+    $best  = $null; $bestWaste = [int]::MaxValue; $bestSquareness = [double]::MaxValue
+
+    for ($cols = 1; $cols -le $COPIES; $cols++) {
+        $rows = [int][Math]::Ceiling($COPIES / $cols)
+        $gridWNeeded = $cols * $bboxW + [Math]::Max(0, $cols - 1) * $TARGET_GAP
+        $gridHNeeded = $rows * $bboxD + [Math]::Max(0, $rows - 1) * $TARGET_GAP
+        if ($gridWNeeded -gt $avail -or $gridHNeeded -gt $avail) { continue }
+
+        $waste = ($cols * $rows) - $COPIES
+        $squareness = [Math]::Abs($cols - $rows)
+        $better = $false
+        if ($waste -lt $bestWaste) { $better = $true }
+        elseif ($waste -eq $bestWaste -and $squareness -lt $bestSquareness) { $better = $true }
+        elseif ($waste -eq $bestWaste -and $squareness -eq $bestSquareness -and $null -ne $best -and $cols -gt $best.Cols) { $better = $true }
+
+        if ($better) {
+            $bestWaste = $waste; $bestSquareness = $squareness
+            $best = @{ Cols = $cols; Rows = $rows; GapX = $TARGET_GAP; GapY = $TARGET_GAP }
+        }
+    }
+    if ($null -eq $best) {
+        Write-Host "[BOD-Grid] ERROR: design too large to fit $COPIES copies on a ${PLATE_W}x${PLATE_H} plate with ${MARGIN}mm margins at ${TARGET_GAP}mm spacing." -ForegroundColor Red
+        Remove-Item $tempDir -Recurse -Force; exit 1
+    }
+    Write-Host ("[BOD-Grid] Layout: {0} cols x {1} rows  gap {2:F1}mm x {3:F1}mm  ({4} empty cell(s))" -f $best.Cols, $best.Rows, $best.GapX, $best.GapY, $bestWaste)
+
+    # -- Centre the grid block on the plate (instead of anchoring to the margin corner) --
+    $gridW   = $best.Cols * $bboxW + ($best.Cols - 1) * $best.GapX
+    $gridH   = $best.Rows * $bboxD + ($best.Rows - 1) * $best.GapY
+    $offsetX = ($PLATE_W - $gridW) / 2.0
+    $offsetY = ($PLATE_H - $gridH) / 2.0
+
+    # -- Nudge the grid clear of the printer's bed exclusion zone (bottom-left corner) --
+    # X1C/X1/P1/P2/A1-family beds reserve a rectangle at the plate origin (e.g. 18 x 28 mm on the X1C)
+    # for the wiper/handle. Only the corner cell can ever overlap it - if it would, push the whole
+    # grid just far enough along the cheaper axis to clear it (rectangles no longer overlap once
+    # separated on either axis), rather than uniformly inflating the margin and wasting plate space.
+    $EXCLUDE_W = 18.0; $EXCLUDE_H = 28.0
+    if ($offsetX -lt $EXCLUDE_W -and $offsetY -lt $EXCLUDE_H) {
+        $shiftX = $EXCLUDE_W - $offsetX
+        $shiftY = $EXCLUDE_H - $offsetY
+        if ($shiftX -le $shiftY) { $offsetX = $EXCLUDE_W } else { $offsetY = $EXCLUDE_H }
+        Write-Host ("[BOD-Grid] Corner cell would overlap the bed exclusion zone - nudged offset to ({0:F1}, {1:F1})" -f $offsetX, $offsetY) -ForegroundColor Yellow
+    }
+    Write-Host ("[BOD-Grid] Grid block: {0:F1} x {1:F1} mm, offset ({2:F1}, {3:F1})" -f $gridW, $gridH, $offsetX, $offsetY)
 
     # Remove all existing build items (we'll re-add them as copies)
     foreach ($item in $origBuildItems) { $buildNode.RemoveChild($item) | Out-Null }
@@ -124,8 +240,8 @@ if ($Mode -eq 'Grid') {
         for ($col = 0; $col -lt $best.Cols; $col++) {
             if ($idx -ge $COPIES) { break }
 
-            $newCX  = $MARGIN + $col * ($bboxW + $best.GapX) + $bboxW / 2.0
-            $newCY  = $MARGIN + $row * ($bboxD + $best.GapY) + $bboxD / 2.0
+            $newCX  = $offsetX + $col * ($bboxW + $best.GapX) + $bboxW / 2.0
+            $newCY  = $offsetY + $row * ($bboxD + $best.GapY) + $bboxD / 2.0
             $deltaX = $newCX - $origCX
             $deltaY = $newCY - $origCY
 
