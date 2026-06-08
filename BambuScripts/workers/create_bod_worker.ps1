@@ -1,8 +1,9 @@
 param(
-    [string]$InputPath,                                                                    # Full.3mf to read from
+    [string]$InputPath,                                                                    # 3mf to read from
     [string]$OutputPath,                                                                   # BOD.3mf destination
     [string]$BambuPath = "C:\Program Files\Bambu Studio\bambu-studio.exe",
-    [int]$PairCount    = 5                                                                 # How many pairs to keep
+    [int]$PairCount    = 5,                                                                # How many pairs to keep (Full mode)
+    [string]$Mode      = "Full"                                                            # "Full" or "Grid"
 )
 $ErrorActionPreference = 'Stop'
 
@@ -45,6 +46,179 @@ function Find-File([string]$base, [string]$rel) {
 if (-not (Test-Path $InputPath)) {
     Write-Host "[BOD] ERROR: InputPath not found: $InputPath" -ForegroundColor Red
     exit 1
+}
+
+# ================================================================================
+#  GRID MODE  -  Final.3mf -> 15-copy grid BOD
+# ================================================================================
+if ($Mode -eq 'Grid') {
+
+    $PLATE_W   = 256.0
+    $PLATE_H   = 256.0
+    $MARGIN    = 15.0
+    $COPIES    = 15
+    $MIN_GAP   = 3.0
+
+    Write-Host "[BOD-Grid] Extracting Final.3mf..."
+    $tempDir = Join-Path $env:TEMP "bod_grid_$([guid]::NewGuid().ToString().Substring(0,8))"
+    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+    try { [System.IO.Compression.ZipFile]::ExtractToDirectory($InputPath, $tempDir) }
+    catch { Write-Host "[BOD-Grid] ERROR extracting: $_" -ForegroundColor Red; Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue; exit 1 }
+
+    # -- Read plate_1.json for object bounding box --------------------------------
+    $plate1Path = Find-File $tempDir 'Metadata/plate_1.json'
+    if ($null -eq $plate1Path) { Write-Host "[BOD-Grid] ERROR: plate_1.json not found." -ForegroundColor Red; Remove-Item $tempDir -Recurse -Force; exit 1 }
+    $plate1 = ConvertFrom-Json ([System.IO.File]::ReadAllText($plate1Path, [System.Text.Encoding]::UTF8))
+
+    $designEntry = $plate1.bbox_objects | Where-Object { $_.name -ne 'wipe_tower' } | Select-Object -First 1
+    if ($null -eq $designEntry) { Write-Host "[BOD-Grid] ERROR: no design object found in plate_1.json." -ForegroundColor Red; Remove-Item $tempDir -Recurse -Force; exit 1 }
+
+    $bboxMinX = [double]$designEntry.bbox[0]; $bboxMinY = [double]$designEntry.bbox[1]
+    $bboxMaxX = [double]$designEntry.bbox[2]; $bboxMaxY = [double]$designEntry.bbox[3]
+    $bboxW    = $bboxMaxX - $bboxMinX
+    $bboxD    = $bboxMaxY - $bboxMinY
+    $origCX   = ($bboxMinX + $bboxMaxX) / 2.0
+    $origCY   = ($bboxMinY + $bboxMaxY) / 2.0
+
+    Write-Host ("[BOD-Grid] Design footprint: {0:F2} x {1:F2} mm  (centre {2:F2}, {3:F2})" -f $bboxW, $bboxD, $origCX, $origCY)
+
+    # -- Choose best grid layout (3, 4, or 5 columns for 15 items) ---------------
+    $avail    = $PLATE_W - 2.0 * $MARGIN
+    $best     = $null; $bestMinGap = -1
+
+    foreach ($cols in @(3, 4, 5)) {
+        $rows = [int][Math]::Ceiling($COPIES / $cols)
+        if ($cols -lt 2 -or $rows -lt 2) { continue }
+        $gX = ($avail - $cols * $bboxW) / ($cols - 1)
+        $gY = ($avail - $rows * $bboxD) / ($rows - 1)
+        $mg = [Math]::Min($gX, $gY)
+        if ($gX -ge $MIN_GAP -and $gY -ge $MIN_GAP -and $mg -gt $bestMinGap) {
+            $bestMinGap = $mg; $best = @{ Cols=$cols; Rows=$rows; GapX=$gX; GapY=$gY }
+        }
+    }
+    if ($null -eq $best) {
+        Write-Host "[BOD-Grid] ERROR: design too large to fit $COPIES copies on a ${PLATE_W}x${PLATE_H} plate with ${MARGIN}mm margins." -ForegroundColor Red
+        Remove-Item $tempDir -Recurse -Force; exit 1
+    }
+    Write-Host ("[BOD-Grid] Layout: {0} cols x {1} rows  gap {2:F1}mm x {3:F1}mm" -f $best.Cols, $best.Rows, $best.GapX, $best.GapY)
+
+    # -- Parse 3dmodel.model -------------------------------------------------------
+    $modelFile = (Get-ChildItem -Path $tempDir -Filter '3dmodel.model' -Recurse | Select-Object -First 1).FullName
+    [xml]$xml  = [System.IO.File]::ReadAllText($modelFile, [System.Text.Encoding]::UTF8)
+    $xns = New-Object System.Xml.XmlNamespaceManager($xml.NameTable)
+    $xns.AddNamespace('m', $nsCore); $xns.AddNamespace('p', $nsProd)
+
+    $buildNode     = $xml.SelectSingleNode('//m:build', $xns)
+    $origBuildItems = @($buildNode.SelectNodes('m:item', $xns))
+    Write-Host "[BOD-Grid] Original build items: $($origBuildItems.Count)"
+
+    # Store original transforms indexed by position
+    $origTxList = $origBuildItems | ForEach-Object { Parse-Tx ($_.GetAttribute('transform')) }
+
+    # Remove all existing build items (we'll re-add them as copies)
+    foreach ($item in $origBuildItems) { $buildNode.RemoveChild($item) | Out-Null }
+
+    # -- Build 15 copies ----------------------------------------------------------
+    $idx = 0
+    for ($row = 0; $row -lt $best.Rows; $row++) {
+        for ($col = 0; $col -lt $best.Cols; $col++) {
+            if ($idx -ge $COPIES) { break }
+
+            $newCX  = $MARGIN + $col * ($bboxW + $best.GapX) + $bboxW / 2.0
+            $newCY  = $MARGIN + $row * ($bboxD + $best.GapY) + $bboxD / 2.0
+            $deltaX = $newCX - $origCX
+            $deltaY = $newCY - $origCY
+
+            for ($i = 0; $i -lt $origBuildItems.Count; $i++) {
+                $orig    = $origBuildItems[$i]
+                $tx      = [double[]]$origTxList[$i].Clone()
+                $tx[9]  += $deltaX
+                $tx[10] += $deltaY
+
+                $newItem = $xml.CreateElement('item', $nsCore)
+                $newItem.SetAttribute('objectid', $orig.GetAttribute('objectid'))
+
+                # Preserve p:UUID-style attributes with a fresh UUID per copy
+                $uuidAttr = $orig.GetAttributeNode('UUID', $nsProd)
+                if ($null -ne $uuidAttr) {
+                    $newItem.SetAttribute('UUID', $nsProd, [guid]::NewGuid().ToString('D'))
+                }
+
+                $txStr = ($tx | ForEach-Object { $_.ToString('G9') }) -join ' '
+                $newItem.SetAttribute('transform', $txStr)
+                $newItem.SetAttribute('printable', '1')
+                $buildNode.AppendChild($newItem) | Out-Null
+            }
+            $idx++
+        }
+    }
+
+    # -- Update model_settings.config ---------------------------------------------
+    $settPath = Find-File $tempDir 'Metadata/model_settings.config'
+    if ($null -ne $settPath) {
+        [xml]$sett  = [System.IO.File]::ReadAllText($settPath, [System.Text.Encoding]::UTF8)
+        $plateNode  = $sett.SelectSingleNode('//plate')
+
+        if ($null -ne $plateNode) {
+            # Find primary objectid from the existing model_instance
+            $existingMI = $plateNode.SelectSingleNode('model_instance')
+            $primaryId  = if ($null -ne $existingMI) {
+                $existingMI.SelectSingleNode('metadata[@key="object_id"]').GetAttribute('value')
+            } else { $origBuildItems[0].GetAttribute('objectid') }
+
+            # Remove all existing model_instances
+            foreach ($mi in @($plateNode.SelectNodes('model_instance'))) { $plateNode.RemoveChild($mi) | Out-Null }
+
+            # Add one model_instance per copy
+            for ($c = 0; $c -lt $COPIES; $c++) {
+                $mi = $sett.CreateElement('model_instance')
+                $addMeta = {
+                    param($key, $val)
+                    $m = $sett.CreateElement('metadata')
+                    $m.SetAttribute('key', $key); $m.SetAttribute('value', $val)
+                    $mi.AppendChild($m) | Out-Null
+                }
+                & $addMeta 'object_id'   $primaryId
+                & $addMeta 'instance_id' "$c"
+                & $addMeta 'identify_id' "$([int64]50000 + $c)"
+                $plateNode.AppendChild($mi) | Out-Null
+            }
+        }
+        Save-Xml $sett $settPath
+    }
+
+    # -- Save model, strip plate images, repack -----------------------------------
+    Save-Xml $xml $modelFile
+
+    foreach ($f in (Get-ChildItem -Path (Join-Path $tempDir 'Metadata') -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -match '^(plate|pick|top)_.*\.(png|json)$' })) {
+        Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue
+    }
+
+    if (Test-Path $OutputPath) { Remove-Item $OutputPath -Force }
+    $zip = [System.IO.Compression.ZipFile]::Open($OutputPath, 'Create')
+    try {
+        Get-ChildItem $tempDir -Recurse -File | ForEach-Object {
+            $rel = $_.FullName.Substring($tempDir.Length).TrimStart('\','/').Replace('\','/')
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $rel) | Out-Null
+        }
+    } finally { $zip.Dispose(); [System.GC]::Collect(); [System.GC]::WaitForPendingFinalizers() }
+    Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+
+    # -- Optional Bambu resave ----------------------------------------------------
+    if (Test-Path $BambuPath) {
+        Write-Host "[BOD-Grid] Running Bambu resave..." -NoNewline
+        $tempResave = $OutputPath + ".resave.tmp.3mf"
+        $logOut = Join-Path $env:TEMP "bambu_bod_out.txt"; $logErr = Join-Path $env:TEMP "bambu_bod_err.txt"
+        $proc = Start-Process -FilePath $BambuPath -ArgumentList "--debug 3 --no-check --uptodate --allow-newer-file --export-3mf `"$tempResave`" `"$OutputPath`"" `
+                              -RedirectStandardOutput $logOut -RedirectStandardError $logErr -WindowStyle Hidden -PassThru
+        $proc.WaitForExit()
+        foreach ($log in @($logOut,$logErr)) { if (Test-Path $log) { Remove-Item $log -Force -ErrorAction SilentlyContinue } }
+        if (Test-Path $tempResave) { Move-Item $tempResave $OutputPath -Force; Write-Host " done." } else { Write-Host " skipped." }
+    }
+
+    Write-Host "[BOD-Grid] BOD.3mf created: $OutputPath"
+    exit 0
 }
 
 # -- Extract Full.3mf to a temp directory ------------------------------------

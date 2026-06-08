@@ -39,6 +39,7 @@ if ([string]::IsNullOrWhiteSpace($scriptDir)) { $scriptDir = Split-Path -Parent 
 if ([string]::IsNullOrWhiteSpace($scriptDir)) { $scriptDir = [System.Environment]::CurrentDirectory }
 $colorCsvPath = Join-Path $scriptDir "..\libraries\FilamentLibrary.csv"
 $namesLibPath  = Join-Path $scriptDir "..\libraries\NamesLibrary.ps1"
+$purgeDictPath = Join-Path $scriptDir "..\libraries\PurgeDictionary.csv"
 
 $script:LibraryColors = [ordered]@{}
 $script:HexToName = @{}
@@ -1301,13 +1302,18 @@ function Start-NextProcess {
         # Full.3mf path: after a merge it is $baseName.3mf; if no merge was done this run it already exists
         $bodFullPath = Join-Path $dir "$baseName.3mf"
         [void]$sb.AppendLine("Set-Content -Path `"$statusFile`" -Value 'CREATING BOD...' -Force")
-        [void]$sb.AppendLine("`$bodFullPath = `"$bodFullPath`"")
-        [void]$sb.AppendLine("if (-not (Test-Path `$bodFullPath)) { Write-Host '[BOD] Full.3mf not found - skipping BOD.' -ForegroundColor Yellow }")
+        $bodFinalPath = Join-Path $dir "$($basePrefix)Final.3mf"
+        [void]$sb.AppendLine("`$bodFullPath  = `"$bodFullPath`"")
+        [void]$sb.AppendLine("`$bodFinalPath = `"$bodFinalPath`"")
+        [void]$sb.AppendLine("if (-not (Test-Path `$bodFullPath) -and -not (Test-Path `$bodFinalPath)) { Write-Host '[BOD] Neither Full.3mf nor Final.3mf found - skipping BOD.' -ForegroundColor Yellow }")
         [void]$sb.AppendLine("else {")
+        [void]$sb.AppendLine("    `$bodMode   = if (Test-Path `$bodFullPath) { 'Full' } else { 'Grid' }")
+        [void]$sb.AppendLine("    `$bodSource = if (`$bodMode -eq 'Full') { `$bodFullPath } else { `$bodFinalPath }")
+        [void]$sb.AppendLine("    Write-Host `"[BOD] Mode: `$bodMode  Source: `$(Split-Path `$bodSource -Leaf)`" -ForegroundColor Cyan")
         [void]$sb.AppendLine("    `$bodDate = Get-Date -Format 'MMMM d'")
         [void]$sb.AppendLine("    `$bodFolder = Join-Path `"$bodQueueBase`" `$bodDate")
         [void]$sb.AppendLine("    New-Item -ItemType Directory -Path `$bodFolder -Force | Out-Null")
-        [void]$sb.AppendLine("    & `"$scriptDir\create_bod_worker.ps1`" -InputPath `$bodFullPath -OutputPath `"$bodTempPath`"")
+        [void]$sb.AppendLine("    & `"$scriptDir\create_bod_worker.ps1`" -InputPath `$bodSource -OutputPath `"$bodTempPath`" -Mode `$bodMode")
         [void]$sb.AppendLine("    if (Test-Path `"$bodTempPath`") {")
         [void]$sb.AppendLine("        Set-Content -Path `"$statusFile`" -Value 'SLICING BOD... 0%' -Force")
         [void]$sb.AppendLine("        & `"$scriptDir\Slice_worker.ps1`" -InputPath `"$bodTempPath`" -StatusFile `"$statusFile`"")
@@ -4793,6 +4799,74 @@ function Save-FilamentLibrary {
         return $false
     }
 }
+
+function Save-PurgeDictionary {
+    Write-Log "Save-PurgeDictionary: start ($($script:PurgeDict.Count) entries)"
+    try {
+        $lines = [System.Collections.Generic.List[string]]::new()
+        $lines.Add("Source_Filament`tTarget_Filament`tTuned`tTuned_Volume`tBase Volume")
+        foreach ($row in $script:PurgeDict) {
+            $tunedStr = if ($row.Tuned) { "TRUE" } else { "" }
+            $lines.Add("$($row.Source_Filament)`t$($row.Target_Filament)`t$tunedStr`t$($row.Tuned_Volume)`t$($row.Base_Volume)")
+        }
+        [System.IO.File]::WriteAllLines($purgeDictPath, $lines, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Log "Save-PurgeDictionary: success"
+        return $true
+    } catch {
+        Write-Log "Save-PurgeDictionary: FAILED - $($_.Exception.Message)" "ERROR"
+        Write-Log "  STACK: $($_.ScriptStackTrace)" "ERROR"
+        return $false
+    }
+}
+
+function Load-PurgeDictionary {
+    $script:PurgeDict = New-Object System.Collections.ObjectModel.ObservableCollection[PSObject]
+    if (-not (Test-Path $purgeDictPath)) { Write-Log "Load-PurgeDictionary: file not found at $purgeDictPath" "WARN"; return }
+    $lines = Get-Content -Path $purgeDictPath
+    if ($lines.Count -eq 0) { return }
+
+    $header = $lines[0] -split "`t"
+    $colIndex = @{}
+    for ($i = 0; $i -lt $header.Count; $i++) { $colIndex[$header[$i].Trim()] = $i }
+    # Old format carried Test_Volume/Iterations columns we no longer need; migrate them away on load.
+    $needsMigration = ($colIndex.ContainsKey("Iterations") -or $colIndex.ContainsKey("Test_Volume")) -and (-not $colIndex.ContainsKey("Tuned"))
+
+    foreach ($line in ($lines | Select-Object -Skip 1)) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $parts = $line -split "`t"
+        $get = {
+            param($col)
+            if ($colIndex.ContainsKey($col) -and $colIndex[$col] -lt $parts.Count) { $parts[$colIndex[$col]].Trim() } else { "" }
+        }
+        $src      = & $get "Source_Filament"
+        $tgt      = & $get "Target_Filament"
+        $tunedVol = & $get "Tuned_Volume"
+        $baseVol  = & $get "Base Volume"
+
+        if ($needsMigration) {
+            $tuned = -not [string]::IsNullOrWhiteSpace($tunedVol)
+        } else {
+            $tunedRaw = & $get "Tuned"
+            $tuned = $tunedRaw -match '(?i)^(true|yes|1|x)$'
+        }
+
+        $script:PurgeDict.Add([PSCustomObject]@{
+            Source_Filament = $src
+            Target_Filament = $tgt
+            Tuned           = $tuned
+            Tuned_Volume    = $tunedVol
+            Base_Volume     = $baseVol
+        }) | Out-Null
+    }
+
+    if ($needsMigration) {
+        Write-Log "Load-PurgeDictionary: migrating CSV to drop Test_Volume/Iterations columns"
+        Save-PurgeDictionary | Out-Null
+    }
+    Write-Log "Load-PurgeDictionary: loaded $($script:PurgeDict.Count) entries"
+}
+
+Load-PurgeDictionary
 function Save-NamesLibrary {
     try {
         $sb = [System.Text.StringBuilder]::new()
@@ -5096,8 +5170,10 @@ function Build-LibrariesPanel {
     }
     $btnNavFilaments = New-NavBtn "Filaments"
     $btnNavNaming    = New-NavBtn "Naming Conventions"
+    $btnNavPurge     = New-NavBtn "Purge Dictionary"
     $sideStack.Children.Add($btnNavFilaments) | Out-Null
     $sideStack.Children.Add($btnNavNaming)    | Out-Null
+    $sideStack.Children.Add($btnNavPurge)     | Out-Null
 
     # ── Content area ──────────────────────────────────────────────────────────
     $contentGrid = New-Object System.Windows.Controls.Grid
@@ -5107,17 +5183,20 @@ function Build-LibrariesPanel {
     # Two overlapping section panels — show one at a time
     $secFilaments = New-Object System.Windows.Controls.Grid; $secFilaments.Background = Get-WpfColor "#0D0E10"; $secFilaments.Visibility = "Visible"
     $secNaming    = New-Object System.Windows.Controls.Grid; $secNaming.Background    = Get-WpfColor "#0D0E10"; $secNaming.Visibility    = "Collapsed"
+    $secPurge     = New-Object System.Windows.Controls.Grid; $secPurge.Background     = Get-WpfColor "#0D0E10"; $secPurge.Visibility     = "Collapsed"
     $contentGrid.Children.Add($secFilaments) | Out-Null
     $contentGrid.Children.Add($secNaming)    | Out-Null
+    $contentGrid.Children.Add($secPurge)     | Out-Null
 
     # Nav button click logic — populate script-scope LibNavState so Set-NavSection works after this function returns
-    $navBtns = @{ Filaments=$btnNavFilaments; "Naming Conventions"=$btnNavNaming }
-    $navSecs = @{ Filaments=$secFilaments;    "Naming Conventions"=$secNaming }
+    $navBtns = @{ Filaments=$btnNavFilaments; "Naming Conventions"=$btnNavNaming; "Purge Dictionary"=$btnNavPurge }
+    $navSecs = @{ Filaments=$secFilaments;    "Naming Conventions"=$secNaming;    "Purge Dictionary"=$secPurge }
     $script:LibNavState.NavBtns = $navBtns
     $script:LibNavState.NavSecs = $navSecs
     Set-NavSection "Filaments"
     $btnNavFilaments.Add_Click({ Write-Log "btnNavFilaments: clicked"; Set-NavSection "Filaments"          })
     $btnNavNaming.Add_Click({    Write-Log "btnNavNaming: clicked";    Set-NavSection "Naming Conventions" })
+    $btnNavPurge.Add_Click({     Write-Log "btnNavPurge: clicked";     Set-NavSection "Purge Dictionary"   })
 
     # ══════════════════════════════════════════════════════════════════════════
     #  FILAMENTS SECTION
@@ -5757,6 +5836,171 @@ function Build-LibrariesPanel {
                 $this.Background = Get-WpfColor "#D95F5F"
             }
         } catch { Write-Log "btnSaveTags EXCEPTION: $($_.Exception.Message)" "ERROR"; Write-Log "  STACK: $($_.ScriptStackTrace)" "ERROR"; throw }
+    }.GetNewClosure())
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  PURGE DICTIONARY SECTION
+    # ══════════════════════════════════════════════════════════════════════════
+    $purgeContainer = New-Object System.Windows.Controls.Grid
+    $purgeContainer.Margin = New-Object System.Windows.Thickness(20,16,20,20)
+    $purgeContainer.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{ Height = "Auto" })) | Out-Null
+    $purgeContainer.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{ Height = "Auto" })) | Out-Null
+    $purgeContainer.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition)) | Out-Null
+    $purgeContainer.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{ Height = "Auto" })) | Out-Null
+    $secPurge.Children.Add($purgeContainer) | Out-Null
+
+    $purgeHdr = New-Object System.Windows.Controls.TextBlock; $purgeHdr.Text = "Purge Dictionary"
+    $purgeHdr.FontSize = 14; $purgeHdr.FontWeight = [System.Windows.FontWeights]::Bold
+    $purgeHdr.Foreground = Get-WpfColor "#C8CFDD"; $purgeHdr.Margin = New-Object System.Windows.Thickness(0,0,0,10)
+    [System.Windows.Controls.Grid]::SetRow($purgeHdr, 0); $purgeContainer.Children.Add($purgeHdr) | Out-Null
+
+    # ── Filter bar ────────────────────────────────────────────────────────────
+    $purgeFilterPanel = New-Object System.Windows.Controls.StackPanel
+    $purgeFilterPanel.Orientation = "Horizontal"; $purgeFilterPanel.Margin = New-Object System.Windows.Thickness(0,0,0,12)
+    [System.Windows.Controls.Grid]::SetRow($purgeFilterPanel, 1); $purgeContainer.Children.Add($purgeFilterPanel) | Out-Null
+
+    function New-PurgeFilterCombo([string]$labelText, [double]$width) {
+        $grp = New-Object System.Windows.Controls.StackPanel
+        $grp.Orientation = "Vertical"; $grp.Margin = New-Object System.Windows.Thickness(0,0,16,0)
+        $purgeFilterPanel.Children.Add($grp) | Out-Null
+
+        $lbl = New-Object System.Windows.Controls.TextBlock; $lbl.Text = $labelText; $lbl.FontSize = 11
+        $lbl.Foreground = Get-WpfColor "#888A9A"; $lbl.Margin = New-Object System.Windows.Thickness(0,0,0,4)
+        $grp.Children.Add($lbl) | Out-Null
+
+        $cmb = New-Object System.Windows.Controls.ComboBox
+        $cmb.Width = $width; $cmb.Height = 28
+        $cmb.Background = Get-WpfColor "#1C1D23"; $cmb.Foreground = Get-WpfColor "#E0E3EC"
+        $cmb.BorderBrush = Get-WpfColor "#3A3C4A"; $cmb.BorderThickness = New-Object System.Windows.Thickness(1)
+        $cmb.SetResourceReference([System.Windows.FrameworkElement]::StyleProperty, [System.Windows.Controls.ToolBar]::ComboBoxStyleKey)
+        $cmb.Resources[[System.Windows.SystemColors]::WindowBrushKey]        = Get-WpfColor "#1C1D23"
+        $cmb.Resources[[System.Windows.SystemColors]::WindowTextBrushKey]    = Get-WpfColor "#E0E3EC"
+        $cmb.Resources[[System.Windows.SystemColors]::HighlightBrushKey]     = Get-WpfColor "#3A5080"
+        $cmb.Resources[[System.Windows.SystemColors]::HighlightTextBrushKey] = Get-WpfColor "#FFFFFF"
+        $cmbItemStyle = New-Object System.Windows.Style([System.Windows.Controls.ComboBoxItem])
+        $cmbItemStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::BackgroundProperty, (Get-WpfColor "#1C1D23"))))
+        $cmbItemStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::ForegroundProperty, (Get-WpfColor "#E0E3EC"))))
+        $cmb.ItemContainerStyle = $cmbItemStyle
+        $grp.Children.Add($cmb) | Out-Null
+        return $cmb
+    }
+
+    $cmbPurgeFrom = New-PurgeFilterCombo "From" 220
+    [void]$cmbPurgeFrom.Items.Add("(All)")
+    foreach ($srcName in @($script:PurgeDict | Select-Object -ExpandProperty Source_Filament -Unique | Sort-Object)) {
+        [void]$cmbPurgeFrom.Items.Add($srcName)
+    }
+    $cmbPurgeFrom.SelectedIndex = 0
+
+    $cmbPurgeTuned = New-PurgeFilterCombo "Tuned" 130
+    foreach ($opt in @("(All)","Tuned only","Not tuned")) { [void]$cmbPurgeTuned.Items.Add($opt) }
+    $cmbPurgeTuned.SelectedIndex = 0
+
+    $cmbPurgeVol = New-PurgeFilterCombo "Tuned Volume" 150
+    foreach ($opt in @("(All)","Has value","Empty")) { [void]$cmbPurgeVol.Items.Add($opt) }
+    $cmbPurgeVol.SelectedIndex = 0
+
+    $purgeGrid = New-Object System.Windows.Controls.DataGrid
+    $purgeGrid.AutoGenerateColumns = $false
+    $purgeGrid.CanUserAddRows = $false
+    $purgeGrid.CanUserSortColumns = $true
+    $purgeGrid.HeadersVisibility = "Column"
+    $purgeGrid.GridLinesVisibility = "Horizontal"
+    $purgeGrid.Background = Get-WpfColor "#1C1D23"
+    $purgeGrid.Foreground = Get-WpfColor "#E0E3EC"
+    $purgeGrid.RowBackground = Get-WpfColor "#1C1D23"
+    $purgeGrid.AlternatingRowBackground = Get-WpfColor "#21222A"
+    $purgeGrid.BorderBrush = Get-WpfColor "#2A2C38"; $purgeGrid.BorderThickness = New-Object System.Windows.Thickness(1)
+    $purgeGrid.RowHeaderWidth = 0
+    [System.Windows.Controls.Grid]::SetRow($purgeGrid, 2); $purgeContainer.Children.Add($purgeGrid) | Out-Null
+
+    # Column headers default to a washed-out gray on this dark theme — force a legible style
+    $purgeHdrStyle = New-Object System.Windows.Style([System.Windows.Controls.Primitives.DataGridColumnHeader])
+    $purgeHdrStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Primitives.DataGridColumnHeader]::BackgroundProperty, (Get-WpfColor "#252630"))))
+    $purgeHdrStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Primitives.DataGridColumnHeader]::ForegroundProperty, (Get-WpfColor "#E8EBF2"))))
+    $purgeHdrStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Primitives.DataGridColumnHeader]::FontWeightProperty, [System.Windows.FontWeights]::SemiBold)))
+    $purgeHdrStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Primitives.DataGridColumnHeader]::PaddingProperty, (New-Object System.Windows.Thickness(8,6,8,6)))))
+    $purgeHdrStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Primitives.DataGridColumnHeader]::BorderBrushProperty, (Get-WpfColor "#2A2C38"))))
+    $purgeHdrStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Primitives.DataGridColumnHeader]::BorderThicknessProperty, (New-Object System.Windows.Thickness(0,0,1,1)))))
+    $purgeGrid.ColumnHeaderStyle = $purgeHdrStyle
+
+    $colFrom = New-Object System.Windows.Controls.DataGridTextColumn
+    $colFrom.Header = "From"; $colFrom.Binding = New-Object System.Windows.Data.Binding("Source_Filament")
+    $colFrom.Width = New-Object System.Windows.Controls.DataGridLength(220)
+    $purgeGrid.Columns.Add($colFrom) | Out-Null
+
+    $colTo = New-Object System.Windows.Controls.DataGridTextColumn
+    $colTo.Header = "To"; $colTo.Binding = New-Object System.Windows.Data.Binding("Target_Filament")
+    $colTo.Width = New-Object System.Windows.Controls.DataGridLength(220)
+    $purgeGrid.Columns.Add($colTo) | Out-Null
+
+    $colTuned = New-Object System.Windows.Controls.DataGridCheckBoxColumn
+    $colTuned.Header = "Tuned"; $colTuned.Binding = New-Object System.Windows.Data.Binding("Tuned")
+    $colTuned.Width = 60
+    $purgeGrid.Columns.Add($colTuned) | Out-Null
+
+    $colTunedVol = New-Object System.Windows.Controls.DataGridTextColumn
+    $colTunedVol.Header = "Tuned Volume"; $colTunedVol.Binding = New-Object System.Windows.Data.Binding("Tuned_Volume")
+    $colTunedVol.Width = 110
+    $purgeGrid.Columns.Add($colTunedVol) | Out-Null
+
+    $colBaseVol = New-Object System.Windows.Controls.DataGridTextColumn
+    $colBaseVol.Header = "Base Volume"; $colBaseVol.Binding = New-Object System.Windows.Data.Binding("Base_Volume")
+    $colBaseVol.Width = 110
+    $purgeGrid.Columns.Add($colBaseVol) | Out-Null
+
+    $purgeGrid.ItemsSource = $script:PurgeDict
+    $purgeView = [System.Windows.Data.CollectionViewSource]::GetDefaultView($script:PurgeDict)
+    $purgeView.SortDescriptions.Add((New-Object System.ComponentModel.SortDescription("Source_Filament", [System.ComponentModel.ListSortDirection]::Ascending))) | Out-Null
+
+    # ── Filter predicate — re-applied whenever a filter combo changes ────────
+    $capturedPurgeView      = $purgeView
+    $capturedCmbPurgeFrom   = $cmbPurgeFrom
+    $capturedCmbPurgeTuned  = $cmbPurgeTuned
+    $capturedCmbPurgeVol    = $cmbPurgeVol
+
+    $applyPurgeFilter = {
+        $fromSel  = $capturedCmbPurgeFrom.SelectedItem
+        $tunedSel = $capturedCmbPurgeTuned.SelectedItem
+        $volSel   = $capturedCmbPurgeVol.SelectedItem
+        $capturedPurgeView.Filter = [Predicate[Object]]{
+            param($item)
+            if ($fromSel -and $fromSel -ne "(All)" -and $item.Source_Filament -ne $fromSel) { return $false }
+            if ($tunedSel -eq "Tuned only" -and -not $item.Tuned) { return $false }
+            if ($tunedSel -eq "Not tuned" -and $item.Tuned) { return $false }
+            $hasVol = -not [string]::IsNullOrWhiteSpace($item.Tuned_Volume)
+            if ($volSel -eq "Has value" -and -not $hasVol) { return $false }
+            if ($volSel -eq "Empty" -and $hasVol) { return $false }
+            return $true
+        }
+        $capturedPurgeView.Refresh()
+    }.GetNewClosure()
+
+    $cmbPurgeFrom.Add_SelectionChanged({ Write-Log "cmbPurgeFrom: changed"; & $applyPurgeFilter }.GetNewClosure())
+    $cmbPurgeTuned.Add_SelectionChanged({ Write-Log "cmbPurgeTuned: changed"; & $applyPurgeFilter }.GetNewClosure())
+    $cmbPurgeVol.Add_SelectionChanged({ Write-Log "cmbPurgeVol: changed"; & $applyPurgeFilter }.GetNewClosure())
+
+    $purgeBtnGrid = New-Object System.Windows.Controls.Grid; $purgeBtnGrid.Margin = New-Object System.Windows.Thickness(0,10,0,0)
+    $purgeBtnGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = [System.Windows.GridLength]::new(160) })) | Out-Null
+    [System.Windows.Controls.Grid]::SetRow($purgeBtnGrid, 3); $purgeContainer.Children.Add($purgeBtnGrid) | Out-Null
+
+    $btnSavePurge = New-Object System.Windows.Controls.Button; $btnSavePurge.Content = "Save Changes"
+    $btnSavePurge.Height = 32; $btnSavePurge.FontSize = 12; $btnSavePurge.FontWeight = [System.Windows.FontWeights]::Bold
+    $btnSavePurge.Background = Get-WpfColor "#3A5080"; $btnSavePurge.Foreground = Get-WpfColor "#FFFFFF"
+    $btnSavePurge.BorderThickness = 0; $btnSavePurge.Cursor = [System.Windows.Input.Cursors]::Hand
+    [System.Windows.Controls.Grid]::SetColumn($btnSavePurge, 0); $purgeBtnGrid.Children.Add($btnSavePurge) | Out-Null
+
+    $capturedPurgeGrid = $purgeGrid
+    $btnSavePurge.Add_Click({
+        Write-Log "btnSavePurge: clicked"
+        try {
+            $capturedPurgeGrid.CommitEdit([System.Windows.Controls.DataGridEditingUnit]::Row, $true) | Out-Null
+            if (Save-PurgeDictionary) {
+                $this.Background = Get-WpfColor "#4CAF72"
+            } else {
+                $this.Background = Get-WpfColor "#D95F5F"
+            }
+        } catch { Write-Log "btnSavePurge EXCEPTION: $($_.Exception.Message)" "ERROR"; Write-Log "  STACK: $($_.ScriptStackTrace)" "ERROR"; throw }
     }.GetNewClosure())
 
     $script:LibrariesPanel = $root

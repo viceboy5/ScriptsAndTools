@@ -5,8 +5,8 @@
 #   1. Reads filament_colour from Metadata/project_settings.config
 #   2. Matches each hex color to a filament name via FilamentLibrary.csv
 #   3. Looks up (source, target) pairs in PurgeDictionary.csv
-#   4. Updates flush_volumes_matrix entries where Tuned_Volume (col E)
-#      is present - entries with no tuned value are left unchanged.
+#   4. Updates flush_volumes_matrix entries where Tuned_Volume is present
+#      - entries with no tuned value are left unchanged.
 #
 # Drag and drop files or folders onto UpdatePurgeMatrix.bat to run.
 # ============================================================
@@ -65,7 +65,7 @@ function Resolve-FilamentName {
 # ------------------------------------------------------------
 $PurgeDict = @{}
 
-foreach ($row in (Import-Csv $PURGE_DICT)) {
+foreach ($row in (Import-Csv $PURGE_DICT -Delimiter "`t")) {
     $src = $row.Source_Filament.Trim()
     $tgt = $row.Target_Filament.Trim()
     $vol = $row.Tuned_Volume.Trim()
