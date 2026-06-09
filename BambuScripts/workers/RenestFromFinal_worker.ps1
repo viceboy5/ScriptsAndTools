@@ -96,10 +96,15 @@ function Apply-TxCorrection([double[]]$tx, [double[]]$rCorr, [double[]]$tDelta, 
     if ([Math]::Abs($sRatio - 1.0) -gt 1e-6) {
         for ($ri = 0; $ri -lt 9; $ri++) { $rNew[$ri] *= $sRatio }
     }
-    $dRot = Rotate-Vec $tDelta $rSrc
+    # Rotate the XY centroid correction through rSrc for X/Y output, but discard dRot[2].
+    # When the plate rotation maps a local axis to world Z (e.g. flat colorcut 90-deg tilt),
+    # any XY centroid offset bleeds into dRot[2] and corrupts world Z.  Z is corrected
+    # separately and directly via tDelta[2] = finalBuildZ - srcMeanZ.
+    $tDeltaXY = [double[]]($tDelta[0], $tDelta[1], 0)
+    $dRot = Rotate-Vec $tDeltaXY $rSrc
     $t0 = $tx[9]  + $dRot[0]
     $t1 = $tx[10] + $dRot[1]
-    $t2 = $tx[11] + $dRot[2]
+    $t2 = $tx[11] + $tDelta[2]
     return [double[]](
         $rNew[0],$rNew[1],$rNew[2], $rNew[3],$rNew[4],$rNew[5], $rNew[6],$rNew[7],$rNew[8],
         $t0, $t1, $t2)
@@ -506,6 +511,14 @@ try {
     # to near the local origin), but the source plate translations assume the original
     # (un-centered) local frame.  delta = centroid_src - centroid_final * rotCorrection
     # is added to each clone translation (rotated by R_src) to compensate.
+    #
+    # IMPORTANT: this only works when BOTH the source template AND the Final have
+    # identity-rotation components so their centroids are in the same coordinate frame.
+    # For colorcut designs the Final's components all carry a ~90-degree rotation, making
+    # Get-CompCentroid return (0,0,0).  Comparing that against the Nest centroid (which IS
+    # in identity-rotation frame) produces a bogus delta that bleeds into world Z via the
+    # plate rotation.  When the Final has no identity-rotation components, skip the
+    # centroid correction entirely (zero both sides).
     $centroidFinal    = Get-CompCentroid $masterCompTransforms
     $centroidFinalRot = Rotate-Vec $centroidFinal $rotCorrection
     $td0 = $centroidSrc[0]-$centroidFinalRot[0]
