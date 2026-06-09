@@ -136,6 +136,20 @@ public class PurgeDictRow : INotifyPropertyChanged {
         _sourceHex = sourceHex; _targetHex = targetHex;
     }
 
+    public void RevertToBaseline() {
+        _source      = _origSource;      _savedFrom        = false;
+        _target      = _origTarget;      _savedTo          = false;
+        _tuned       = _origTuned;       _savedTuned       = false;
+        _tunedVolume = _origTunedVolume; _savedTunedVolume = false;
+        _baseVolume  = _origBaseVolume;  _savedBaseVolume  = false;
+        Raise("Source_Filament"); Raise("Target_Filament"); Raise("Tuned");
+        Raise("Tuned_Volume"); Raise("Base_Volume"); Raise("Savings_Pct");
+        Raise("FromDirty");        Raise("ToDirty");          Raise("TunedDirty");
+        Raise("TunedVolumeDirty"); Raise("BaseVolumeDirty");  Raise("IsDirty");
+        Raise("FromSaved");        Raise("ToSaved");          Raise("TunedSaved");
+        Raise("TunedVolumeSaved"); Raise("BaseVolumeSaved");
+    }
+
     public void CommitBaseline() {
         bool chFrom  = _source      != _origSource;
         bool chTo    = _target      != _origTarget;
@@ -6231,24 +6245,28 @@ function Build-LibrariesPanel {
     $purgeHdrStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Primitives.DataGridColumnHeader]::BorderThicknessProperty, (New-Object System.Windows.Thickness(0,0,1,1)))))
     $purgeGrid.ColumnHeaderStyle = $purgeHdrStyle
 
-    # Cell highlight: green while saved-but-unedited, orange while dirty (dirty takes precedence)
+    # Cell highlight: green while saved-but-unedited, orange while dirty (dirty takes precedence).
+    # Built from a XAML string so WPF's own TypeConverter handles the bool->Value comparison --
+    # code-behind DataTrigger Value=$true can silently fail in PowerShell's WPF interop.
     function New-PurgeCellStyle([string]$dirtyProp, [string]$savedProp) {
-        $style = New-Object System.Windows.Style([System.Windows.Controls.DataGridCell])
-        # Saved = green (added first; dirty trigger below overrides if both somehow true)
-        $trigSaved = New-Object System.Windows.DataTrigger
-        $trigSaved.Binding = New-Object System.Windows.Data.Binding($savedProp)
-        $trigSaved.Value = $true
-        $trigSaved.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::BackgroundProperty, (Get-WpfColor “#1E472E”)))) | Out-Null
-        $trigSaved.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::ForegroundProperty, (Get-WpfColor “#88DDAA”)))) | Out-Null
-        $style.Triggers.Add($trigSaved) | Out-Null
-        # Dirty = orange (added second, takes precedence)
-        $trigDirty = New-Object System.Windows.DataTrigger
-        $trigDirty.Binding = New-Object System.Windows.Data.Binding($dirtyProp)
-        $trigDirty.Value = $true
-        $trigDirty.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::BackgroundProperty, (Get-WpfColor “#B9711F”)))) | Out-Null
-        $trigDirty.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::ForegroundProperty, (Get-WpfColor “#1A1A1A”)))) | Out-Null
-        $style.Triggers.Add($trigDirty) | Out-Null
-        return $style
+        $xaml = @”
+<Style TargetType='DataGridCell'
+       xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
+       xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'>
+  <Style.Triggers>
+    <DataTrigger Binding='{Binding $savedProp}' Value='True'>
+      <Setter Property='Background' Value='#1E472E'/>
+      <Setter Property='Foreground' Value='#88DDAA'/>
+    </DataTrigger>
+    <DataTrigger Binding='{Binding $dirtyProp}' Value='True'>
+      <Setter Property='Background' Value='#B9711F'/>
+      <Setter Property='Foreground' Value='#1A1A1A'/>
+    </DataTrigger>
+  </Style.Triggers>
+</Style>
+“@
+        $xr = [System.Xml.XmlReader]::Create((New-Object System.IO.StringReader($xaml)))
+        return [System.Windows.Markup.XamlReader]::Load($xr)
     }
 
     # Swatch + name template for the From/To columns
@@ -6367,6 +6385,8 @@ function Build-LibrariesPanel {
 
     $purgeBtnGrid = New-Object System.Windows.Controls.Grid; $purgeBtnGrid.Margin = New-Object System.Windows.Thickness(0,10,0,0)
     $purgeBtnGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = [System.Windows.GridLength]::new(160) })) | Out-Null
+    $purgeBtnGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = [System.Windows.GridLength]::new(8) })) | Out-Null
+    $purgeBtnGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = [System.Windows.GridLength]::new(140) })) | Out-Null
     [System.Windows.Controls.Grid]::SetRow($purgeBtnGrid, 3); $purgeContainer.Children.Add($purgeBtnGrid) | Out-Null
 
     $btnSavePurge = New-Object System.Windows.Controls.Button; $btnSavePurge.Content = "Save Changes"
@@ -6375,6 +6395,13 @@ function Build-LibrariesPanel {
     $btnSavePurge.BorderThickness = 0; $btnSavePurge.Cursor = [System.Windows.Input.Cursors]::Hand
     $btnSavePurge.IsEnabled = $false
     [System.Windows.Controls.Grid]::SetColumn($btnSavePurge, 0); $purgeBtnGrid.Children.Add($btnSavePurge) | Out-Null
+
+    $btnDiscardPurge = New-Object System.Windows.Controls.Button; $btnDiscardPurge.Content = "Discard Changes"
+    $btnDiscardPurge.Height = 32; $btnDiscardPurge.FontSize = 12; $btnDiscardPurge.FontWeight = [System.Windows.FontWeights]::Bold
+    $btnDiscardPurge.Background = Get-WpfColor "#3A3A3A"; $btnDiscardPurge.Foreground = Get-WpfColor "#666666"
+    $btnDiscardPurge.BorderThickness = 0; $btnDiscardPurge.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnDiscardPurge.IsEnabled = $false
+    [System.Windows.Controls.Grid]::SetColumn($btnDiscardPurge, 2); $purgeBtnGrid.Children.Add($btnDiscardPurge) | Out-Null
 
     $capturedPurgeGrid     = $purgeGrid
     $capturedBtnSavePurge  = $btnSavePurge
@@ -6390,16 +6417,25 @@ function Build-LibrariesPanel {
             [System.Windows.Threading.DispatcherPriority]::Background, [action]{ & $upd }) | Out-Null
     }.GetNewClosure())
 
-    $capturedBtnSavePurge3 = $btnSavePurge
-    $capturedPurgeDict3    = $script:PurgeDict
+    $capturedBtnSavePurge3    = $btnSavePurge
+    $capturedBtnDiscardPurge3 = $btnDiscardPurge
+    $capturedPurgeDict3       = $script:PurgeDict
     $capturedUpdateAvgSavings3 = $updatePurgeAvgSavings
     $purgeRowChangedHandler = [System.ComponentModel.PropertyChangedEventHandler]({
         param($sender, $e)
         if ($e.PropertyName -eq "IsDirty") {
             $anyDirty = $false
             foreach ($r in $capturedPurgeDict3) { if ($r.IsDirty) { $anyDirty = $true; break } }
-            if ($anyDirty) { $capturedBtnSavePurge3.Background = Get-WpfColor "#3A5080" }
-            $capturedBtnSavePurge3.IsEnabled = $anyDirty
+            if ($anyDirty) {
+                $capturedBtnSavePurge3.Background    = Get-WpfColor "#3A5080"
+                $capturedBtnDiscardPurge3.Background = Get-WpfColor "#6B3030"
+                $capturedBtnDiscardPurge3.Foreground = Get-WpfColor "#FFFFFF"
+            } else {
+                $capturedBtnDiscardPurge3.Background = Get-WpfColor "#3A3A3A"
+                $capturedBtnDiscardPurge3.Foreground = Get-WpfColor "#666666"
+            }
+            $capturedBtnSavePurge3.IsEnabled    = $anyDirty
+            $capturedBtnDiscardPurge3.IsEnabled = $anyDirty
             & $capturedUpdateAvgSavings3
         }
     }.GetNewClosure())
@@ -6407,14 +6443,43 @@ function Build-LibrariesPanel {
         $row.add_PropertyChanged($purgeRowChangedHandler)
     }
 
+    # Captured for use inside save/discard clicks (handler must be detached before bulk ops)
+    $capturedRowHandler       = $purgeRowChangedHandler
+    $capturedBtnDiscardPurge4 = $btnDiscardPurge
+    $capturedBtnSavePurge4    = $btnSavePurge
+    $capturedPurgeDict4       = $script:PurgeDict
+    $capturedPurgeGrid4       = $purgeGrid
+
+    $btnDiscardPurge.Add_Click({
+        Write-Log "btnDiscardPurge: clicked"
+        $capturedPurgeGrid4.CommitEdit([System.Windows.Controls.DataGridEditingUnit]::Row, $true) | Out-Null
+        # Detach handler so per-row RevertToBaseline doesn't trigger N^2 dirty scans
+        foreach ($r in $capturedPurgeDict4) { $r.remove_PropertyChanged($capturedRowHandler) }
+        foreach ($r in $capturedPurgeDict4) { if ($r.IsDirty) { $r.RevertToBaseline() } }
+        foreach ($r in $capturedPurgeDict4) { $r.add_PropertyChanged($capturedRowHandler) }
+        $capturedBtnSavePurge4.IsEnabled    = $false
+        $capturedBtnDiscardPurge4.IsEnabled = $false
+        $capturedBtnDiscardPurge4.Background = Get-WpfColor "#3A3A3A"
+        $capturedBtnDiscardPurge4.Foreground = Get-WpfColor "#666666"
+    }.GetNewClosure())
+
+    $capturedBtnDiscardForSave = $btnDiscardPurge
+    $capturedPurgeDictForSave  = $script:PurgeDict
+    $capturedRowHandlerForSave = $purgeRowChangedHandler
     $btnSavePurge.Add_Click({
         Write-Log "btnSavePurge: clicked"
         try {
             $capturedPurgeGrid.CommitEdit([System.Windows.Controls.DataGridEditingUnit]::Row, $true) | Out-Null
             if (Save-PurgeDictionary) {
-                foreach ($r in $script:PurgeDict) { $r.CommitBaseline() }
+                # Detach handler so per-row CommitBaseline doesn't trigger N^2 dirty scans
+                foreach ($r in $capturedPurgeDictForSave) { $r.remove_PropertyChanged($capturedRowHandlerForSave) }
+                foreach ($r in $capturedPurgeDictForSave) { $r.CommitBaseline() }
+                foreach ($r in $capturedPurgeDictForSave) { $r.add_PropertyChanged($capturedRowHandlerForSave) }
                 $this.Background = Get-WpfColor "#4CAF72"
-                $this.IsEnabled = $false
+                $this.IsEnabled  = $false
+                $capturedBtnDiscardForSave.IsEnabled = $false
+                $capturedBtnDiscardForSave.Background = Get-WpfColor "#3A3A3A"
+                $capturedBtnDiscardForSave.Foreground = Get-WpfColor "#666666"
             } else {
                 $this.Background = Get-WpfColor "#D95F5F"
             }
