@@ -9,10 +9,22 @@ $ErrorActionPreference = 'Stop'
 
 # Build the full list of files to slice.
 # Master-Controller passes -InputPath (single file) - that path is honoured as-is.
-# Standalone / Slice.bat passes -InputPaths (array) for multi-file drag-drop.
+# Standalone / Slice.bat passes -InputPaths which can be individual .3mf files OR
+# folder paths - folders are expanded recursively here so Slice.bat never has to
+# pre-expand large directories into a giant command-line string (which would exceed
+# cmd.exe's ~8191 char limit for folders containing many files).
 $allInputs = [System.Collections.Generic.List[string]]::new()
 if ($InputPath -ne "") { $allInputs.Add($InputPath) }
-foreach ($p in $InputPaths) { if ($p -ne "") { $allInputs.Add($p) } }
+foreach ($p in $InputPaths) {
+    if ($p -eq "") { continue }
+    if (Test-Path $p -PathType Container) {
+        Get-ChildItem -Path $p -Filter "*.3mf" -Recurse |
+            Where-Object { $_.Name -notlike "*.gcode.3mf" } |
+            ForEach-Object { $allInputs.Add($_.FullName) }
+    } else {
+        $allInputs.Add($p)
+    }
+}
 
 if ($allInputs.Count -eq 0) {
     Write-Host "  [!] ERROR: No input file specified." -ForegroundColor Red

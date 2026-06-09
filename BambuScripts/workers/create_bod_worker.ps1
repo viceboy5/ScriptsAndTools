@@ -303,6 +303,45 @@ if ($Mode -eq 'Grid') {
         Save-Xml $sett $settPath
     }
 
+    # -- Reposition the prime tower to the right of the grid ----------------------
+    # Place it just to the right of the grid block, near the bottom of the plate
+    # (above calibration lines), and clamp it so it never overruns the right edge.
+    $TOWER_GAP          = 5.0    # mm clearance between grid right edge and tower left edge
+    $TOWER_Y            = 15.0   # mm from plate front - above calibration lines
+    $TOWER_EDGE_MARGIN  = 5.0    # minimum clearance from the right plate edge
+    $psCfgPath = Find-File $tempDir 'Metadata/project_settings.config'
+    if ($null -ne $psCfgPath) {
+        $psCfgText = [System.IO.File]::ReadAllText($psCfgPath, [System.Text.Encoding]::UTF8)
+
+        # Read prime_tower_width from the config (default 35mm if key absent)
+        $towerWidth = 35.0
+        if ($psCfgText -match '"prime_tower_width"\s*:\s*"([0-9.]+)"') {
+            try { $towerWidth = [double]$Matches[1] } catch {}
+        }
+
+        $gridRightEdge = $offsetX + $gridW
+        $towerX = $gridRightEdge + $TOWER_GAP
+
+        # Clamp: ensure tower right edge stays $TOWER_EDGE_MARGIN away from the plate edge
+        $towerMaxX = $PLATE_W - $TOWER_EDGE_MARGIN - $towerWidth
+        if ($towerX -gt $towerMaxX) {
+            Write-Host ("[BOD-Grid] Prime tower clamped left: X {0:F1} -> {1:F1} (tower {2:F0}mm wide, plate {3:F0}mm)" -f $towerX, $towerMaxX, $towerWidth, $PLATE_W) -ForegroundColor Yellow
+            $towerX = $towerMaxX
+        }
+
+        $towerXStr = $towerX.ToString('F4', [System.Globalization.CultureInfo]::InvariantCulture)
+        $towerYStr = $TOWER_Y.ToString('F4', [System.Globalization.CultureInfo]::InvariantCulture)
+
+        # Patch the two keys in-place; handles both compact and indented JSON
+        $psCfgText = $psCfgText -replace '"wipe_tower_x"\s*:\s*\[[^\]]*\]', ('"wipe_tower_x": ["' + $towerXStr + '"]')
+        $psCfgText = $psCfgText -replace '"wipe_tower_y"\s*:\s*\[[^\]]*\]', ('"wipe_tower_y": ["' + $towerYStr + '"]')
+
+        [System.IO.File]::WriteAllText($psCfgPath, $psCfgText, [System.Text.Encoding]::UTF8)
+        Write-Host ("[BOD-Grid] Prime tower -> X={0:F1}  Y={1:F1}  width={2:F0}mm  right edge at {3:F1}mm" -f $towerX, $TOWER_Y, $towerWidth, ($towerX + $towerWidth))
+    } else {
+        Write-Host "[BOD-Grid] WARNING: project_settings.config not found - prime tower position not updated." -ForegroundColor Yellow
+    }
+
     # -- Save model, strip plate images, repack -----------------------------------
     Save-Xml $xml $modelFile
 
