@@ -232,7 +232,7 @@ Esun Black,Voxel Silk (Sky Blue),,,498
 Esun Blue,Esun Dark Blue,TRUE,100,211
 Esun Blue,Esun Light Brown,TRUE,170,562
 Esun Blue,Esun Haze Blue,TRUE,125,472
-Esun Blue,Esun Red,TRUE,140,474
+Esun Blue,Esun Red,TRUE,310,474
 Esun Blue,Esun Light Blue,TRUE,175,559
 Esun Blue,Esun Fire Engine Red,TRUE,190,383
 Esun Blue,Esun Cold White,TRUE,700,698
@@ -248,7 +248,7 @@ Esun Blue,Esun Jade Green,,,557
 Esun Blue,Esun Magenta,,,453
 Esun Blue,Esun Olive Green,,,495
 Esun Blue,Esun Orange,,,617
-Esun Blue,Esun Peak Green,,,685
+Esun Blue,Esun Peak Green,TRUE,,685
 Esun Blue,Esun Pine Green,,,419
 Esun Blue,Esun Green,,,342
 Esun Blue,Esun Pink,,,563

@@ -67,25 +67,28 @@ public class PurgeDictRow : INotifyPropertyChanged {
     private string _origTunedVolume = "";
     private string _origBaseVolume = "";
 
+    // Per-field saved-to-disk markers: true after a save, cleared when that field is edited again
+    private bool _savedFrom, _savedTo, _savedTuned, _savedTunedVolume, _savedBaseVolume;
+
     public string Source_Filament {
         get { return _source; }
-        set { _source = value; Raise("Source_Filament"); Raise("FromDirty"); Raise("IsDirty"); }
+        set { _source = value; _savedFrom = false; Raise("Source_Filament"); Raise("FromDirty"); Raise("FromSaved"); Raise("IsDirty"); }
     }
     public string Target_Filament {
         get { return _target; }
-        set { _target = value; Raise("Target_Filament"); Raise("ToDirty"); Raise("IsDirty"); }
+        set { _target = value; _savedTo = false; Raise("Target_Filament"); Raise("ToDirty"); Raise("ToSaved"); Raise("IsDirty"); }
     }
     public bool Tuned {
         get { return _tuned; }
-        set { _tuned = value; Raise("Tuned"); Raise("TunedDirty"); Raise("IsDirty"); Raise("Savings_Pct"); }
+        set { _tuned = value; _savedTuned = false; Raise("Tuned"); Raise("TunedDirty"); Raise("TunedSaved"); Raise("IsDirty"); Raise("Savings_Pct"); }
     }
     public string Tuned_Volume {
         get { return _tunedVolume; }
-        set { _tunedVolume = value; Raise("Tuned_Volume"); Raise("TunedVolumeDirty"); Raise("IsDirty"); Raise("Savings_Pct"); }
+        set { _tunedVolume = value; _savedTunedVolume = false; Raise("Tuned_Volume"); Raise("TunedVolumeDirty"); Raise("TunedVolumeSaved"); Raise("IsDirty"); Raise("Savings_Pct"); }
     }
     public string Base_Volume {
         get { return _baseVolume; }
-        set { _baseVolume = value; Raise("Base_Volume"); Raise("BaseVolumeDirty"); Raise("IsDirty"); Raise("Savings_Pct"); }
+        set { _baseVolume = value; _savedBaseVolume = false; Raise("Base_Volume"); Raise("BaseVolumeDirty"); Raise("BaseVolumeSaved"); Raise("IsDirty"); Raise("Savings_Pct"); }
     }
     public string Source_Hex { get { return _sourceHex; } set { _sourceHex = value; Raise("Source_Hex"); } }
     public string Target_Hex { get { return _targetHex; } set { _targetHex = value; Raise("Target_Hex"); } }
@@ -120,17 +123,36 @@ public class PurgeDictRow : INotifyPropertyChanged {
         get { return FromDirty || ToDirty || TunedDirty || TunedVolumeDirty || BaseVolumeDirty; }
     }
 
+    public bool FromSaved        { get { return _savedFrom; } }
+    public bool ToSaved          { get { return _savedTo; } }
+    public bool TunedSaved       { get { return _savedTuned; } }
+    public bool TunedVolumeSaved { get { return _savedTunedVolume; } }
+    public bool BaseVolumeSaved  { get { return _savedBaseVolume; } }
+
     public void Load(string source, string target, bool tuned, string tunedVolume, string baseVolume, string sourceHex, string targetHex) {
         _source = source; _target = target; _tuned = tuned; _tunedVolume = tunedVolume; _baseVolume = baseVolume;
         _origSource = source; _origTarget = target; _origTuned = tuned; _origTunedVolume = tunedVolume; _origBaseVolume = baseVolume;
+        _savedFrom = false; _savedTo = false; _savedTuned = false; _savedTunedVolume = false; _savedBaseVolume = false;
         _sourceHex = sourceHex; _targetHex = targetHex;
     }
 
     public void CommitBaseline() {
+        bool chFrom  = _source      != _origSource;
+        bool chTo    = _target      != _origTarget;
+        bool chTuned = _tuned       != _origTuned;
+        bool chTV    = _tunedVolume != _origTunedVolume;
+        bool chBV    = _baseVolume  != _origBaseVolume;
         _origSource = _source; _origTarget = _target; _origTuned = _tuned;
         _origTunedVolume = _tunedVolume; _origBaseVolume = _baseVolume;
-        Raise("FromDirty"); Raise("ToDirty"); Raise("TunedDirty");
-        Raise("TunedVolumeDirty"); Raise("BaseVolumeDirty"); Raise("IsDirty");
+        if (chFrom)  _savedFrom         = true;
+        if (chTo)    _savedTo           = true;
+        if (chTuned) _savedTuned        = true;
+        if (chTV)    _savedTunedVolume  = true;
+        if (chBV)    _savedBaseVolume   = true;
+        Raise("FromDirty");        Raise("ToDirty");          Raise("TunedDirty");
+        Raise("TunedVolumeDirty"); Raise("BaseVolumeDirty");  Raise("IsDirty");
+        Raise("FromSaved");        Raise("ToSaved");          Raise("TunedSaved");
+        Raise("TunedVolumeSaved"); Raise("BaseVolumeSaved");
     }
 }
 "@
@@ -6209,15 +6231,23 @@ function Build-LibrariesPanel {
     $purgeHdrStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Primitives.DataGridColumnHeader]::BorderThicknessProperty, (New-Object System.Windows.Thickness(0,0,1,1)))))
     $purgeGrid.ColumnHeaderStyle = $purgeHdrStyle
 
-    # Cell highlight â€” orange background while a cell's value differs from what's on disk
-    function New-PurgeDirtyCellStyle([string]$dirtyProp) {
+    # Cell highlight: green while saved-but-unedited, orange while dirty (dirty takes precedence)
+    function New-PurgeCellStyle([string]$dirtyProp, [string]$savedProp) {
         $style = New-Object System.Windows.Style([System.Windows.Controls.DataGridCell])
-        $trig  = New-Object System.Windows.DataTrigger
-        $trig.Binding = New-Object System.Windows.Data.Binding($dirtyProp)
-        $trig.Value = $true
-        $trig.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::BackgroundProperty, (Get-WpfColor "#B9711F")))) | Out-Null
-        $trig.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::ForegroundProperty, (Get-WpfColor "#1A1A1A")))) | Out-Null
-        $style.Triggers.Add($trig) | Out-Null
+        # Saved = green (added first; dirty trigger below overrides if both somehow true)
+        $trigSaved = New-Object System.Windows.DataTrigger
+        $trigSaved.Binding = New-Object System.Windows.Data.Binding($savedProp)
+        $trigSaved.Value = $true
+        $trigSaved.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::BackgroundProperty, (Get-WpfColor “#1E472E”)))) | Out-Null
+        $trigSaved.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::ForegroundProperty, (Get-WpfColor “#88DDAA”)))) | Out-Null
+        $style.Triggers.Add($trigSaved) | Out-Null
+        # Dirty = orange (added second, takes precedence)
+        $trigDirty = New-Object System.Windows.DataTrigger
+        $trigDirty.Binding = New-Object System.Windows.Data.Binding($dirtyProp)
+        $trigDirty.Value = $true
+        $trigDirty.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::BackgroundProperty, (Get-WpfColor “#B9711F”)))) | Out-Null
+        $trigDirty.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::ForegroundProperty, (Get-WpfColor “#1A1A1A”)))) | Out-Null
+        $style.Triggers.Add($trigDirty) | Out-Null
         return $style
     }
 
@@ -6251,34 +6281,34 @@ function Build-LibrariesPanel {
     $colFrom.Header = "From"; $colFrom.CellTemplate = New-PurgeSwatchTemplate "Source_Hex" "Source_Filament"
     $colFrom.SortMemberPath = "Source_Filament"
     $colFrom.Width = New-Object System.Windows.Controls.DataGridLength(220)
-    $colFrom.CellStyle = New-PurgeDirtyCellStyle "FromDirty"
+    $colFrom.CellStyle = New-PurgeCellStyle "FromDirty" "FromSaved"
     $purgeGrid.Columns.Add($colFrom) | Out-Null
 
     $colTo = New-Object System.Windows.Controls.DataGridTemplateColumn
     $colTo.Header = "To"; $colTo.CellTemplate = New-PurgeSwatchTemplate "Target_Hex" "Target_Filament"
     $colTo.SortMemberPath = "Target_Filament"
     $colTo.Width = New-Object System.Windows.Controls.DataGridLength(220)
-    $colTo.CellStyle = New-PurgeDirtyCellStyle "ToDirty"
+    $colTo.CellStyle = New-PurgeCellStyle "ToDirty" "ToSaved"
     $purgeGrid.Columns.Add($colTo) | Out-Null
 
     $colTuned = New-Object System.Windows.Controls.DataGridCheckBoxColumn
     $colTuned.Header = "Tuned"; $colTuned.Binding = New-Object System.Windows.Data.Binding("Tuned")
     $colTuned.Width = 60
-    $colTuned.CellStyle = New-PurgeDirtyCellStyle "TunedDirty"
+    $colTuned.CellStyle = New-PurgeCellStyle "TunedDirty" "TunedSaved"
     $purgeGrid.Columns.Add($colTuned) | Out-Null
 
     $colTunedVol = New-Object System.Windows.Controls.DataGridTextColumn
     $colTunedVol.Header = "Tuned Volume"; $colTunedVol.Binding = New-Object System.Windows.Data.Binding("Tuned_Volume")
     $colTunedVol.Width = 110
     $colTunedVol.ElementStyle = $purgeCenterStyle; $colTunedVol.EditingElementStyle = $purgeCenterEditStyle
-    $colTunedVol.CellStyle = New-PurgeDirtyCellStyle "TunedVolumeDirty"
+    $colTunedVol.CellStyle = New-PurgeCellStyle "TunedVolumeDirty" "TunedVolumeSaved"
     $purgeGrid.Columns.Add($colTunedVol) | Out-Null
 
     $colBaseVol = New-Object System.Windows.Controls.DataGridTextColumn
     $colBaseVol.Header = "Base Volume"; $colBaseVol.Binding = New-Object System.Windows.Data.Binding("Base_Volume")
     $colBaseVol.Width = 110
     $colBaseVol.ElementStyle = $purgeCenterStyle; $colBaseVol.EditingElementStyle = $purgeCenterEditStyle
-    $colBaseVol.CellStyle = New-PurgeDirtyCellStyle "BaseVolumeDirty"
+    $colBaseVol.CellStyle = New-PurgeCellStyle "BaseVolumeDirty" "BaseVolumeSaved"
     $purgeGrid.Columns.Add($colBaseVol) | Out-Null
 
     $colSavings = New-Object System.Windows.Controls.DataGridTextColumn
@@ -6368,6 +6398,7 @@ function Build-LibrariesPanel {
         if ($e.PropertyName -eq "IsDirty") {
             $anyDirty = $false
             foreach ($r in $capturedPurgeDict3) { if ($r.IsDirty) { $anyDirty = $true; break } }
+            if ($anyDirty) { $capturedBtnSavePurge3.Background = Get-WpfColor "#3A5080" }
             $capturedBtnSavePurge3.IsEnabled = $anyDirty
             & $capturedUpdateAvgSavings3
         }
