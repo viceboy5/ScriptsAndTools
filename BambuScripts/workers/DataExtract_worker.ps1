@@ -28,7 +28,11 @@ $colorCsvPath = Join-Path $scriptDir "..\libraries\FilamentLibrary.csv"
 $LibraryNames = @{}
 $NameToHex = @{}
 if (Test-Path $colorCsvPath) {
-    $csvLines = [System.IO.File]::ReadAllLines($colorCsvPath)
+    # Open with ReadWrite share so this succeeds even when CardQueueEditor has the file open.
+    $csvFs     = [System.IO.File]::Open($colorCsvPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    $csvReader = [System.IO.StreamReader]::new($csvFs)
+    $csvLines  = $csvReader.ReadToEnd() -split "`r?`n"
+    $csvReader.Dispose(); $csvFs.Dispose()
     foreach ($line in $csvLines) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         $parts = $line -split ','
@@ -504,7 +508,16 @@ if (-not $SkipExtraction) {
                         $filData[$i].color = $cols[$cIdx]
                         if ($filData[$i].color -ne "") {
                             if ($filData[$i].color.StartsWith("#")) {
-                                $filData[$i].rawHex = $filData[$i].color
+                                # Stored value is a raw hex code (lookup failed when TSV was written).
+                                # Re-attempt name resolution now that the library may have been updated.
+                                $storedHex = $filData[$i].color.TrimStart('#').ToUpper()
+                                if ($storedHex.Length -eq 6) { $storedHex = $storedHex + "FF" }
+                                if ($LibraryNames.ContainsKey($storedHex)) {
+                                    $filData[$i].color  = $LibraryNames[$storedHex]
+                                    $filData[$i].rawHex = "#" + $storedHex
+                                } else {
+                                    $filData[$i].rawHex = $filData[$i].color
+                                }
                             } else {
                                 $filData[$i].rawHex = $NameToHex[$filData[$i].color]
                             }
