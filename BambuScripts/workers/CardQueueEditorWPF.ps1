@@ -6349,16 +6349,32 @@ function Build-LibrariesPanel {
     $capturedPurgeGrid     = $purgeGrid
     $capturedBtnSavePurge  = $btnSavePurge
 
-    # Re-evaluate whether anything is dirty after each cell commits, and toggle Save accordingly
+    # IsEnabled is driven entirely by PropertyChanged on each PurgeDictRow (below).
+    # [action]{} blocks inside BeginInvoke lose the $script: scope when run from a
+    # GetNewClosure() handler, so relying on $script:PurgeDict there was unreliable.
+    # CellEditEnding is kept only to refresh the avg-savings label.
+    $capturedUpdateAvgSavings2 = $updatePurgeAvgSavings
     $purgeGrid.Add_CellEditEnding({
-        $grid = $capturedPurgeGrid
-        $grid.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background, [action]{
-            $anyDirty = $false
-            foreach ($r in $script:PurgeDict) { if ($r.IsDirty) { $anyDirty = $true; break } }
-            $capturedBtnSavePurge.IsEnabled = $anyDirty
-            & $updatePurgeAvgSavings
-        }) | Out-Null
+        $upd = $capturedUpdateAvgSavings2
+        $capturedPurgeGrid.Dispatcher.BeginInvoke(
+            [System.Windows.Threading.DispatcherPriority]::Background, [action]{ & $upd }) | Out-Null
     }.GetNewClosure())
+
+    $capturedBtnSavePurge3 = $btnSavePurge
+    $capturedPurgeDict3    = $script:PurgeDict
+    $capturedUpdateAvgSavings3 = $updatePurgeAvgSavings
+    $purgeRowChangedHandler = [System.ComponentModel.PropertyChangedEventHandler]({
+        param($sender, $e)
+        if ($e.PropertyName -eq "IsDirty") {
+            $anyDirty = $false
+            foreach ($r in $capturedPurgeDict3) { if ($r.IsDirty) { $anyDirty = $true; break } }
+            $capturedBtnSavePurge3.IsEnabled = $anyDirty
+            & $capturedUpdateAvgSavings3
+        }
+    }.GetNewClosure())
+    foreach ($row in $script:PurgeDict) {
+        $row.add_PropertyChanged($purgeRowChangedHandler)
+    }
 
     $btnSavePurge.Add_Click({
         Write-Log "btnSavePurge: clicked"
