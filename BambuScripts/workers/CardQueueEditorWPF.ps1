@@ -478,6 +478,288 @@ function Extract-3mfPickImage([string]$mfPath, [string]$outDir, [string]$prefix 
     return $null
 }
 
+# --- Re-Nest axis-picker helpers (inline orientation overlay, no popup) ---
+function Read-ZipEntryBytesInline([string]$zipPath, [string]$entryName) {
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+    try {
+        $entry = $zip.GetEntry($entryName)
+        if ($null -eq $entry) { return $null }
+        $ms = New-Object System.IO.MemoryStream
+        $entry.Open().CopyTo($ms)
+        return $ms.ToArray()
+    } finally { $zip.Dispose() }
+}
+function Read-ZipEntryTextInline([string]$zipPath, [string]$entryName) {
+    $bytes = Read-ZipEntryBytesInline $zipPath $entryName
+    if ($null -eq $bytes) { return $null }
+    return [System.Text.Encoding]::UTF8.GetString($bytes)
+}
+
+# Locate the centermost (non-wipe-tower) build-item instance on the Nest plate
+# and return its row-vector rotation matrix R and plate position.
+function Get-CenterMostInstance([string]$nestPath) {
+    $bedMM = 256.0
+    $plateJsonText = Read-ZipEntryTextInline $nestPath "Metadata/plate_1.json"
+    if ($null -eq $plateJsonText) { return $null }
+    $plateJson = $plateJsonText | ConvertFrom-Json
+    $bedCenter = $bedMM / 2.0
+    $best = $null; $bestDist = [double]::MaxValue; $bestCx = 0; $bestCy = 0
+    foreach ($o in $plateJson.bbox_objects) {
+        if ($o.id -eq 1000) { continue }
+        $cx = ($o.bbox[0] + $o.bbox[2]) / 2
+        $cy = ($o.bbox[1] + $o.bbox[3]) / 2
+        $d = [Math]::Sqrt(($cx-$bedCenter)*($cx-$bedCenter) + ($cy-$bedCenter)*($cy-$bedCenter))
+        if ($d -lt $bestDist) { $bestDist = $d; $best = $o; $bestCx = $cx; $bestCy = $cy }
+    }
+    if ($null -eq $best) { return $null }
+
+    $modelText = Read-ZipEntryTextInline $nestPath "3D/3dmodel.model"
+    if ($null -eq $modelText) { return $null }
+    $itemMatches = [regex]::Matches($modelText, '<item objectid="(\d+)"[^>]*transform="([^"]+)"[^>]*/>')
+    $bestItem = $null; $bestItemDist = [double]::MaxValue
+    foreach ($m in $itemMatches) {
+        $vals = $m.Groups[2].Value -split '\s+' | ForEach-Object {[double]$_}
+        if ($vals.Count -lt 12) { continue }
+        $tx = $vals[9]; $ty = $vals[10]
+        $d = [Math]::Sqrt(($tx-$bestCx)*($tx-$bestCx) + ($ty-$bestCy)*($ty-$bestCy))
+        if ($d -lt $bestItemDist) { $bestItemDist = $d; $bestItem = $vals }
+    }
+    if ($null -eq $bestItem) { return $null }
+    return @{ R = [double[]]($bestItem[0..8]); tx = $bestItem[9]; ty = $bestItem[10] }
+}
+
+# Final.3mf has no Metadata/plate_1.json (it's an isolated single-object file) -
+# just take its (sole) build item's transform directly.
+function Get-FinalInstance([string]$finalPath) {
+    $modelText = Read-ZipEntryTextInline $finalPath "3D/3dmodel.model"
+    if ($null -eq $modelText) { return $null }
+    $itemMatches = [regex]::Matches($modelText, '<item objectid="(\d+)"[^>]*transform="([^"]+)"[^>]*/>')
+    if ($itemMatches.Count -eq 0) { return $null }
+    $vals = $itemMatches[0].Groups[2].Value -split '\s+' | ForEach-Object {[double]$_}
+    if ($vals.Count -lt 12) { return $null }
+    return @{ R = [double[]]($vals[0..8]); tx = $vals[9]; ty = $vals[10] }
+}
+
+# Returns "Left"/"Right"/"Up"/"Down" for an in-plate-plane axis projection, or $null if perpendicular.
+function Get-CardinalDir([double]$plateX, [double]$plateY, [double]$scale) {
+    $dx = $plateX * $scale
+    $dy = -1 * $plateY * $scale
+    if ([Math]::Sqrt($dx*$dx + $dy*$dy) -lt 1e-3) { return $null }
+    if ([Math]::Abs($dx) -ge [Math]::Abs($dy)) {
+        if ($dx -gt 0) { return "Right" } else { return "Left" }
+    } else {
+        if ($dy -gt 0) { return "Down" } else { return "Up" }
+    }
+}
+
+# Rotate a pixel-space direction by thetaDeg (clockwise-visual, y-down convention)
+function Rotate-PixelDirInline([double]$dx, [double]$dy, [double]$thetaDeg) {
+    $th = $thetaDeg * [Math]::PI / 180.0
+    $c = [Math]::Cos($th); $s = [Math]::Sin($th)
+    return @(($dx*$c - $dy*$s), ($dx*$s + $dy*$c))
+}
+
+# Bounding-box center of the object's silhouette (vs. the corner/background color)
+function Get-ContentCenterInline([System.Drawing.Bitmap]$bmp) {
+    $bg = $bmp.GetPixel(0, 0)
+    $minX = $bmp.Width; $maxX = -1; $minY = $bmp.Height; $maxY = -1
+    $step = 2
+    for ($y = 0; $y -lt $bmp.Height; $y += $step) {
+        for ($x = 0; $x -lt $bmp.Width; $x += $step) {
+            $p = $bmp.GetPixel($x, $y)
+            $diff = [Math]::Abs($p.R-$bg.R) + [Math]::Abs($p.G-$bg.G) + [Math]::Abs($p.B-$bg.B) + [Math]::Abs($p.A-$bg.A)
+            if ($diff -gt 24) {
+                if ($x -lt $minX) { $minX = $x }
+                if ($x -gt $maxX) { $maxX = $x }
+                if ($y -lt $minY) { $minY = $y }
+                if ($y -gt $maxY) { $maxY = $y }
+            }
+        }
+    }
+    if ($maxX -lt $minX -or $maxY -lt $minY) {
+        return @(($bmp.Width/2.0), ($bmp.Height/2.0))
+    }
+    return @(((($minX+$maxX)/2.0)), ((($minY+$maxY)/2.0)))
+}
+
+# Draw X(red)/Y(green)/Z(blue) axis arrows at a pixel position, optionally rotated
+# (in image-space, clockwise-visual) by thetaDeg about that point.
+function Draw-AxesOverlay([System.Drawing.Graphics]$g, [double]$cxPx, [double]$cyPx, [double[]]$R, [double]$scale, [double]$arrowLen, [double]$thetaDeg = 0) {
+    $axes = @(
+        @{ name="X"; color=[System.Drawing.Color]::Red;  px=$R[0]; py=$R[1] },
+        @{ name="Y"; color=[System.Drawing.Color]::Lime; px=$R[3]; py=$R[4] },
+        @{ name="Z"; color=[System.Drawing.Color]::Blue; px=$R[6]; py=$R[7] }
+    )
+    foreach ($axis in $axes) {
+        $dx = $axis.px * $scale
+        $dy = -1 * $axis.py * $scale
+        $mag = [Math]::Sqrt($dx*$dx + $dy*$dy)
+        if ($mag -lt 1e-6) { continue }
+        if ($thetaDeg -ne 0) {
+            $rot = Rotate-PixelDirInline $dx $dy $thetaDeg
+            $dx = $rot[0]; $dy = $rot[1]
+        }
+        $dx = $dx/$mag*$arrowLen; $dy = $dy/$mag*$arrowLen
+        $pen = New-Object System.Drawing.Pen ($axis.color), 4
+        $pen.EndCap = [System.Drawing.Drawing2D.LineCap]::ArrowAnchor
+        $ptC = New-Object System.Drawing.PointF($cxPx, $cyPx)
+        $ptE = New-Object System.Drawing.PointF(($cxPx + $dx), ($cyPx + $dy))
+        $g.DrawLine($pen, $ptC, $ptE)
+        $pen.Dispose()
+    }
+    $g.FillEllipse([System.Drawing.Brushes]::Yellow, ($cxPx-4), ($cyPx-4), 8, 8)
+}
+
+function Bitmap-To-WpfImageInline([System.Drawing.Bitmap]$bmp) {
+    $ms = New-Object System.IO.MemoryStream
+    $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+    $ms.Position = 0
+    $bi = New-Object System.Windows.Media.Imaging.BitmapImage
+    $bi.BeginInit()
+    $bi.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+    $bi.StreamSource = $ms
+    $bi.EndInit()
+    $bi.Freeze()
+    $ms.Dispose()
+    return $bi
+}
+
+# Image-space cardinal directions, clockwise-visual angle convention (y grows downward)
+$script:AxisAngleOf = @{ Right = 0; Down = 90; Left = 180; Up = 270 }
+
+function Update-AxisRefText([hashtable]$t) {
+    $ref = $t.AxisRefDirs[$t.AxisAxis]
+    if ($null -eq $ref) {
+        $t.LblAxisRef.Text = "Local $($t.AxisAxis) axis is perpendicular to the plate in the reference - pick a different axis."
+    } else {
+        $t.LblAxisRef.Text = "Reference: local $($t.AxisAxis) axis points '$ref' on the Nest Source preview. Click the direction it points relative to the object on the Final preview."
+    }
+}
+
+function Update-AxisFinalPreview([hashtable]$t) {
+    if ([string]::IsNullOrEmpty($t.OvFinPath) -or -not (Test-Path -LiteralPath $t.OvFinPath)) { return }
+    $bmp = [System.Drawing.Bitmap]::FromFile($t.OvFinPath)
+    $dir = $t.AxisDirection
+    $ref = $t.AxisRefDirs[$t.AxisAxis]
+    if ($null -ne $dir -and $null -ne $ref) {
+        $thetaPreview = ($script:AxisAngleOf[$dir] - $script:AxisAngleOf[$ref] + 360) % 360
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $center = Get-ContentCenterInline $bmp
+        $arrowLen = [Math]::Min($bmp.Width, $bmp.Height) / 6.0
+        Draw-AxesOverlay $g $center[0] $center[1] $t.AxisR $t.AxisScale $arrowLen $thetaPreview
+        $g.Dispose()
+    }
+    $t.P.RnImgRight.Source = Bitmap-To-WpfImageInline $bmp
+    $bmp.Dispose()
+}
+
+# Draw the Nest's reference axes (Red=X, Green=Y, Blue=Z) at the centermost
+# instance's plate position on the Nest Source preview.
+function Update-NestRefAxesOverlay([hashtable]$t) {
+    if ([string]::IsNullOrEmpty($t.OvSrcPath) -or -not (Test-Path -LiteralPath $t.OvSrcPath)) { return }
+    if ([string]::IsNullOrEmpty($t.SourcePath) -or -not (Test-Path -LiteralPath $t.SourcePath)) { return }
+    try {
+        $inst = Get-CenterMostInstance $t.SourcePath
+        if ($null -eq $inst) { return }
+        $t.AxisR = $inst.R
+        $scale = $t.AxisScale
+        $t.AxisRefDirs = [ordered]@{
+            X = Get-CardinalDir $inst.R[0] $inst.R[1] $scale
+            Y = Get-CardinalDir $inst.R[3] $inst.R[4] $scale
+            Z = Get-CardinalDir $inst.R[6] $inst.R[7] $scale
+        }
+        $bmp = [System.Drawing.Bitmap]::FromFile($t.OvSrcPath)
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $cxPx = $inst.tx * $scale
+        $cyPx = $bmp.Height - ($inst.ty * $scale)
+        Draw-AxesOverlay $g $cxPx $cyPx $inst.R $scale 40
+        $g.Dispose()
+        $t.P.RnImgLeft.Source = Bitmap-To-WpfImageInline $bmp
+        $bmp.Dispose()
+    } catch {}
+}
+
+# Draw the Final's own current axes (Red=X, Green=Y, Blue=Z) at the content
+# bounding-box center of the Final preview, so mismatches vs. the Nest
+# reference are visible at a glance.
+function Update-FinalCurrentAxesOverlay([hashtable]$t) {
+    if ([string]::IsNullOrEmpty($t.OvFinPath) -or -not (Test-Path -LiteralPath $t.OvFinPath)) { return }
+    if ([string]::IsNullOrEmpty($t.FinalPath) -or -not (Test-Path -LiteralPath $t.FinalPath)) { return }
+    try {
+        $inst = Get-FinalInstance $t.FinalPath
+        if ($null -eq $inst) { return }
+        $t.FinalAxisR = $inst.R
+        $bmp = [System.Drawing.Bitmap]::FromFile($t.OvFinPath)
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $center = Get-ContentCenterInline $bmp
+        $arrowLen = [Math]::Min($bmp.Width, $bmp.Height) / 6.0
+        Draw-AxesOverlay $g $center[0] $center[1] $inst.R $t.AxisScale $arrowLen
+        $g.Dispose()
+        $t.P.RnImgRight.Source = Bitmap-To-WpfImageInline $bmp
+        $bmp.Dispose()
+    } catch {}
+}
+
+function Open-AxisPicker([hashtable]$t) {
+    if ([string]::IsNullOrEmpty($t.SourcePath) -or -not (Test-Path -LiteralPath $t.SourcePath)) {
+        $t.LblStatus.Text = "No Nest/Full source found for reference axes"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"; return $false
+    }
+    if ([string]::IsNullOrEmpty($t.OvFinPath) -or -not (Test-Path -LiteralPath $t.OvFinPath)) {
+        $t.LblStatus.Text = "Final preview image not available"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"; return $false
+    }
+    if ([string]::IsNullOrEmpty($t.OvSrcPath) -or -not (Test-Path -LiteralPath $t.OvSrcPath)) {
+        $t.LblStatus.Text = "Nest Source preview image not available"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"; return $false
+    }
+    $inst = Get-CenterMostInstance $t.SourcePath
+    if ($null -eq $inst) {
+        $t.LblStatus.Text = "Could not determine reference orientation from Nest"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"; return $false
+    }
+    $t.AxisR = $inst.R
+    $scale = $t.AxisScale
+    $t.AxisRefDirs = [ordered]@{
+        X = Get-CardinalDir $inst.R[0] $inst.R[1] $scale
+        Y = Get-CardinalDir $inst.R[3] $inst.R[4] $scale
+        Z = Get-CardinalDir $inst.R[6] $inst.R[7] $scale
+    }
+    $t.AxisAxis = "X"; $t.AxisDirection = $null
+    $t.RbAxis["X"].IsChecked = $true
+    foreach ($dn in $t.DirButtons.Keys) { $t.DirButtons[$dn].Background = Get-WpfColor "#2A2C38"; $t.DirButtons[$dn].IsEnabled = $true }
+    foreach ($ax in $t.RbAxis.Keys) { $t.RbAxis[$ax].IsEnabled = $true }
+
+    try {
+        $bmpNest = [System.Drawing.Bitmap]::FromFile($t.OvSrcPath)
+        $g = [System.Drawing.Graphics]::FromImage($bmpNest)
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $cxPx = $inst.tx * $scale
+        $cyPx = $bmpNest.Height - ($inst.ty * $scale)
+        Draw-AxesOverlay $g $cxPx $cyPx $inst.R $scale 40
+        $g.Dispose()
+        $t.P.RnImgLeft.Source = Bitmap-To-WpfImageInline $bmpNest
+        $bmpNest.Dispose()
+    } catch {}
+
+    Update-AxisRefText $t
+    Update-AxisFinalPreview $t
+    $t.BorderAxisPicker.Visibility = "Visible"
+    $t.BtnAxisConfirm.Visibility = "Visible"
+    $t.BtnAxisCancel.Visibility = "Visible"
+    return $true
+}
+
+function Close-AxisPicker([hashtable]$t) {
+    Update-NestRefAxesOverlay $t
+    Update-FinalCurrentAxesOverlay $t
+    $t.BorderAxisPicker.Visibility = "Collapsed"
+    $t.BtnAxisConfirm.Visibility = "Collapsed"
+    $t.BtnAxisCancel.Visibility = "Collapsed"
+    foreach ($dn in $t.DirButtons.Keys) { $t.DirButtons[$dn].IsEnabled = $false }
+    foreach ($ax in $t.RbAxis.Keys) { $t.RbAxis[$ax].IsEnabled = $false }
+    $t.AxisOpen = $false
+}
+
 function ParseFile([string]$filename) {
     $compoundExts = @('.gcode.3mf', '.gcode.stl', '.gcode.step', '.f3d.3mf')
     $ext = $null
@@ -1120,7 +1402,7 @@ function Get-PurgeNameByHexMap($UISlots) {
 function Get-PurgeTunedVolume([string]$FromName, [string]$ToName) {
     if (-not $FromName -or -not $ToName -or $FromName -eq $ToName -or $null -eq $script:PurgeDict) { return $null }
     foreach ($row in $script:PurgeDict) {
-        if ($row.Tuned -and $row.Source_Filament -eq $FromName -and $row.Target_Filament -eq $ToName) {
+        if ($row.Source_Filament -eq $FromName -and $row.Target_Filament -eq $ToName) {
             $v = $row.Tuned_Volume
             if (-not [string]::IsNullOrWhiteSpace($v)) { return $v.Trim() }
         }
@@ -2111,6 +2393,8 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $leftGrid.VerticalAlignment = "Top"
     $leftGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::Auto}))
     $leftGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::Auto}))
+    $leftGrid.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{Height=[System.Windows.GridLength]::Auto}))
+    $leftGrid.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{Height=[System.Windows.GridLength]::Auto}))
 
     # The Viewbox perfectly scales everything inside it to fit the shrinking column
     $viewbox = New-Object System.Windows.Controls.Viewbox
@@ -3344,8 +3628,13 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     # â”€â”€ Run button row â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $renestRow = New-Object System.Windows.Controls.Grid
     $feC1 = New-Object System.Windows.Controls.ColumnDefinition; $feC1.Width = "Auto"
-    $feC2 = New-Object System.Windows.Controls.ColumnDefinition; $feC2.Width = "*"
+    $feC2 = New-Object System.Windows.Controls.ColumnDefinition; $feC2.Width = "Auto"
+    $feC3 = New-Object System.Windows.Controls.ColumnDefinition; $feC3.Width = "Auto"
+    $feC4 = New-Object System.Windows.Controls.ColumnDefinition; $feC4.Width = "Auto"
+    $feC5 = New-Object System.Windows.Controls.ColumnDefinition; $feC5.Width = "*"
     $renestRow.ColumnDefinitions.Add($feC1) | Out-Null; $renestRow.ColumnDefinitions.Add($feC2) | Out-Null
+    $renestRow.ColumnDefinitions.Add($feC3) | Out-Null; $renestRow.ColumnDefinitions.Add($feC4) | Out-Null
+    $renestRow.ColumnDefinitions.Add($feC5) | Out-Null
     $renestRow.Margin = New-Object System.Windows.Thickness(0,0,0,8)
 
     $btnRunRenest = New-Object System.Windows.Controls.Button
@@ -3355,12 +3644,97 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     [System.Windows.Controls.Grid]::SetColumn($btnRunRenest, 0)
     $renestRow.Children.Add($btnRunRenest) | Out-Null
 
+    $btnFixOrientation = New-Object System.Windows.Controls.Button
+    $btnFixOrientation.Content = "Fix Orientation..."; $btnFixOrientation.Height = 32; $btnFixOrientation.Width = 130
+    $btnFixOrientation.FontSize = 11; $btnFixOrientation.BorderThickness = 0
+    $btnFixOrientation.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnFixOrientation.Background = Get-WpfColor "#2A2C38"; $btnFixOrientation.Foreground = Get-WpfColor "#7AAABB"
+    $btnFixOrientation.Margin = New-Object System.Windows.Thickness(8,0,0,0)
+    [System.Windows.Controls.Grid]::SetColumn($btnFixOrientation, 1)
+    $renestRow.Children.Add($btnFixOrientation) | Out-Null
+
     $lblRenestStatus = New-Object System.Windows.Controls.TextBlock
     $lblRenestStatus.FontSize = 11; $lblRenestStatus.VerticalAlignment = "Center"
     $lblRenestStatus.Margin = New-Object System.Windows.Thickness(10,0,0,0); $lblRenestStatus.TextWrapping = "Wrap"
-    [System.Windows.Controls.Grid]::SetColumn($lblRenestStatus, 1)
+    [System.Windows.Controls.Grid]::SetColumn($lblRenestStatus, 4)
     $renestRow.Children.Add($lblRenestStatus) | Out-Null
     $panelRenest.Children.Add($renestRow) | Out-Null
+
+    # â”€â”€ Inline orientation/axis picker panel (drawn directly on the Nest Source / Final
+    # previews above - no popup window) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    $borderAxisPicker = New-Object System.Windows.Controls.Border
+    $borderAxisPicker.Background = Get-WpfColor "#13151C"
+    $borderAxisPicker.BorderBrush = Get-WpfColor "#3A3C4A"; $borderAxisPicker.BorderThickness = 1
+    $borderAxisPicker.CornerRadius = New-Object System.Windows.CornerRadius(4)
+    $borderAxisPicker.Margin = New-Object System.Windows.Thickness(0,8,0,0)
+    $borderAxisPicker.Width = 438
+    $borderAxisPicker.HorizontalAlignment = "Left"
+    $borderAxisPicker.Visibility = "Collapsed"
+    $axisPickerInner = New-Object System.Windows.Controls.StackPanel
+    $axisPickerInner.Margin = New-Object System.Windows.Thickness(8)
+
+    $lblAxisInstr = New-Object System.Windows.Controls.TextBlock
+    $lblAxisInstr.Text = "Axis arrows (Red=X, Green=Y, Blue=Z) drawn on the Nest Source preview above show the reference orientation. Pick the axis below, then click the direction it currently points relative to the object on the Final preview above."
+    $lblAxisInstr.Foreground = Get-WpfColor "#AAAACC"; $lblAxisInstr.FontSize = 11
+    $lblAxisInstr.TextWrapping = "Wrap"; $lblAxisInstr.Margin = New-Object System.Windows.Thickness(0,0,0,6)
+    $axisPickerInner.Children.Add($lblAxisInstr) | Out-Null
+
+    $lblAxisRef = New-Object System.Windows.Controls.TextBlock
+    $lblAxisRef.Foreground = Get-WpfColor "#CCCCDD"; $lblAxisRef.FontSize = 11
+    $lblAxisRef.TextWrapping = "Wrap"; $lblAxisRef.Margin = New-Object System.Windows.Thickness(0,0,0,6)
+    $axisPickerInner.Children.Add($lblAxisRef) | Out-Null
+
+    # Axis selector radios (placed below the Final preview image)
+    $axisGroupName = "axisPick_" + [Guid]::NewGuid().ToString("N")
+    $rbAxis = @{}
+    foreach ($axName in @("X","Y","Z")) {
+        $rb = New-Object System.Windows.Controls.RadioButton
+        $rb.Content = $axName; $rb.GroupName = $axisGroupName
+        $rb.FontWeight = [System.Windows.FontWeights]::Bold; $rb.FontSize = 14
+        $rb.Margin = New-Object System.Windows.Thickness(10,0,0,0); $rb.VerticalAlignment = "Center"
+        $rb.Foreground = Get-WpfColor $(switch ($axName) { "X" {"#E05050"} "Y" {"#50C060"} "Z" {"#5090E0"} })
+        if ($axName -eq "X") { $rb.IsChecked = $true }
+        $rb.IsEnabled = $false
+        $rbAxis[$axName] = $rb
+    }
+
+    # Direction buttons (placed around the Final preview image)
+    $dirButtons = @{}
+    foreach ($dirName in @("Up","Down","Left","Right")) {
+        $db = New-Object System.Windows.Controls.Button
+        $db.Content = $dirName; $db.Width = 60; $db.Height = 26; $db.FontSize = 11
+        $db.Cursor = [System.Windows.Input.Cursors]::Hand
+        $db.Background = Get-WpfColor "#2A2C38"; $db.Foreground = Get-WpfColor "#C8CFDD"; $db.BorderThickness = 0
+        $db.IsEnabled = $false
+        $dirButtons[$dirName] = $db
+    }
+
+    # Confirm / Cancel buttons - placed in the right-side Re-Nest panel (renestRow)
+    $btnAxisConfirm = New-Object System.Windows.Controls.Button
+    $btnAxisConfirm.Content = "Confirm Orientation"; $btnAxisConfirm.Height = 32; $btnAxisConfirm.Width = 140
+    $btnAxisConfirm.FontSize = 11; $btnAxisConfirm.FontWeight = [System.Windows.FontWeights]::Bold
+    $btnAxisConfirm.Background = Get-WpfColor "#2E5A42"; $btnAxisConfirm.Foreground = Get-WpfColor "#FFFFFF"
+    $btnAxisConfirm.BorderThickness = 0; $btnAxisConfirm.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnAxisConfirm.Margin = New-Object System.Windows.Thickness(8,0,0,0)
+    $btnAxisConfirm.Visibility = "Collapsed"
+    [System.Windows.Controls.Grid]::SetColumn($btnAxisConfirm, 2)
+    $renestRow.Children.Add($btnAxisConfirm) | Out-Null
+
+    $btnAxisCancel = New-Object System.Windows.Controls.Button
+    $btnAxisCancel.Content = "Cancel"; $btnAxisCancel.Height = 32; $btnAxisCancel.Width = 80
+    $btnAxisCancel.FontSize = 11; $btnAxisCancel.Background = Get-WpfColor "#3A2020"
+    $btnAxisCancel.Foreground = Get-WpfColor "#CC8888"; $btnAxisCancel.BorderThickness = 0
+    $btnAxisCancel.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnAxisCancel.Margin = New-Object System.Windows.Thickness(8,0,0,0)
+    $btnAxisCancel.Visibility = "Collapsed"
+    [System.Windows.Controls.Grid]::SetColumn($btnAxisCancel, 3)
+    $renestRow.Children.Add($btnAxisCancel) | Out-Null
+
+    $borderAxisPicker.Child = $axisPickerInner
+    [System.Windows.Controls.Grid]::SetRow($borderAxisPicker, 1)
+    [System.Windows.Controls.Grid]::SetColumn($borderAxisPicker, 0)
+    [System.Windows.Controls.Grid]::SetColumnSpan($borderAxisPicker, 2)
+    $leftGrid.Children.Add($borderAxisPicker) | Out-Null
 
     # â”€â”€ Review panel (hidden until success) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $borderReview = New-Object System.Windows.Controls.Border
@@ -3439,33 +3813,58 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $btnRunRenest.IsEnabled = $false
         $btnRunRenest.Background = Get-WpfColor "#2A2C38"; $btnRunRenest.Foreground = Get-WpfColor "#555868"
         $lblRenestStatus.Text = "No *_Final.3mf found"; $lblRenestStatus.Foreground = Get-WpfColor "#444658"
+        $btnFixOrientation.IsEnabled = $false
+        $btnFixOrientation.Background = Get-WpfColor "#2A2C38"; $btnFixOrientation.Foreground = Get-WpfColor "#555868"
     } else {
         $btnRunRenest.IsEnabled = $true
         $btnRunRenest.Background = Get-WpfColor "#2E5A42"; $btnRunRenest.Foreground = Get-WpfColor "#FFFFFF"
         $lblRenestStatus.Text = "Ready"; $lblRenestStatus.Foreground = Get-WpfColor "#666878"
+        $btnFixOrientation.IsEnabled = $true
+        $btnFixOrientation.Background = Get-WpfColor "#2A2C38"; $btnFixOrientation.Foreground = Get-WpfColor "#7AAABB"
     }
 
     # Shared state for all three buttons
     $renestTag = @{
-        P             = $pJob
-        WorkerPath    = (Join-Path $scriptDir "..\workers\RenestFromFinal_worker.ps1")
-        FinalPath     = if ($null -ne $feRenestFinal)  { $feRenestFinal.FullName }  else { "" }
-        SourcePath    = if ($null -ne $feRenestSource) { $feRenestSource.FullName } else { "" }
-        RenestPath    = ""
-        BtnRun        = $btnRunRenest
-        LblStatus     = $lblRenestStatus
-        BorderReview  = $borderReview
-        LogOut        = ""
-        LogErr        = ""
-        Proc          = $null
-        Timer         = $null
-        DebugTempPath = ""
+        P                 = $pJob
+        WorkerPath        = (Join-Path $scriptDir "..\workers\RenestFromFinal_worker.ps1")
+        FinalPath         = if ($null -ne $feRenestFinal)  { $feRenestFinal.FullName }  else { "" }
+        SourcePath        = if ($null -ne $feRenestSource) { $feRenestSource.FullName } else { "" }
+        RenestPath        = ""
+        BtnRun            = $btnRunRenest
+        BtnFixOrientation = $btnFixOrientation
+        LblStatus         = $lblRenestStatus
+        BorderReview      = $borderReview
+        LogOut            = ""
+        LogErr            = ""
+        Proc              = $null
+        Timer             = $null
+        DebugTempPath     = ""
+        OvSrcPath         = $null
+        OvFinPath         = $null
+        AxisOpen          = $false
+        AxisR             = $null
+        FinalAxisR        = $null
+        AxisRefDirs       = $null
+        AxisAxis          = "X"
+        AxisDirection     = $null
+        AxisScale         = 2.0
+        BorderAxisPicker  = $borderAxisPicker
+        LblAxisRef        = $lblAxisRef
+        RbAxis            = $rbAxis
+        DirButtons        = $dirButtons
+        BtnAxisConfirm    = $btnAxisConfirm
+        BtnAxisCancel     = $btnAxisCancel
     }
-    $btnRunRenest.Tag     = $renestTag
-    $btnReplaceSource.Tag = $renestTag
-    $btnDiscardRenest.Tag = $renestTag
-    $btnOpenDebug.Tag     = $renestTag
-    $btnSaveDebug.Tag     = $renestTag
+    $btnRunRenest.Tag        = $renestTag
+    $btnFixOrientation.Tag   = $renestTag
+    $btnReplaceSource.Tag    = $renestTag
+    $btnDiscardRenest.Tag    = $renestTag
+    $btnOpenDebug.Tag        = $renestTag
+    $btnSaveDebug.Tag        = $renestTag
+    foreach ($ax in $rbAxis.Keys)     { $rbAxis[$ax].Tag = $renestTag }
+    foreach ($dn in $dirButtons.Keys) { $dirButtons[$dn].Tag = $renestTag }
+    $btnAxisConfirm.Tag = $renestTag
+    $btnAxisCancel.Tag  = $renestTag
 
     $btnRunRenest.Add_Click({
         $t = $this.Tag
@@ -3494,6 +3893,90 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $t.Timer = $renestTimer
         $renestTimer.Add_Tick($script:_RenestTickSB)
         $renestTimer.Start()
+    })
+
+    $btnFixOrientation.Add_Click({
+        $t = $this.Tag
+        if ($t.AxisOpen) {
+            Close-AxisPicker $t
+            $t.BtnFixOrientation.Content = "Fix Orientation..."
+            $t.LblStatus.Text = "Orientation pick cancelled."; $t.LblStatus.Foreground = Get-WpfColor "#888A9A"
+            return
+        }
+        if (Open-AxisPicker $t) {
+            $t.AxisOpen = $true
+            $t.BtnFixOrientation.Content = "Cancel Orientation Pick"
+            $t.LblStatus.Text = "Pick the axis and direction, then Confirm."; $t.LblStatus.Foreground = Get-WpfColor "#7AAABB"
+        }
+    })
+
+    foreach ($axName in @("X","Y","Z")) {
+        $rbAxis[$axName].Add_Checked({
+            $t = $this.Tag
+            if (-not $t.AxisOpen) { return }
+            $t.AxisAxis = $this.Content.ToString()
+            Update-AxisRefText $t
+            Update-AxisFinalPreview $t
+        })
+    }
+
+    foreach ($dirName in @("Up","Down","Left","Right")) {
+        $dirButtons[$dirName].Add_Click({
+            $t = $this.Tag
+            if (-not $t.AxisOpen) { return }
+            $t.AxisDirection = $this.Content.ToString()
+            foreach ($b in $t.DirButtons.Values) { $b.Background = Get-WpfColor "#2A2C38" }
+            $this.Background = Get-WpfColor "#3A6EA5"
+            Update-AxisFinalPreview $t
+        })
+    }
+
+    $btnAxisConfirm.Add_Click({
+        $t = $this.Tag
+        $ref = $t.AxisRefDirs[$t.AxisAxis]
+        if ($null -eq $ref) {
+            [System.Windows.MessageBox]::Show("The local $($t.AxisAxis) axis is perpendicular to the plate in the Nest reference and can't be used. Pick X, Y, or Z (whichever shows a direction).", "Fix Orientation") | Out-Null
+            return
+        }
+        if ($null -eq $t.AxisDirection) {
+            [System.Windows.MessageBox]::Show("Click Up/Down/Left/Right to indicate which direction the selected axis currently points on the Final.", "Fix Orientation") | Out-Null
+            return
+        }
+        $thetaImage = ($script:AxisAngleOf[$ref] - $script:AxisAngleOf[$t.AxisDirection] + 360) % 360
+        $phiDeg = (360 - $thetaImage) % 360
+        $phi = $phiDeg * [Math]::PI / 180.0
+        $cosT = [Math]::Cos($phi); $sinT = [Math]::Sin($phi)
+        $Rfinal = [double[]](
+            $cosT,  $sinT, 0,
+           -$sinT,  $cosT, 0,
+            0,      0,     1
+        )
+        $rotCorrection = [double[]]($Rfinal[0],$Rfinal[3],$Rfinal[6], $Rfinal[1],$Rfinal[4],$Rfinal[7], $Rfinal[2],$Rfinal[5],$Rfinal[8])
+
+        $stemA = [System.IO.Path]::GetFileNameWithoutExtension($t.FinalPath) -replace '(?i)_Final$', ''
+        $dirA  = [System.IO.Path]::GetDirectoryName($t.FinalPath)
+        $jsonOut = [ordered]@{
+            selection        = @{ axis = $t.AxisAxis; refDir = $ref; userDir = $t.AxisDirection }
+            angleDegrees     = $phiDeg
+            rotCorrection    = $rotCorrection
+            sourceCentermost = @{ R = $t.AxisR }
+        }
+        $outJsonPath = Join-Path $dirA ($stemA + "_RotCorrection.json")
+        try {
+            $jsonOut | ConvertTo-Json -Depth 5 | Set-Content -Path $outJsonPath -Encoding UTF8
+            $t.LblStatus.Text = "Rotation correction saved ($([Math]::Round($phiDeg,1)) deg)."; $t.LblStatus.Foreground = Get-WpfColor "#4CAF72"
+        } catch {
+            $t.LblStatus.Text = "Save failed: $($_.Exception.Message)"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"
+        }
+        Close-AxisPicker $t
+        $t.BtnFixOrientation.Content = "Fix Orientation..."
+    })
+
+    $btnAxisCancel.Add_Click({
+        $t = $this.Tag
+        Close-AxisPicker $t
+        $t.BtnFixOrientation.Content = "Fix Orientation..."
+        $t.LblStatus.Text = "Orientation pick cancelled."; $t.LblStatus.Foreground = Get-WpfColor "#888A9A"
     })
 
     $btnReplaceSource.Add_Click({
@@ -3649,8 +4132,6 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $ovBorder.Background = Get-WpfColor "#0A0B0F"; $ovBorder.Visibility = $ovInitVis
         $ovBorder.VerticalAlignment = "Stretch"; $ovBorder.HorizontalAlignment = "Stretch"
         [System.Windows.Controls.Grid]::SetColumn($ovBorder, $ovSide)
-        $ovStack = New-Object System.Windows.Controls.StackPanel
-        $ovStack.VerticalAlignment = "Center"; $ovStack.HorizontalAlignment = "Center"
         $ovLbl = New-Object System.Windows.Controls.TextBlock
         $ovLbl.Text = if ($ovSide -eq 0) { "Nest Source" } else { "Final" }
         $ovLbl.Foreground = Get-WpfColor "#7AAABB"; $ovLbl.FontSize = 12
@@ -3674,9 +4155,71 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             }
         })
         $ovImg.Tag = $ovSide
-        $ovStack.Children.Add($ovLbl) | Out-Null
-        $ovStack.Children.Add($ovImg)  | Out-Null
-        $ovBorder.Child = $ovStack
+
+        if ($ovSide -eq 0) {
+            $ovStack = New-Object System.Windows.Controls.StackPanel
+            $ovStack.VerticalAlignment = "Center"; $ovStack.HorizontalAlignment = "Center"
+            $ovStack.Children.Add($ovLbl) | Out-Null
+            $ovStack.Children.Add($ovImg)  | Out-Null
+            $ovBorder.Child = $ovStack
+        } else {
+            # Final preview, with Up/Down/Left/Right orientation buttons around the image
+            # and X/Y/Z axis radios below it (active during "Fix Orientation" pick)
+            $ovGrid = New-Object System.Windows.Controls.Grid
+            $ovGrid.HorizontalAlignment = "Center"; $ovGrid.VerticalAlignment = "Center"
+            foreach ($i in 0..4) {
+                $rd = New-Object System.Windows.Controls.RowDefinition; $rd.Height = "Auto"
+                $ovGrid.RowDefinitions.Add($rd) | Out-Null
+            }
+            $ovColL = New-Object System.Windows.Controls.ColumnDefinition; $ovColL.Width = "Auto"
+            $ovColM = New-Object System.Windows.Controls.ColumnDefinition; $ovColM.Width = "Auto"
+            $ovColR = New-Object System.Windows.Controls.ColumnDefinition; $ovColR.Width = "Auto"
+            $ovGrid.ColumnDefinitions.Add($ovColL) | Out-Null
+            $ovGrid.ColumnDefinitions.Add($ovColM) | Out-Null
+            $ovGrid.ColumnDefinitions.Add($ovColR) | Out-Null
+
+            [System.Windows.Controls.Grid]::SetRow($ovLbl, 0); [System.Windows.Controls.Grid]::SetColumn($ovLbl, 0)
+            [System.Windows.Controls.Grid]::SetColumnSpan($ovLbl, 3)
+            $ovGrid.Children.Add($ovLbl) | Out-Null
+
+            $btnUp = $dirButtons["Up"]
+            $btnUp.HorizontalAlignment = "Center"; $btnUp.Margin = New-Object System.Windows.Thickness(0,0,0,4)
+            [System.Windows.Controls.Grid]::SetRow($btnUp, 1); [System.Windows.Controls.Grid]::SetColumn($btnUp, 1)
+            $ovGrid.Children.Add($btnUp) | Out-Null
+
+            $btnLeft = $dirButtons["Left"]
+            $btnLeft.VerticalAlignment = "Center"; $btnLeft.Margin = New-Object System.Windows.Thickness(0,0,4,0)
+            [System.Windows.Controls.Grid]::SetRow($btnLeft, 2); [System.Windows.Controls.Grid]::SetColumn($btnLeft, 0)
+            $ovGrid.Children.Add($btnLeft) | Out-Null
+
+            [System.Windows.Controls.Grid]::SetRow($ovImg, 2); [System.Windows.Controls.Grid]::SetColumn($ovImg, 1)
+            $ovGrid.Children.Add($ovImg) | Out-Null
+
+            $btnRight = $dirButtons["Right"]
+            $btnRight.VerticalAlignment = "Center"; $btnRight.Margin = New-Object System.Windows.Thickness(4,0,0,0)
+            [System.Windows.Controls.Grid]::SetRow($btnRight, 2); [System.Windows.Controls.Grid]::SetColumn($btnRight, 2)
+            $ovGrid.Children.Add($btnRight) | Out-Null
+
+            $btnDown = $dirButtons["Down"]
+            $btnDown.HorizontalAlignment = "Center"; $btnDown.Margin = New-Object System.Windows.Thickness(0,4,0,0)
+            [System.Windows.Controls.Grid]::SetRow($btnDown, 3); [System.Windows.Controls.Grid]::SetColumn($btnDown, 1)
+            $ovGrid.Children.Add($btnDown) | Out-Null
+
+            $axisSelRow = New-Object System.Windows.Controls.StackPanel
+            $axisSelRow.Orientation = "Horizontal"; $axisSelRow.HorizontalAlignment = "Center"
+            $axisSelRow.Margin = New-Object System.Windows.Thickness(0,6,0,0)
+            $axisSelLbl = New-Object System.Windows.Controls.TextBlock
+            $axisSelLbl.Text = "Axis: "; $axisSelLbl.Foreground = Get-WpfColor "#FFFFFF"
+            $axisSelLbl.VerticalAlignment = "Center"; $axisSelLbl.FontSize = 12
+            $axisSelRow.Children.Add($axisSelLbl) | Out-Null
+            foreach ($axName in @("X","Y","Z")) { $axisSelRow.Children.Add($rbAxis[$axName]) | Out-Null }
+            [System.Windows.Controls.Grid]::SetRow($axisSelRow, 4); [System.Windows.Controls.Grid]::SetColumn($axisSelRow, 0)
+            [System.Windows.Controls.Grid]::SetColumnSpan($axisSelRow, 3)
+            $ovGrid.Children.Add($axisSelRow) | Out-Null
+
+            $ovBorder.Child = $ovGrid
+        }
+
         $leftGrid.Children.Add($ovBorder) | Out-Null
         if ($ovSide -eq 0) { $pJob.RnOvLeft  = $ovBorder; $pJob.RnImgLeft  = $ovImg; $pJob.RnLblLeft  = $ovLbl }
         else               { $pJob.RnOvRight = $ovBorder; $pJob.RnImgRight = $ovImg; $pJob.RnLblRight = $ovLbl }
@@ -3694,6 +4237,10 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         } else { $null }
         if ($null -ne $ovSrcPath -and (Test-Path $ovSrcPath)) { $pJob.RnImgLeft.Source  = Load-WpfImage $ovSrcPath }
         if ($null -ne $ovFinPath -and (Test-Path $ovFinPath)) { $pJob.RnImgRight.Source = Load-WpfImage $ovFinPath }
+        $renestTag.OvSrcPath = $ovSrcPath
+        $renestTag.OvFinPath = $ovFinPath
+        Update-NestRefAxesOverlay $renestTag
+        Update-FinalCurrentAxesOverlay $renestTag
     } catch {}
 
     $btnApply.Tag = @{ P = $pJob; G = $gpJob }
@@ -5208,7 +5755,14 @@ function Load-FilamentEntry([string]$entryName, $st) {
     $st.Updating = $true
     $st.RBox.Text = "$r"; $st.GBox.Text = "$g"; $st.BBox.Text = "$b"
     $st.Updating = $false
-    Update-PickerFromRgb $st   # single clean update with all three values present
+    Update-PickerFromRgb $st   # positions the HSV picker visuals
+    # Restore exact library values - the HSV round-trip in Update-PickerFromRgb can
+    # introduce +/-1 rounding drift on any channel, so we pin the boxes back to the
+    # canonical values.  Use Updating=true to suppress a second TextChanged cascade.
+    $st.Updating = $true
+    $st.RBox.Text = "$r"; $st.GBox.Text = "$g"; $st.BBox.Text = "$b"
+    $st.HexBox.Text = $hex9.Substring(0, 7)
+    $st.Updating = $false
     $st.StatusLbl.Text = "Loaded: $entryName"; $st.StatusLbl.Foreground = Get-WpfColor "#555868"
 }
 
