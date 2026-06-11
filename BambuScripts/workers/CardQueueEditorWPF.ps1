@@ -772,7 +772,30 @@ function Update-FinalCurrentAxesOverlay([hashtable]$t) {
         }
         $g = [System.Drawing.Graphics]::FromImage($bmp)
         $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-        $center = Get-ContentCenterInline $bmp
+        if ($t.OvFinPath -match '(?i)(top|pick)_\d+\.png$') {
+            # top_/pick_ previews are plate-mapped top views, so the build
+            # item's translation - the object's local-origin "locator" - maps
+            # directly to pixels. Anchor the axes THERE, not at the content
+            # bounding-box center, which drifts as soon as the user adds or
+            # moves a detached piece in the Final. The anchor must follow the
+            # same image-center rotation applied to the bitmap above.
+            $pxScale = $bmp.Width / 256.0
+            $ax = $inst.tx * $pxScale
+            $ay = $bmp.Height - ($inst.ty * $pxScale)
+            if ([Math]::Abs($bmpYawDeg) -gt 1e-6) {
+                $rad = $bmpYawDeg * [Math]::PI / 180.0
+                $cosA = [Math]::Cos($rad); $sinA = [Math]::Sin($rad)
+                $rcx = $bmp.Width / 2.0; $rcy = $bmp.Height / 2.0
+                $dxp = $ax - $rcx; $dyp = $ay - $rcy
+                $ax = $rcx + $dxp * $cosA - $dyp * $sinA
+                $ay = $rcy + $dxp * $sinA + $dyp * $cosA
+            }
+            $center = @($ax, $ay)
+        } else {
+            # Unknown camera (e.g. plate_1.png perspective render) - fall back
+            # to the content bounding-box center.
+            $center = Get-ContentCenterInline $bmp
+        }
         $arrowLen = [Math]::Min($bmp.Width, $bmp.Height) / 6.0
         Draw-AxesOverlay $g $center[0] $center[1] $displayR $t.AxisScale $arrowLen
         $g.Dispose()

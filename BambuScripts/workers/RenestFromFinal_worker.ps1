@@ -70,18 +70,71 @@ function Rotate-Vec([double[]]$v, [double[]]$r) {
     $z = $v[0]*$r[2]+$v[1]*$r[5]+$v[2]*$r[8]
     return [double[]]($x, $y, $z)
 }
-# Mean of the translation parts of all identity-rotation component transforms
-function Get-CompCentroid($txList) {
-    $sx = 0.0; $sy = 0.0; $sz = 0.0; $cn = 0
-    foreach ($s in $txList) {
+# Local-frame offset between the source template object and the Final object,
+# found by MATCHING shared components: pieces the user added, removed, moved,
+# or duplicated cannot influence it, while the unmoved shared components all
+# differ by exactly the same vector - the true frame offset. Used as a SANITY
+# CHECK only (clone translations are taken verbatim from the source plate; a
+# large offset here means the Final's frame genuinely moved and placement may
+# be off). Takes every (source comp - final comp) translation difference,
+# buckets them on a 0.5 mm grid, then refines around the densest bucket.
+# Returns (dx, dy, dz, matchedCount), or $null when fewer than max(3, 20% of
+# the smaller component set) agree.
+function Get-MatchedFrameOffset($srcTxList, $finTxList, [double[]]$rotCorr) {
+    $srcPts = [System.Collections.Generic.List[double[]]]::new()
+    foreach ($s in $srcTxList) {
         if ([string]::IsNullOrWhiteSpace($s)) { continue }
         $tx = Parse-Tx $s
-        if (Is-IdentityRot (Get-TxRot $tx)) { $sx += $tx[9]; $sy += $tx[10]; $sz += $tx[11]; $cn++ }
+        if (Is-IdentityRot (Get-TxRot $tx)) { $srcPts.Add([double[]]($tx[9],$tx[10],$tx[11])) | Out-Null }
     }
-    if ($cn -eq 0) { return [double[]](0,0,0) }
-    $cx = $sx/$cn; $cy = $sy/$cn; $cz = $sz/$cn
-    return [double[]]($cx, $cy, $cz)
+    $finPts = [System.Collections.Generic.List[double[]]]::new()
+    foreach ($s in $finTxList) {
+        if ([string]::IsNullOrWhiteSpace($s)) { continue }
+        $tx = Parse-Tx $s
+        if (Is-IdentityRot (Get-TxRot $tx)) {
+            # Same frame convention as the centroid path: compare in the
+            # rotation-corrected final frame.
+            $finPts.Add((Rotate-Vec ([double[]]($tx[9],$tx[10],$tx[11])) $rotCorr)) | Out-Null
+        }
+    }
+    if ($srcPts.Count -eq 0 -or $finPts.Count -eq 0) { return $null }
+    $grid = 0.5
+    $buckets = @{}
+    foreach ($sp in $srcPts) {
+        foreach ($fp in $finPts) {
+            $dx = $sp[0]-$fp[0]; $dy = $sp[1]-$fp[1]; $dz = $sp[2]-$fp[2]
+            $key = "$([Math]::Round($dx/$grid))|$([Math]::Round($dy/$grid))|$([Math]::Round($dz/$grid))"
+            if (-not $buckets.ContainsKey($key)) { $buckets[$key] = @{ n = 0; sx = 0.0; sy = 0.0; sz = 0.0 } }
+            $b = $buckets[$key]
+            $b.n++; $b.sx += $dx; $b.sy += $dy; $b.sz += $dz
+        }
+    }
+    $best = $null
+    foreach ($b in $buckets.Values) { if ($null -eq $best -or $b.n -gt $best.n) { $best = $b } }
+    if ($null -eq $best -or $best.n -lt 3) { return $null }
+    # Refine: a true cluster can straddle grid-bucket boundaries, splitting its
+    # count. Re-scan all pairs against the best bucket's mean with a 1 mm
+    # radius and average the matches - this recovers the full cluster and the
+    # exact offset. Each final component is counted at most once (its best
+    # source partner) so duplicated source geometry can't inflate the count.
+    $bx = $best.sx/$best.n; $by = $best.sy/$best.n; $bz = $best.sz/$best.n
+    $rn = 0; $rsx = 0.0; $rsy = 0.0; $rsz = 0.0
+    foreach ($fp in $finPts) {
+        $bestD = [double]::MaxValue; $bdx = 0.0; $bdy = 0.0; $bdz = 0.0
+        foreach ($sp in $srcPts) {
+            $dx = $sp[0]-$fp[0]; $dy = $sp[1]-$fp[1]; $dz = $sp[2]-$fp[2]
+            $d = [Math]::Sqrt(($dx-$bx)*($dx-$bx) + ($dy-$by)*($dy-$by) + ($dz-$bz)*($dz-$bz))
+            if ($d -lt $bestD) { $bestD = $d; $bdx = $dx; $bdy = $dy; $bdz = $dz }
+        }
+        if ($bestD -le 1.0) { $rn++; $rsx += $bdx; $rsy += $bdy; $rsz += $bdz }
+    }
+    # Accept when at least 3 components and a fifth of the smaller set agree -
+    # the agreeing components are the unmoved ones that define the frame.
+    $minCount = [Math]::Max(3, [int][Math]::Ceiling([Math]::Min($srcPts.Count, $finPts.Count) * 0.2))
+    if ($rn -lt $minCount) { return $null }
+    return [double[]](($rsx/$rn), ($rsy/$rn), ($rsz/$rn), $rn)
 }
+
 # Extract the uniform scale factor embedded in a 3x3 rotation+scale matrix.
 # Scale = norm of the first row (all rows should be equal for uniform scale).
 function Get-RowScale([double[]]$r) {
@@ -391,9 +444,6 @@ if ($null -ne $srcTemplateObj) {
         $srcTemplateCompTransforms.Add($srcComp.GetAttribute('transform')) | Out-Null
     }
 }
-# Centroid of source template's identity-rotation components (used to correct re-centering offset).
-$centroidSrc = Get-CompCentroid $srcTemplateCompTransforms
-
 # Mean Z translation across all source build items (used to compute Z correction).
 $srcMeanZ = 0.0
 foreach ($st in $sourceTransforms) { $srcMeanZ += (Parse-Tx $st)[11] }
@@ -691,20 +741,38 @@ try {
     # in identity-rotation frame) produces a bogus delta that bleeds into world Z via the
     # plate rotation.  When the Final has no identity-rotation components, skip the
     # centroid correction entirely (zero both sides).
-    $centroidFinal    = Get-CompCentroid $masterCompTransforms
-    $centroidFinalRot = Rotate-Vec $centroidFinal $rotCorrection
-    $td0 = $centroidSrc[0]-$centroidFinalRot[0]
-    $td1 = $centroidSrc[1]-$centroidFinalRot[1]
-    # Z: centroid-based delta is unreliable (component origins != bottom face).
-    # Use (Final build item Z) - (mean source Z) so objects sit correctly on the plate.
+    # The clone XY translations are taken VERBATIM from the source plate build
+    # items - no computed offset. The Final's local frame is the same frame
+    # the source template used (Bambu keeps the object origin "locator"
+    # stable through edits), so the source translations are already correct;
+    # any content-derived correction (centroid means etc.) only lets pieces
+    # the user added, moved, or duplicated drag the whole nest around.
+    #
+    # As a SANITY CHECK we still measure the frame offset by matching the
+    # components shared by both objects (in the source template's local frame
+    # - in manual yaw mode $rotCorrection is not a frame mapping, so use the
+    # transpose of the axis-snapped source reference rotation, i.e. the bake
+    # rotation, instead). If the shared components disagree with the source
+    # by more than 1 mm the Final's frame genuinely moved - unusual - and we
+    # warn, but still trust the Bambu transforms.
+    $matchFrameRot = if ($manualYawMode) { Transpose-3x3 (Get-AxisSnappedRot $manualSrcRefRotNorm) } else { $rotCorrection }
+    $matchedOffset = Get-MatchedFrameOffset $srcTemplateCompTransforms $masterCompTransforms $matchFrameRot
+    if ($null -ne $matchedOffset) {
+        $frameCheckDesc = ("frame check: offset=({0:F2},{1:F2},{2:F2}) from {3} matched components" -f $matchedOffset[0], $matchedOffset[1], $matchedOffset[2], [int]$matchedOffset[3])
+        if ([Math]::Abs($matchedOffset[0]) -gt 1.0 -or [Math]::Abs($matchedOffset[1]) -gt 1.0 -or [Math]::Abs($matchedOffset[2]) -gt 1.0) {
+            Write-Host ("WARNING: the Final's local frame appears shifted vs the source template ({0}). Clones may land off-position." -f $frameCheckDesc)
+        }
+    } else {
+        $frameCheckDesc = "frame check: no dominant component match (heavily edited Final) - trusting Bambu transforms"
+    }
+    # Z: a cut/edit can change the bottom face, and Bambu re-seats the Final
+    # on the plate. Clones must use the Final's own build-item Z (Bambu's
+    # actual seating for the edited geometry), not the source's.
     $finalBuildZ = (Parse-Tx $masterItem.GetAttribute('transform'))[11]
     $td2 = $finalBuildZ - $srcMeanZ
-    $tDelta = [double[]]($td0, $td1, $td2)
-    Write-Host ("Centroid correction: src=({0:F2},{1:F2},{2:F2}) final=({3:F2},{4:F2},{5:F2}) delta=({6:F2},{7:F2},{8:F2})" -f `
-        $centroidSrc[0],$centroidSrc[1],$centroidSrc[2], `
-        $centroidFinal[0],$centroidFinal[1],$centroidFinal[2], `
-        $tDelta[0],$tDelta[1],$tDelta[2])
-    Write-Host ("  Z correction: finalBuildZ={0:F4} srcMeanZ={1:F4} td2={2:F4}" -f $finalBuildZ,$srcMeanZ,$td2)
+    $tDelta = [double[]](0.0, 0.0, $td2)
+    Write-Host ("Translations taken verbatim from source plate ({0})." -f $frameCheckDesc)
+    Write-Host ("  Z seating: finalBuildZ={0:F4} srcMeanZ={1:F4} td2={2:F4}" -f $finalBuildZ,$srcMeanZ,$td2)
 
     # â”€â”€ Snapshot component UUIDs base from the master â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # We'll regenerate UUIDs per-clone to avoid duplicates
@@ -1101,11 +1169,11 @@ try {
     $dbLines.Add("")
 
     $dbLines.Add("======================================")
-    $dbLines.Add("CENTROID CORRECTION")
+    $dbLines.Add("TRANSLATION HANDLING")
     $dbLines.Add("======================================")
-    $dbLines.Add("  centroid src   : $($centroidSrc[0].ToString('F3')) $($centroidSrc[1].ToString('F3')) $($centroidSrc[2].ToString('F3'))")
-    $dbLines.Add("  centroid final : $($centroidFinal[0].ToString('F3')) $($centroidFinal[1].ToString('F3')) $($centroidFinal[2].ToString('F3'))")
-    $dbLines.Add("  tDelta         : $($tDelta[0].ToString('F3')) $($tDelta[1].ToString('F3')) $($tDelta[2].ToString('F3'))")
+    $dbLines.Add("  XY             : verbatim from source plate build items (no computed offset)")
+    $dbLines.Add("  $frameCheckDesc")
+    $dbLines.Add("  tDelta         : $($tDelta[0].ToString('F3')) $($tDelta[1].ToString('F3')) $($tDelta[2].ToString('F3'))  (Z seating only)")
     $dbLines.Add("")
     $dbLines.Add("======================================")
     $dbLines.Add("SOURCE vs APPLIED TRANSFORMS  ($n total, first 5 shown)")
