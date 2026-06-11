@@ -723,23 +723,6 @@ function Bitmap-To-WpfImageInline([System.Drawing.Bitmap]$bmp) {
     return $bi
 }
 
-# Return a copy of $bmp rotated about its own center by $angleDeg (image-space
-# rotation, matching .NET's RotateTransform convention). Output bitmap has the
-# same dimensions as the input - safe for 90-degree-multiple angles on a
-# square preview image, since the rotated content stays within bounds.
-function Rotate-BitmapInline([System.Drawing.Bitmap]$bmp, [double]$angleDeg) {
-    if ([Math]::Abs($angleDeg % 360) -lt 1e-9) { return $bmp.Clone() }
-    $out = New-Object System.Drawing.Bitmap $bmp.Width, $bmp.Height
-    $g = [System.Drawing.Graphics]::FromImage($out)
-    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-    $g.TranslateTransform($bmp.Width / 2.0, $bmp.Height / 2.0)
-    $g.RotateTransform($angleDeg)
-    $g.TranslateTransform(-$bmp.Width / 2.0, -$bmp.Height / 2.0)
-    $g.DrawImage($bmp, 0, 0)
-    $g.Dispose()
-    return $out
-}
-
 # Draw the Nest's reference axes (Red=X, Green=Y, Blue=Z) at the centermost
 # instance's plate position on the Nest Source preview.
 function Update-NestRefAxesOverlay([hashtable]$t) {
@@ -762,9 +745,14 @@ function Update-NestRefAxesOverlay([hashtable]$t) {
     } catch {}
 }
 
-# Draw the Final's own current axes (Red=X, Green=Y, Blue=Z) at the content
-# bounding-box center of the Final preview, so mismatches vs. the Nest
-# reference are visible at a glance.
+# Draw confirmation axes on the Final preview. The axis frame is FIXED at the
+# Nest Source reference orientation (same frame drawn on the Nest Source);
+# the IMAGE spins around the locator anchor by the proposed Re-Nest spin
+# (nest angle + Rotate-90 steps). Since the correct spin satisfies
+# R_fin * ZRot(spin) = R_src, the spun preview shows the source-reference
+# pose exactly when the proposal is right - i.e. the user clicks Rotate 90
+# until the fixed axis points at the same part of the model as the axis
+# drawn on the Nest Source, which visually confirms the spin Re-Nest applies.
 function Update-FinalCurrentAxesOverlay([hashtable]$t) {
     if ([string]::IsNullOrEmpty($t.OvFinPath) -or -not (Test-Path -LiteralPath $t.OvFinPath)) { return }
     if ([string]::IsNullOrEmpty($t.FinalPath) -or -not (Test-Path -LiteralPath $t.FinalPath)) { return }
@@ -773,55 +761,44 @@ function Update-FinalCurrentAxesOverlay([hashtable]$t) {
         if ($null -eq $inst) { return }
         $t.FinalAxisR = $inst.R
         $displayR = $inst.R
-        $bmpYawDeg = 0.0
+        $spinDeg = 0.0
         if ($null -ne $t.SrcRefRotNorm) {
-            # Axes: the Nest Source reference instance's own orientation (plus
-            # any extra "Rotate 90" yaw), so the user can visually confirm -
-            # against the axes drawn on the Nest Source preview - that the code
-            # knows how the source and Final orientations relate.
-            $extraDeg = $t.AxisYawSteps * 90
-            $displayR = Mul-3x3 $t.SrcRefRotNorm (Get-ZRotationMatrix $extraDeg)
-            # Bitmap: spin the Final preview by the world-Z rotation Re-Nest
-            # will actually apply at the reference position - the non-90 "nest
-            # angle" recovered from the source reference rotation, plus the
-            # extra yaw. Negative because the preview maps world +Y to
-            # screen-up while GDI+ RotateTransform is clockwise-positive in
-            # screen space.
-            $bmpYawDeg = -($t.SrcNestAngleDeg + $extraDeg)
+            $displayR = $t.SrcRefRotNorm
+            $spinDeg = $t.SrcNestAngleDeg + ($t.AxisYawSteps * 90)
         }
         $rawBmp = [System.Drawing.Bitmap]::FromFile($t.OvFinPath)
-        if ([Math]::Abs($bmpYawDeg) -gt 1e-6) {
-            $bmp = Rotate-BitmapInline $rawBmp $bmpYawDeg
+        if ($t.OvFinPath -match '(?i)(top|pick)_\d+\.png$') {
+            # top_/pick_ previews are plate-mapped top views, so the build
+            # item's translation - the object's local-origin "locator" - maps
+            # directly to pixels. Anchor (and spin) THERE, not at the content
+            # bounding-box center, which drifts as soon as the user adds or
+            # moves a detached piece in the Final.
+            $pxScale = $rawBmp.Width / 256.0
+            $center = @(($inst.tx * $pxScale), ($rawBmp.Height - ($inst.ty * $pxScale)))
+        } else {
+            # Unknown camera (e.g. plate_1.png perspective render) - fall back
+            # to the content bounding-box center.
+            $center = Get-ContentCenterInline $rawBmp
+        }
+        # Spin the preview image about the anchor by the proposed world-Z
+        # spin; the axis frame stays fixed. Negative because the preview maps
+        # world +Y to screen-up while GDI+ RotateTransform is
+        # clockwise-positive in screen space.
+        if ([Math]::Abs($spinDeg % 360) -gt 1e-6) {
+            $bmp = New-Object System.Drawing.Bitmap $rawBmp.Width, $rawBmp.Height
+            $gs = [System.Drawing.Graphics]::FromImage($bmp)
+            $gs.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+            $gs.TranslateTransform($center[0], $center[1])
+            $gs.RotateTransform(-$spinDeg)
+            $gs.TranslateTransform(-$center[0], -$center[1])
+            $gs.DrawImage($rawBmp, 0, 0)
+            $gs.Dispose()
             $rawBmp.Dispose()
         } else {
             $bmp = $rawBmp
         }
         $g = [System.Drawing.Graphics]::FromImage($bmp)
         $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-        if ($t.OvFinPath -match '(?i)(top|pick)_\d+\.png$') {
-            # top_/pick_ previews are plate-mapped top views, so the build
-            # item's translation - the object's local-origin "locator" - maps
-            # directly to pixels. Anchor the axes THERE, not at the content
-            # bounding-box center, which drifts as soon as the user adds or
-            # moves a detached piece in the Final. The anchor must follow the
-            # same image-center rotation applied to the bitmap above.
-            $pxScale = $bmp.Width / 256.0
-            $ax = $inst.tx * $pxScale
-            $ay = $bmp.Height - ($inst.ty * $pxScale)
-            if ([Math]::Abs($bmpYawDeg) -gt 1e-6) {
-                $rad = $bmpYawDeg * [Math]::PI / 180.0
-                $cosA = [Math]::Cos($rad); $sinA = [Math]::Sin($rad)
-                $rcx = $bmp.Width / 2.0; $rcy = $bmp.Height / 2.0
-                $dxp = $ax - $rcx; $dyp = $ay - $rcy
-                $ax = $rcx + $dxp * $cosA - $dyp * $sinA
-                $ay = $rcy + $dxp * $sinA + $dyp * $cosA
-            }
-            $center = @($ax, $ay)
-        } else {
-            # Unknown camera (e.g. plate_1.png perspective render) - fall back
-            # to the content bounding-box center.
-            $center = Get-ContentCenterInline $bmp
-        }
         $arrowLen = [Math]::Min($bmp.Width, $bmp.Height) / 6.0
         Draw-AxesOverlay $g $center[0] $center[1] $displayR $t.AxisScale $arrowLen
         $g.Dispose()
@@ -840,8 +817,8 @@ function Update-AxisPickerPreview([hashtable]$t) {
     $t.PendingRotCorrection = Get-ZRotationMatrix $extraYawDeg
 
     $nestAngleTxt = "{0:F2}" -f $t.SrcNestAngleDeg
-    $t.LblAxisRef.Text = "Each Re-Nest clone keeps the Final's orientation, spun about the world up axis only: " + `
-        "nest angle $nestAngleTxt deg + each instance's own yaw vs the reference + extra $extraYawDeg deg (click Rotate 90 to change; applied as shown when Re-Nest runs)."
+    $t.LblAxisRef.Text = "Click Rotate 90 to spin the Final preview until its fixed axis points at the SAME part of the model as the Nest Source's axis - that confirms the spin. " + `
+        "Re-Nest then spins each clone about the world up axis only: nest angle $nestAngleTxt deg + extra $extraYawDeg deg + each instance's own yaw vs the reference."
 }
 
 # Load the orientation state for a Re-Nest card as soon as the card is built -
