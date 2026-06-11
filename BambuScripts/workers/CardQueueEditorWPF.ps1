@@ -401,6 +401,32 @@ function Get-WpfColor([string]$hex) {
     catch { return [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Colors]::Gray) }
 }
 
+function Remove-StaleFile([string]$path) {
+    if (-not (Test-Path -LiteralPath $path)) { return }
+    if ($path -inotmatch '_Data\.tsv$') {
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        return
+    }
+    # _Data.tsv: never delete outright if it carries a SKU - shrink it to a
+    # SKU-only stub instead so DataExtract_worker re-seeds the SKU on rebuild.
+    $sku = ""
+    try {
+        $line = Get-Content -LiteralPath $path -ErrorAction SilentlyContinue | Select-Object -Last 1
+        if ($line) {
+            $cols = $line -split "`t"
+            $isOldFormat = $cols.Count -gt 4 -and $cols[4] -match '^\d{1,2}/\d{1,2}/\d{4}$'
+            if (-not $isOldFormat -and $cols.Count -ge 4 -and $cols[3].Trim() -match '^[^\s]{3,}$') {
+                $sku = $cols[3].Trim()
+            }
+        }
+    } catch {}
+    if ($sku -ne "") {
+        Set-Content -Path $path -Value "`t`t`t$sku" -Encoding UTF8 -NoNewline -Force
+    } else {
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Get-WpfColorMedia([string]$hex) {
     if ([string]::IsNullOrWhiteSpace($hex)) { return [System.Windows.Media.Colors]::Gray }
     if ($hex.Length -eq 9) { $hex = "#" + $hex.Substring(1,6) }
@@ -3988,7 +4014,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
                     (Join-Path $srcDir ($corePrefix + '_Data.tsv'))
                 )
                 foreach ($s in $staleFiles) {
-                    if (Test-Path -LiteralPath $s) { Remove-Item -LiteralPath $s -Force -ErrorAction SilentlyContinue }
+                    Remove-StaleFile $s
                 }
                 # Rename the renested Nest.3mf â†’ Full.3mf
                 Rename-Item -LiteralPath $t.SourcePath -NewName ($corePrefix + '_Full.3mf') -Force
