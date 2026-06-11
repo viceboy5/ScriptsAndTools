@@ -1,14 +1,17 @@
-param(
+﻿param(
     [string]$FinalPath,                # The edited Final.3mf (single master object)
     [string]$TransformSourcePath = "", # Nest.3mf or Full.3mf to read plate transforms from
     [string]$OutputPath          = "", # Defaults to <stem>_Renest.3mf next to Final
     [string]$BambuPath           = "C:\Program Files\Bambu Studio\bambu-studio.exe",
+    [string]$RotCorrectionPath   = "", # Explicit rotation-correction JSON (e.g. a temp file from
+                                       # the CardQueueEditor). Defaults to <stem>_RotCorrection.json
+                                       # next to Final when omitted.
     [switch]$NoConfirm                 # Skip the Y/N prompt (used when caller batches multiple files)
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName 'System.IO.Compression.FileSystem'
 
-# ════════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  RenestFromFinal_worker.ps1
 #
 #  Takes an edited Final.3mf (single object, any changes applied) and a
@@ -22,12 +25,12 @@ Add-Type -AssemblyName 'System.IO.Compression.FileSystem'
 #    2. Drop the Final.3mf onto RenestFromFinal.bat
 #    3. The script finds the sibling Nest/Full automatically for transforms
 #    4. Output is a ready-to-slice plate file with all your edits applied
-# ════════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 $nsCore = 'http://schemas.microsoft.com/3dmanufacturing/core/2015/02'
 $nsProd = 'http://schemas.microsoft.com/3dmanufacturing/production/2015/06'
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function Parse-Tx([string]$s) {
     if ([string]::IsNullOrWhiteSpace($s)) { return [double[]](1,0,0, 0,1,0, 0,0,1, 0,0,0) }
     return [double[]]($s.Trim() -split '\s+')
@@ -85,6 +88,89 @@ function Get-RowScale([double[]]$r) {
     $s = [Math]::Sqrt($r[0]*$r[0] + $r[1]*$r[1] + $r[2]*$r[2])
     if ($s -lt 1e-9) { return 1.0 }
     return $s
+}
+# Strip any uniform scale baked into a row-vector rotation matrix
+function Normalize-Rot3x3([double[]]$r) {
+    $s = Get-RowScale $r
+    if ([Math]::Abs($s - 1.0) -lt 1e-9) { return [double[]]$r }
+    return [double[]]($r | ForEach-Object { $_ / $s })
+}
+# Yaw angle (degrees) of the local +X axis (row 0 of R), projected onto the
+# world XY plane, measured from world +X.
+function Get-YawAngleDeg([double[]]$r) {
+    $rn = Normalize-Rot3x3 $r
+    return [Math]::Atan2($rn[1], $rn[0]) * 180.0 / [Math]::PI
+}
+# Relative yaw (degrees) of $rSrc with respect to $rRefNorm, defined so that
+# $rSrc = $rRefNorm * ZRotation(result). Found by computing
+# M = Transpose($rRefNorm) * Normalize($rSrc), which collapses to a pure
+# Z-rotation matrix when $rSrc and $rRefNorm share the same tilt (row2),
+# and reading the angle off M's top-left 2x2 block. This works regardless
+# of which local axis the object's tilt happens to point along.
+function Get-RelativeYawDeg([double[]]$rSrc, [double[]]$rRefNorm) {
+    $rs = Normalize-Rot3x3 $rSrc
+    $m0 = $rRefNorm[0]*$rs[0] + $rRefNorm[3]*$rs[3] + $rRefNorm[6]*$rs[6]
+    $m1 = $rRefNorm[0]*$rs[1] + $rRefNorm[3]*$rs[4] + $rRefNorm[6]*$rs[7]
+    return [Math]::Atan2($m1, $m0) * 180.0 / [Math]::PI
+}
+# Row-vector rotation matrix for a rotation by $angleDeg about the world "up"
+# (Z) axis only.
+function Get-ZRotationMatrix([double]$angleDeg) {
+    $rad = $angleDeg * [Math]::PI / 180.0
+    $c = [Math]::Cos($rad); $s = [Math]::Sin($rad)
+    return [double[]]($c, $s, 0, (-$s), $c, 0, 0, 0, 1)
+}
+# Snap a rotation matrix to the nearest axis-aligned rotation: each row is
+# replaced by the signed world axis it points closest to, claiming the most
+# decisive (row, axis) pairs first so every axis is used exactly once. A nest
+# plate rotation is typically built from 90-degree flips (which a Bambu
+# trim/cut bakes into the mesh) plus an extra non-90 in-plane "nest angle"
+# (which the bake normalizes away). This recovers the 90-degree part; the
+# leftover, Get-RelativeYawDeg(original, snapped), is the nest angle about
+# the world up axis - the part that must be re-applied to the baked Final.
+function Get-AxisSnappedRot([double[]]$r) {
+    $rn = Normalize-Rot3x3 $r
+    $snap = New-Object double[] 9
+    $usedRow = @{}; $usedCol = @{}
+    for ($k = 0; $k -lt 3; $k++) {
+        $bestRow = -1; $bestCol = -1; $bestAbs = -1.0
+        for ($row = 0; $row -lt 3; $row++) {
+            if ($usedRow.ContainsKey($row)) { continue }
+            for ($c = 0; $c -lt 3; $c++) {
+                if ($usedCol.ContainsKey($c)) { continue }
+                $a = [Math]::Abs($rn[$row*3+$c])
+                if ($a -gt $bestAbs) { $bestAbs = $a; $bestRow = $row; $bestCol = $c }
+            }
+        }
+        $usedRow[$bestRow] = $true; $usedCol[$bestCol] = $true
+        $snap[$bestRow*3+$bestCol] = if ($rn[$bestRow*3+$bestCol] -ge 0) { 1.0 } else { -1.0 }
+    }
+    return $snap
+}
+# Yaw-only manual correction: every clone keeps $rRefNorm (normally the
+# Final's own current tilt/orientation) and is additionally spun about the
+# world "up" (Z) axis by $deltaYawDeg (the per-instance yaw difference between
+# a Nest Source instance and the Nest Source's reference instance, plus any
+# user-added "Rotate 90" steps). The spin is applied via right-multiplication
+# (R_new = $rRefNorm * ZRotation(deltaYaw)), matching how the Nest Source's
+# own per-instance rotations relate to each other - so the output's tilt is
+# unchanged from $rRefNorm and only its world-Z orientation varies per clone.
+# Translation handling is unchanged from Apply-TxCorrection.
+function Apply-TxCorrectionYawOnly([double[]]$tx, [double[]]$rRefNorm, [double]$deltaYawDeg, [double[]]$tDelta, [double]$sRatio = 1.0) {
+    $rSrc = Get-TxRot $tx
+    $yawRot = Get-ZRotationMatrix $deltaYawDeg
+    $rNew = Mul-3x3 $rRefNorm $yawRot
+    if ([Math]::Abs($sRatio - 1.0) -gt 1e-6) {
+        for ($ri = 0; $ri -lt 9; $ri++) { $rNew[$ri] *= $sRatio }
+    }
+    $tDeltaXY = [double[]]($tDelta[0], $tDelta[1], 0)
+    $dRot = Rotate-Vec $tDeltaXY $rSrc
+    $t0 = $tx[9]  + $dRot[0]
+    $t1 = $tx[10] + $dRot[1]
+    $t2 = $tx[11] + $tDelta[2]
+    return [double[]](
+        $rNew[0],$rNew[1],$rNew[2], $rNew[3],$rNew[4],$rNew[5], $rNew[6],$rNew[7],$rNew[8],
+        $t0, $t1, $t2)
 }
 
 # Apply rotation correction (left-multiply), scale correction, and translation delta.
@@ -163,7 +249,7 @@ function Find-File([string]$base, [string]$rel) {
     return $null
 }
 
-# ── Resolve input paths ───────────────────────────────────────────────────────
+# â”€â”€ Resolve input paths â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 $FinalPath = $FinalPath.Trim('"')
 if (-not (Test-Path $FinalPath)) { Write-Error "Final file not found: $FinalPath"; exit 1 }
 
@@ -171,8 +257,8 @@ $finalDir  = Split-Path $FinalPath -Parent
 $finalStem = [System.IO.Path]::GetFileNameWithoutExtension($FinalPath) -replace '(?i)_Final$', ''
 
 # Auto-detect transform source:
-#   If both Nest and Full exist alongside Final → use Nest (file has been merged)
-#   If only Full exists → use Full
+#   If both Nest and Full exist alongside Final â†’ use Nest (file has been merged)
+#   If only Full exists â†’ use Full
 if ([string]::IsNullOrWhiteSpace($TransformSourcePath)) {
     $nestCandidate = Join-Path $finalDir "${finalStem}_Nest.3mf"
     $fullCandidate = Join-Path $finalDir "${finalStem}_Full.3mf"
@@ -200,11 +286,11 @@ if ([string]::IsNullOrWhiteSpace($OutputPath)) {
     $OutputPath = Join-Path $finalDir "${finalStem}_Renest.3mf"
 }
 
-# ── Confirm before proceeding ─────────────────────────────────────────────────
+# â”€â”€ Confirm before proceeding â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Write-Host ""
-Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+Write-Host "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”"
 Write-Host "  RenestFromFinal - Planned Operation"
-Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+Write-Host "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”"
 Write-Host ""
 Write-Host "  Master (edited object)  : $(Split-Path $FinalPath -Leaf)"
 if ($autoDetectReason) {
@@ -228,9 +314,9 @@ if (-not $NoConfirm) {
 }
 Write-Host ""
 
-# ════════════════════════════════════════════════════════════════════════════════
-#  STEP 1 — Read transforms from the source plate file
-# ════════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+#  STEP 1 â€” Read transforms from the source plate file
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 $srcModelText    = Read-ZipEntry $TransformSourcePath '3D/3dmodel.model'
 $srcSettingsText = Read-ZipEntry $TransformSourcePath 'Metadata/model_settings.config'
 if ($null -eq $srcModelText) { Write-Error "Cannot read 3D/3dmodel.model from transform source."; exit 1 }
@@ -325,9 +411,9 @@ if ($null -ne $srcSettingsText) {
     }
 }
 
-# ════════════════════════════════════════════════════════════════════════════════
-#  STEP 2 — Extract Final.3mf to working directory
-# ════════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+#  STEP 2 â€” Extract Final.3mf to working directory
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 $workDir = Join-Path $env:TEMP ("Renest_" + [guid]::NewGuid().ToString().Substring(0,8))
 New-Item -ItemType Directory -Path $workDir -Force | Out-Null
 
@@ -348,7 +434,7 @@ try {
     $buildItems = @($xml.SelectNodes('//m:build/m:item', $xns))
     if ($buildItems.Count -eq 0) { Write-Error "No build items in Final.3mf"; exit 1 }
 
-    # ── Identify the master (printable) assembly object ───────────────────────
+    # â”€â”€ Identify the master (printable) assembly object â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # If Final has more than one (e.g. after re-editing in Bambu), pick centre-most
     $masterItem = $buildItems[0]
     if ($buildItems.Count -gt 1) {
@@ -376,13 +462,13 @@ try {
         }
     }
 
-    # ── Collect Final master component transforms (for debug output) ──────────────
+    # â”€â”€ Collect Final master component transforms (for debug output) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $masterCompTransforms = [System.Collections.Generic.List[string]]::new()
     foreach ($mc in $masterObj.SelectNodes('m:components/m:component', $xns)) {
         $masterCompTransforms.Add($mc.GetAttribute('transform')) | Out-Null
     }
 
-    # ── Derive rotation correction from the Final master's build item transform ─────
+    # â”€â”€ Derive rotation correction from the Final master's build item transform â”€â”€â”€â”€â”€
     # The Final's build item rotation captures how Bambu oriented the assembly on
     # the editing plate relative to the "natural" local frame of the geometry.
     # Source plate transforms assume the original (Nest/Full) orientation.
@@ -397,8 +483,22 @@ try {
     $refR8norm        = 1.0
     $finalR8norm      = 1.0
     $trimBakedDetected = $false   # set true when trim-bake path is taken
-    if (Is-IdentityRot $finalBuildRot) {
-        # ── Trim-bake detection ───────────────────────────────────────────────────
+
+    # â”€â”€ Manual orientation correction override â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # If the user has run the CardQueueEditor "Fix Orientation" picker and saved
+    # a <stem>_RotCorrection.json, that selection is the user's confirmed ground
+    # truth for how the Final relates to the source orientation. Skip ALL of the
+    # automatic detection heuristics below (trim-bake detection, tilt-depth
+    # check, etc.) - they are best-effort guesses and can misfire (e.g. detecting
+    # a "trim bake" and cancelling out a legitimate diagonal nest rotation) when
+    # the user has already verified the correct orientation by hand. Start from
+    # identity; the manual correction is layered on afterwards.
+    $rotCorrJsonPath = if (-not [string]::IsNullOrWhiteSpace($RotCorrectionPath)) { $RotCorrectionPath } else { Join-Path $finalDir "${finalStem}_RotCorrection.json" }
+    if (Test-Path $rotCorrJsonPath) {
+        $rotCorrection = [double[]](1,0,0, 0,1,0, 0,0,1)
+        Write-Host "Manual orientation correction present - skipping automatic rotation-correction detection."
+    } elseif (Is-IdentityRot $finalBuildRot) {
+        # â”€â”€ Trim-bake detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # When Bambu Studio trims/cuts an object it bakes the current plate rotation
         # into the mesh vertex positions and resets the build item transform to
         # identity.  The resulting Final looks identical but all rotation metadata
@@ -412,7 +512,7 @@ try {
         #
         # Correction: R_correction = R_src^T = R_src^-1 (for the normalised, pure
         # rotation part).  Apply-TxCorrection then computes:
-        #   R_new = R_src^T * R_src = I  →  pure translation, no rotation added.
+        #   R_new = R_src^T * R_src = I  â†’  pure translation, no rotation added.
         # The pre-baked mesh therefore lands at each plate position correctly.
         $firstSrcRotNorm  = $null
         $srcHasRotation   = $false
@@ -430,12 +530,22 @@ try {
         $hasCutInfo = ($null -ne $cutInfoPath) -and (Test-Path $cutInfoPath)
 
         if ($hasCutInfo -and $srcHasRotation) {
-            # The trim baked the source's plate rotation into the mesh vertices.
-            # R_correction = R_src_norm^T so that (R_src_norm^T)(R_src) = I.
-            $rotCorrection     = Transpose-3x3 $firstSrcRotNorm
+            # The trim baked the source's plate rotation into the mesh vertices -
+            # but only its 90-degree-aligned part: the bake normalizes away any
+            # extra non-90 in-plane "nest angle" the plate rotation carried.
+            # Inverting the FULL source rotation (R_src^T * R_src = I) would
+            # therefore also cancel that nest angle, leaving every clone
+            # axis-aligned instead of angled like the nest. Invert only the
+            # axis-snapped (90-degree) part:
+            #   R_new_i = R_snap^T * R_src_i = ZRotation(nestAngle + deltaYaw_i)
+            # so each clone keeps its source instance's full in-plane angle
+            # (a pure world-Z rotation on the baked geometry).
+            $srcSnapRot        = Get-AxisSnappedRot $firstSrcRotNorm
+            $srcNestAngleDeg   = Get-RelativeYawDeg $firstSrcRotNorm $srcSnapRot
+            $rotCorrection     = Transpose-3x3 $srcSnapRot
             $trimBakedDetected = $true
             Write-Host ("Trim-baked geometry detected (cut_information.xml present, source has rotation, Final is identity).")
-            Write-Host ("Correction: inverse of first source rotation applied so clones don't double-rotate.")
+            Write-Host ("Correction: inverse of axis-snapped source rotation applied (preserves nest angle {0:F2} deg about world Z)." -f $srcNestAngleDeg)
         } else {
             $rotCorrection = [double[]](1,0,0, 0,1,0, 0,0,1)
             Write-Host "Final master build item is identity - no rotation correction needed."
@@ -460,7 +570,7 @@ try {
             $rotCorrection = [double[]](1,0,0, 0,1,0, 0,0,1)
             Write-Host "Final rotation matches a source plate item - same orientation, no correction needed."
         } else {
-            # ── Tilt-depth check ──────────────────────────────────────────────────
+            # â”€â”€ Tilt-depth check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             # r[8] / |row| = cos(tilt_angle) and is INVARIANT under any additional
             # Z-axis (yaw) rotation.  If the user opened the Final (already at the
             # source's tilt) and simply spun it around Z for editing convenience,
@@ -499,14 +609,76 @@ try {
         }
     }
 
-    # ── Extract scale from Final build item ───────────────────────────────────
+    # â”€â”€ Apply manual orientation correction from the CardQueueEditor "Fix Orientation"
+    # picker, if present. This is layered on top of whatever automatic correction was
+    # derived above (identity if none).
+    $manualCorrApplied  = $false
+    $manualCorrDesc     = ""
+    $manualYawMode      = $false
+    $manualSrcRefRotNorm = $null
+    $manualFinalRotNorm  = $null
+    $manualSrcRefYawDeg = 0.0
+    $manualExtraYawDeg  = 0.0
+    $manualRefSpinDeg   = 0.0
+    if (Test-Path $rotCorrJsonPath) {
+        try {
+            $rotCorrJson = Get-Content -LiteralPath $rotCorrJsonPath -Raw | ConvertFrom-Json
+            if ($null -ne $rotCorrJson.srcRefRot) {
+                # Yaw-only manual correction: every clone KEEPS the Final's own
+                # current tilt/orientation (R_finalNorm) - it is rotated about
+                # the world "up" (Z) axis only. The per-instance Z-rotation is:
+                #   refSpin    - the user-confirmed total spin for the
+                #                reference position (the non-90 "nest angle"
+                #                a Bambu trim/cut bake normalized away, plus
+                #                the user's "Rotate 90" steps), exactly as
+                #                previewed in the Fix Orientation picker;
+                #   deltaYaw_i - how much each Nest Source instance is rotated
+                #                (about world Z) relative to the reference.
+                # srcRefRot is used ONLY to measure deltaYaw_i - its tilt is
+                # never adopted by the output.
+                $manualYawMode       = $true
+                $manualSrcRefRotNorm = Normalize-Rot3x3 ([double[]]($rotCorrJson.srcRefRot))
+                $manualFinalRotNorm  = Normalize-Rot3x3 $finalBuildRot
+                $manualSrcRefYawDeg  = [double]$rotCorrJson.srcRefYawDeg
+                $manualExtraYawDeg   = [double]$rotCorrJson.extraYawDeg
+                if ($null -ne $rotCorrJson.refSpinDeg) {
+                    # refSpinDeg is the user-CONFIRMED total reference spin,
+                    # exactly as previewed in the picker. Apply it verbatim -
+                    # do NOT re-derive the nest angle by axis-snapping here,
+                    # or the applied spin could silently differ from what the
+                    # user saw and confirmed.
+                    $manualRefSpinDeg = [double]$rotCorrJson.refSpinDeg
+                } else {
+                    # Older JSON without refSpinDeg: reconstruct it the same
+                    # way the picker did (snap-derived nest angle + extra yaw).
+                    $manualRefSpinDeg = (Get-RelativeYawDeg $manualSrcRefRotNorm (Get-AxisSnappedRot $manualSrcRefRotNorm)) + $manualExtraYawDeg
+                }
+                $rotCorrection       = $manualFinalRotNorm
+                $manualCorrApplied   = $true
+                $manualCorrDesc = ("yaw-only about world Z, Final's own tilt kept: refSpin={0:F2} (srcRefYaw={1:F1} extraYaw={2:F1})" -f $manualRefSpinDeg, $manualSrcRefYawDeg, $manualExtraYawDeg)
+                Write-Host "Manual orientation correction loaded from $(Split-Path $rotCorrJsonPath -Leaf): $manualCorrDesc"
+            } elseif ($null -ne $rotCorrJson.rotCorrection) {
+                $manualCorr = [double[]]($rotCorrJson.rotCorrection)
+                if ($manualCorr.Count -eq 9) {
+                    $rotCorrection = Mul-3x3 $manualCorr $rotCorrection
+                    $manualCorrApplied = $true
+                    $manualCorrDesc = ("axis {0} -> {1} ({2:F1} deg)" -f $rotCorrJson.selection.axis, $rotCorrJson.selection.userDir, [double]$rotCorrJson.angleDegrees)
+                    Write-Host "Manual orientation correction applied from $(Split-Path $rotCorrJsonPath -Leaf): $manualCorrDesc"
+                }
+            }
+        } catch {
+            Write-Host "WARNING: failed to read/apply $(Split-Path $rotCorrJsonPath -Leaf): $($_.Exception.Message)"
+        }
+    }
+
+    # â”€â”€ Extract scale from Final build item â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Bambu embeds the model's print scale in the build item rotation matrix.
     # If the user scaled the model in the Final, scaleFinal != scaleSrc, and each
     # clone's rotation matrix must be rescaled so geometry and Z position match.
     $scaleFinal = Get-RowScale $finalBuildRot
     Write-Host ("Scale from Final build item: {0:F4}" -f $scaleFinal)
 
-    # ── Compute centroid-based translation delta ───────────────────────────────
+    # â”€â”€ Compute centroid-based translation delta â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # When Bambu re-saves an edited Final it re-centers the geometry (centroid moves
     # to near the local origin), but the source plate translations assume the original
     # (un-centered) local frame.  delta = centroid_src - centroid_final * rotCorrection
@@ -534,11 +706,11 @@ try {
         $tDelta[0],$tDelta[1],$tDelta[2])
     Write-Host ("  Z correction: finalBuildZ={0:F4} srcMeanZ={1:F4} td2={2:F4}" -f $finalBuildZ,$srcMeanZ,$td2)
 
-    # ── Snapshot component UUIDs base from the master ──────────────────────────
+    # â”€â”€ Snapshot component UUIDs base from the master â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # We'll regenerate UUIDs per-clone to avoid duplicates
     $masterComps = @($masterObj.SelectNodes('m:components/m:component', $xns))
 
-    # ── Remove all existing build items ───────────────────────────────────────
+    # â”€â”€ Remove all existing build items â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     foreach ($bi in $buildItems) { $bi.ParentNode.RemoveChild($bi) | Out-Null }
 
     # Remove all existing printable (assembly) objects, keep internal meshes
@@ -560,7 +732,7 @@ try {
 
     $resourcesNode = $xml.SelectSingleNode('//m:resources', $xns)
 
-    # ── Find the highest ID in any external object file (e.g. object_1.model) ──
+    # â”€â”€ Find the highest ID in any external object file (e.g. object_1.model) â”€â”€
     # These objects live in 3D/Objects/ and are referenced via p:path components.
     # Their IDs share a global namespace with the main model in Bambu Studio,
     # so our assembly IDs must never collide with them.
@@ -576,16 +748,16 @@ try {
         if ($maxExternalId -gt 0) { Write-Host "Max ID in external object files: $maxExternalId" }
     }
 
-    # ── Find the highest internal-mesh ID to start our new IDs above it ────────
+    # â”€â”€ Find the highest internal-mesh ID to start our new IDs above it â”€â”€â”€â”€â”€â”€â”€â”€
     $nextId = $maxExternalId + 1
     foreach ($id in $objById.Keys) {
         if ($printableIdsInFinal.Contains($id)) { continue }
         $v = 0; if ([int]::TryParse($id, [ref]$v) -and $v -ge $nextId) { $nextId = $v + 1 }
     }
 
-    # ════════════════════════════════════════════════════════════════════════════
-    #  STEP 3 — Clone master object N times, one per source transform
-    # ════════════════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    #  STEP 3 â€” Clone master object N times, one per source transform
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     $newObjIds = [System.Collections.Generic.List[string]]::new()
     $uuidObjCounter = 1
 
@@ -618,7 +790,12 @@ try {
         if (-not [string]::IsNullOrWhiteSpace($tx)) {
             $srcScale = Get-RowScale (Get-TxRot (Parse-Tx $tx))
             $sRatio   = if ($srcScale -gt 1e-9) { $scaleFinal / $srcScale } else { 1.0 }
-            $corrected = Apply-TxCorrection (Parse-Tx $tx) $rotCorrection $tDelta $sRatio
+            if ($manualYawMode) {
+                $deltaYaw  = (Get-RelativeYawDeg (Get-TxRot (Parse-Tx $tx)) $manualSrcRefRotNorm) + $manualRefSpinDeg
+                $corrected = Apply-TxCorrectionYawOnly (Parse-Tx $tx) $manualFinalRotNorm $deltaYaw $tDelta $sRatio
+            } else {
+                $corrected = Apply-TxCorrection (Parse-Tx $tx) $rotCorrection $tDelta $sRatio
+            }
             $tx = ($corrected | ForEach-Object { ([double]$_).ToString('G9') }) -join ' '
             $newItem.SetAttribute('transform', $tx)
         }
@@ -629,9 +806,9 @@ try {
 
     Write-Host "Cloned master object x$n in 3dmodel.model."
 
-    # ════════════════════════════════════════════════════════════════════════════
-    #  STEP 4 — Rebuild model_settings.config
-    # ════════════════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    #  STEP 4 â€” Rebuild model_settings.config
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     if ($hasSettings) {
         [xml]$settings = [System.IO.File]::ReadAllText($settingsPath, [System.Text.Encoding]::UTF8)
 
@@ -690,7 +867,12 @@ try {
             $newId = $newObjIds[$i]
             $srcScale = Get-RowScale (Get-TxRot (Parse-Tx $sourceTransforms[$i]))
             $sRatio   = if ($srcScale -gt 1e-9) { $scaleFinal / $srcScale } else { 1.0 }
-            $corrected = Apply-TxCorrection (Parse-Tx $sourceTransforms[$i]) $rotCorrection $tDelta $sRatio
+            if ($manualYawMode) {
+                $deltaYaw  = (Get-RelativeYawDeg (Get-TxRot (Parse-Tx $sourceTransforms[$i])) $manualSrcRefRotNorm) + $manualRefSpinDeg
+                $corrected = Apply-TxCorrectionYawOnly (Parse-Tx $sourceTransforms[$i]) $manualFinalRotNorm $deltaYaw $tDelta $sRatio
+            } else {
+                $corrected = Apply-TxCorrection (Parse-Tx $sourceTransforms[$i]) $rotCorrection $tDelta $sRatio
+            }
             $tx = ($corrected | ForEach-Object { ([double]$_).ToString('G9') }) -join ' '
 
             # Clone master settings entry with new ID
@@ -700,7 +882,7 @@ try {
                 $configNode.InsertBefore($clonedSett, $newAssemble) | Out-Null
             }
 
-            # assemble_item — match Bambu's format (offset not modelmesh_id)
+            # assemble_item â€” match Bambu's format (offset not modelmesh_id)
             $asmItem = $settings.CreateElement('assemble_item')
             $asmItem.SetAttribute('object_id',   $newId)
             $asmItem.SetAttribute('instance_id', '0')
@@ -708,7 +890,7 @@ try {
             $asmItem.SetAttribute('offset',      '0 0 0')
             $newAssemble.AppendChild($asmItem) | Out-Null
 
-            # model_instance in plate — object_id, instance_id, identify_id (no 'centered')
+            # model_instance in plate â€” object_id, instance_id, identify_id (no 'centered')
             $inst = $settings.CreateElement('model_instance')
             foreach ($kv in @( @('object_id',$newId), @('instance_id','0'), @('identify_id',$sourceIdentifyIds[$i]) )) {
                 $m = $settings.CreateElement('metadata')
@@ -723,9 +905,9 @@ try {
         Write-Host "Rebuilt model_settings.config ($n object entries)."
     }
 
-    # ════════════════════════════════════════════════════════════════════════════
-    #  STEP 5 — Global ID renumbering (internal meshes first, assemblies after)
-    # ════════════════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    #  STEP 5 â€” Global ID renumbering (internal meshes first, assemblies after)
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     $printableSet = New-Object System.Collections.Generic.HashSet[string]
     $newObjIds | ForEach-Object { $printableSet.Add($_) | Out-Null }
 
@@ -789,9 +971,9 @@ try {
 
     Write-Host "ID renumbering complete ($($sorted.Count) total objects)."
 
-    # ════════════════════════════════════════════════════════════════════════════
-    #  STEP 6 — Rebuild VLH, purge stale thumbnails
-    # ════════════════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    #  STEP 6 â€” Rebuild VLH, purge stale thumbnails
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     if (Test-Path $vlhPath) {
         $vlhLines = @(Get-Content $vlhPath)
         $vlhData  = $null
@@ -854,9 +1036,9 @@ try {
         [System.IO.File]::WriteAllBytes((Join-Path $metaDir "plate_1.json"), $plate1JsonBytes)
     }
 
-    # ════════════════════════════════════════════════════════════════════════════
-    #  STEP 7 — Repack
-    # ════════════════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    #  STEP 7 â€” Repack
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     $tempOut      = $OutputPath + ".renest.tmp.3mf"
     if (Test-Path $tempOut) { Remove-Item $tempOut -Force }
 
@@ -873,9 +1055,9 @@ try {
     Write-Host ""
     Write-Host "Output: $OutputPath"
 
-    # ════════════════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     #  DEBUG - Write transform debug file alongside output
-    # ════════════════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     $debugPath = $OutputPath -replace '\.3mf$', '_debug.txt'
     $dbLines   = [System.Collections.Generic.List[string]]::new()
     $dbLines.Add("RenestFromFinal Debug Output")
@@ -899,6 +1081,7 @@ try {
                 elseif (Is-IdentityRot $rotCorrection) { 'none (identity)' } `
                 else { 'applied (tilt-only, Z yaw stripped)' }
     $dbLines.Add("  Correction  : $corrDesc")
+    $dbLines.Add("  Manual fix  : $(if ($manualCorrApplied) { "applied ($manualCorrDesc) from $(Split-Path $rotCorrJsonPath -Leaf)" } else { 'none' })")
     $dbLines.Add("")
 
     $dbLines.Add("FINAL.3MF - Master Object Component Transforms")
@@ -934,7 +1117,12 @@ try {
         if (-not [string]::IsNullOrWhiteSpace($v)) {
             $dbSrcScale = Get-RowScale (Get-TxRot (Parse-Tx $v))
             $dbSRatio   = if ($dbSrcScale -gt 1e-9) { $scaleFinal / $dbSrcScale } else { 1.0 }
-            $cv = Apply-TxCorrection (Parse-Tx $v) $rotCorrection $tDelta $dbSRatio
+            if ($manualYawMode) {
+                $dbDeltaYaw = (Get-RelativeYawDeg (Get-TxRot (Parse-Tx $v)) $manualSrcRefRotNorm) + $manualRefSpinDeg
+                $cv = Apply-TxCorrectionYawOnly (Parse-Tx $v) $manualFinalRotNorm $dbDeltaYaw $tDelta $dbSRatio
+            } else {
+                $cv = Apply-TxCorrection (Parse-Tx $v) $rotCorrection $tDelta $dbSRatio
+            }
             $cvStr = ($cv | ForEach-Object { ([double]$_).ToString('G9') }) -join ' '
             $dbLines.Add("  [$i] out : $cvStr")
         }
@@ -944,9 +1132,9 @@ try {
     [System.IO.File]::WriteAllLines($debugPath, $dbLines, (New-Object System.Text.UTF8Encoding($false)))
     Write-Host "Debug file : $debugPath"
 
-    # ════════════════════════════════════════════════════════════════════════════
-    #  STEP 8 — Optional Bambu resave (cleans stale metadata, generates thumbnails)
-    # ════════════════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    #  STEP 8 â€” Optional Bambu resave (cleans stale metadata, generates thumbnails)
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     if (Test-Path $BambuPath) {
         Write-Host "Running Bambu Studio resave to clean metadata..." -NoNewline
         $tempResave = $OutputPath + ".resave.tmp.3mf"
