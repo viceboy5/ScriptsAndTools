@@ -1150,18 +1150,57 @@ $script:LibrariesPanel = $null        # built later by Build-LibrariesPanel
 # Global workspace mode: "FilePr" | "Editing" | "Review"
 $script:GlobalMode = "FilePr"
 
+function Get-PJobHasSelectedTask($pJob) {
+    foreach ($name in @('ChkRename','ChkMerge','ChkSlice','ChkExtract','ChkImage','ChkColors','ChkLogs','ChkBOD','ChkPrintQ')) {
+        $chk = $pJob.$name
+        if ($null -ne $chk -and [bool]$chk.IsChecked) { return $true }
+    }
+    return $false
+}
+
+function Update-ThProcessButtonState($gpJob) {
+    if ($null -eq $gpJob -or $null -eq $gpJob.BtnThProcess) { return }
+    $hasSelected = $false
+    foreach ($p in $gpJob.Parents) {
+        if ($p.IsQueued -or $p.IsDone) { continue }
+        if (Get-PJobHasSelectedTask $p) { $hasSelected = $true; break }
+    }
+    if ($hasSelected) {
+        $gpJob.BtnThProcess.IsEnabled = $true; $gpJob.BtnThProcess.Background = Get-WpfColor "#4CAF72"; $gpJob.BtnThProcess.Foreground = Get-WpfColor "#FFFFFF"
+    } else {
+        $gpJob.BtnThProcess.IsEnabled = $false; $gpJob.BtnThProcess.Background = Get-WpfColor "#3A3A3A"; $gpJob.BtnThProcess.Foreground = Get-WpfColor "#666666"
+    }
+}
+
+function Update-ThRevertButtonState($gpJob) {
+    if ($null -eq $gpJob -or $null -eq $gpJob.BtnThRevert) { return }
+    $hasRevertible = $false
+    foreach ($p in $gpJob.Parents) {
+        if ($p.BtnRevertMerge -and $p.BtnRevertMerge.IsEnabled) { $hasRevertible = $true; break }
+    }
+    if ($hasRevertible) {
+        $gpJob.BtnThRevert.IsEnabled = $true; $gpJob.BtnThRevert.Background = Get-WpfColor "#D95F5F"; $gpJob.BtnThRevert.Foreground = Get-WpfColor "#FFFFFF"
+        $gpJob.BtnThRevert.ToolTip = $null
+    } else {
+        $gpJob.BtnThRevert.IsEnabled = $false; $gpJob.BtnThRevert.Background = Get-WpfColor "#3A3A3A"; $gpJob.BtnThRevert.Foreground = Get-WpfColor "#666666"
+        $gpJob.BtnThRevert.ToolTip = "No merged files to revert"
+    }
+}
+
 function Update-GlobalProcessAllStatus {
     $hasAnyIssue = $false
+    $hasAnySelected = $false
     foreach ($gp in $script:jobs) {
         foreach ($p in $gp.Parents) {
             if ($p.IsQueued -or $p.IsDone) { continue }
+            if (Get-PJobHasSelectedTask $p) { $hasAnySelected = $true }
             if ($p.HasCollision) { $hasAnyIssue = $true; break }
             foreach ($slot in $p.UISlots) { if ($slot.StatusLbl.Text -eq "[UNMATCHED]") { $hasAnyIssue = $true; break } }
             if ($hasAnyIssue) { break }
         }
         if ($hasAnyIssue) { break }
     }
-    if ($hasAnyIssue) {
+    if ($hasAnyIssue -or -not $hasAnySelected) {
         $btnProcessAll.IsEnabled = $false
         $btnProcessAll.Background = Get-WpfColor "#555555"
     } else {
@@ -1176,17 +1215,21 @@ function Validate-PJob($pJob) {
     $colorsSafe = $true
     foreach ($slot in $pJob.UISlots) { if ($slot.StatusLbl.Text -eq "[UNMATCHED]") { $colorsSafe = $false } }
     if ($pJob.HasCollision) {
-        $pJob.BtnApply.Content = "Name Collision!"; $pJob.BtnApply.Background = Get-WpfColor "#D95F5F"; $pJob.BtnApply.IsEnabled = $false
+        $pJob.BtnApply.Content = "Name Collision!"; $pJob.BtnApply.Background = Get-WpfColor "#D95F5F"; $pJob.BtnApply.Foreground = Get-WpfColor "#FFFFFF"; $pJob.BtnApply.IsEnabled = $false
     } elseif (-not $colorsSafe) {
-        $pJob.BtnApply.Content = "Unmatched Colors"; $pJob.BtnApply.Background = Get-WpfColor "#E8A135"; $pJob.BtnApply.IsEnabled = $false
+        $pJob.BtnApply.Content = "Unmatched Colors"; $pJob.BtnApply.Background = Get-WpfColor "#E8A135"; $pJob.BtnApply.Foreground = Get-WpfColor "#FFFFFF"; $pJob.BtnApply.IsEnabled = $false
+    } elseif (-not (Get-PJobHasSelectedTask $pJob)) {
+        $pJob.BtnApply.Content = "Add to Queue"; $pJob.BtnApply.Background = Get-WpfColor "#3A3A3A"; $pJob.BtnApply.Foreground = Get-WpfColor "#666666"; $pJob.BtnApply.IsEnabled = $false
     } else {
-        $pJob.BtnApply.Content = "Add to Queue"; $pJob.BtnApply.Background = Get-WpfColor "#4CAF72"; $pJob.BtnApply.IsEnabled = $true
+        $pJob.BtnApply.Content = "Add to Queue"; $pJob.BtnApply.Background = Get-WpfColor "#4CAF72"; $pJob.BtnApply.Foreground = Get-WpfColor "#FFFFFF"; $pJob.BtnApply.IsEnabled = $true
     }
     # Show Rename Only bypass when colors are unmatched (not a collision) and rename is checked
     if ($null -ne $pJob.BtnRenameOnly) {
         $showBypass = (-not $colorsSafe) -and (-not $pJob.HasCollision) -and ([bool]$pJob.ChkRename.IsChecked)
         $pJob.BtnRenameOnly.Visibility = if ($showBypass) { "Visible" } else { "Collapsed" }
     }
+    if ($null -ne $pJob._GpJob) { Update-ThProcessButtonState $pJob._GpJob }
+    Update-GlobalProcessAllStatus
 }
 
 function Update-ParentPreview($pJob, $gpJob) {
@@ -1364,7 +1407,13 @@ function Refresh-PJob($pJob, $gpJob) {
     $gpJob.Parents.Remove($pJob) | Out-Null
 
     $newAnchor = Find-AnchorFile $folderPath
-    if (-not $newAnchor) { Update-GpFileCount $gpJob; return }
+    if (-not $newAnchor) {
+        Update-GpFileCount $gpJob
+        Update-ThRevertButtonState $gpJob
+        Update-ThProcessButtonState $gpJob
+        Update-GlobalProcessAllStatus
+        return
+    }
 
     # Rebuild from scratch â€” re-parses slots, SmartFill, full card UI
     $newPJob = Build-PJob $folderPath $newAnchor $gpJob
@@ -1380,6 +1429,9 @@ function Refresh-PJob($pJob, $gpJob) {
     }
 
     Update-GpFileCount $gpJob
+    Update-ThRevertButtonState $gpJob
+    Update-ThProcessButtonState $gpJob
+    Update-GlobalProcessAllStatus
 }
 
 function Enqueue-PJob($pJob, $gpJob) {
@@ -3011,7 +3063,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pJob.PickProgressBar       = $pickProgressBar
 
     # Merge detected banner (top of pick image)
-    $nestExists = Get-ChildItem -Path $parentPath -Filter "*Nest.3mf" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    $nestExists = Get-ChildItem -Path $parentPath -Filter "*Nest.3mf" -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)[._ ]Nest\.3mf$' } | Select-Object -First 1
     $mergeBanner = New-Object System.Windows.Controls.TextBlock
     $mergeBanner.Text = "MERGE DETECTED"
     $mergeBanner.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(210,30,140,60))
@@ -3429,6 +3481,13 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     # Checkbox interdependencies
     $tasksData = @{ Rename = $chkRename; Merge = $chkMerge; Slice = $chkSlice; Extract = $chkExtract; Image = $chkImage; Colors = $chkColors; Logs = $chkLogs; BOD = $chkBOD; PrintQ = $chkPrintQ; PJob = $pJob; GpJob = $gpJob }
 
+    # Re-validate Add to Queue / Process buttons whenever any task checkbox changes
+    foreach ($chkName in @('ChkMerge','ChkSlice','ChkExtract','ChkImage','ChkColors','ChkLogs','ChkBOD','ChkPrintQ')) {
+        $chk = $pJob.$chkName
+        $chk.Add_Checked({ Validate-PJob $pJob }.GetNewClosure())
+        $chk.Add_Unchecked({ Validate-PJob $pJob }.GetNewClosure())
+    }
+
     $chkSlice.Tag = $tasksData
     $chkSlice.Add_Checked({ if ($this.IsChecked) { $this.Tag.Extract.IsChecked = $true } })
 
@@ -3452,7 +3511,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnSelAll.Tag = $tasksData
     $btnSelAll.Add_Click({
         $t = $this.Tag
-        $t.Rename.IsChecked = $true; $t.Slice.IsChecked = $true; $t.Extract.IsChecked = $true; $t.Image.IsChecked = $true
+        $t.Rename.IsChecked = $true; $t.Slice.IsChecked = $true; $t.Extract.IsChecked = $true; $t.Image.IsChecked = $true; $t.Colors.IsChecked = $true
         if ($t.Merge.IsEnabled) { $t.Merge.IsChecked = $true }
         # BOD is intentionally left at its current value â€” it defaults off and is a special-purpose task
     })
@@ -4331,7 +4390,7 @@ function Build-GpJob($gpPath, $parentDict) {
         if ($detectedTheme) { $gpNameForTheme = $detectedTheme }
     }
 
-    $gpJob = @{ GpPath = $gpPath; DiGrand = $diGrand; Parents = New-Object System.Collections.ArrayList; CbPrefix = $null; CbTag = $null; GpRenameConfirmed = $false; ReviewMode = $false; HeaderGrid = $null; ThemeBar = $null; EditingThemeBar = $null; RenameGroup = $null }
+    $gpJob = @{ GpPath = $gpPath; DiGrand = $diGrand; Parents = New-Object System.Collections.ArrayList; CbPrefix = $null; CbTag = $null; GpRenameConfirmed = $false; ReviewMode = $false; HeaderGrid = $null; ThemeBar = $null; EditingThemeBar = $null; RenameGroup = $null; BtnThProcess = $null; BtnThRevert = $null }
     $script:jobs.Add($gpJob) | Out-Null
 
     $container = New-Object System.Windows.Controls.Border
@@ -4524,8 +4583,12 @@ function Build-GpJob($gpPath, $parentDict) {
     $chkThSlice   = New-Object System.Windows.Controls.CheckBox; $chkThSlice.Content   = "Slice";   $chkThSlice.IsChecked   = $false; $chkThSlice.Foreground   = Get-WpfColor "#CCCCCC"; $chkThSlice.VerticalAlignment   = "Center"; $chkThSlice.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
     $chkThExtract = New-Object System.Windows.Controls.CheckBox; $chkThExtract.Content = "Extract"; $chkThExtract.IsChecked = $false; $chkThExtract.Foreground = Get-WpfColor "#CCCCCC"; $chkThExtract.VerticalAlignment = "Center"; $chkThExtract.Margin = New-Object System.Windows.Thickness(0,0,15,0)
     $chkThImage   = New-Object System.Windows.Controls.CheckBox; $chkThImage.Content   = "Image";   $chkThImage.IsChecked   = $false; $chkThImage.Foreground   = Get-WpfColor "#CCCCCC"; $chkThImage.VerticalAlignment   = "Center"; $chkThImage.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
-    $chkThColors  = New-Object System.Windows.Controls.CheckBox; $chkThColors.Content  = "Save Colors"; $chkThColors.IsChecked = $false; $chkThColors.Foreground = Get-WpfColor "#CCCCCC"; $chkThColors.VerticalAlignment = "Center"; $chkThColors.Margin = New-Object System.Windows.Thickness(0,0,20,0)
+    $chkThColors  = New-Object System.Windows.Controls.CheckBox; $chkThColors.Content  = "Save Colors"; $chkThColors.IsChecked = $false; $chkThColors.Foreground = Get-WpfColor "#CCCCCC"; $chkThColors.VerticalAlignment = "Center"; $chkThColors.Margin = New-Object System.Windows.Thickness(0,0,15,0)
     $chkThColors.ToolTip = "Write current color selections to the .3mf files for all cards in this theme"
+    $chkThBOD     = New-Object System.Windows.Controls.CheckBox; $chkThBOD.Content     = "Create BOD"; $chkThBOD.IsChecked = $false; $chkThBOD.Foreground = Get-WpfColor "#CCCCCC"; $chkThBOD.VerticalAlignment = "Center"; $chkThBOD.Margin = New-Object System.Windows.Thickness(0,0,15,0)
+    $chkThBOD.ToolTip = "Reduces the merged Full.3mf to the 5 pairs closest to centre and exports a BOD.gcode.3mf to the Printing Queue for all cards in this theme"
+    $chkThPrintQ  = New-Object System.Windows.Controls.CheckBox; $chkThPrintQ.Content  = "Printing Queue"; $chkThPrintQ.IsChecked = $false; $chkThPrintQ.Foreground = Get-WpfColor "#CCCCCC"; $chkThPrintQ.VerticalAlignment = "Center"; $chkThPrintQ.Margin = New-Object System.Windows.Thickness(0,0,20,0)
+    $chkThPrintQ.ToolTip = "Copies the existing Full.gcode.3mf to the Printing Queue folder with today's date for all cards in this theme"
 
     $btnThSelAll   = New-Object System.Windows.Controls.Button; $btnThSelAll.Content   = "Select All";   $btnThSelAll.Background   = Get-WpfColor "#2A2C35"; $btnThSelAll.Foreground   = Get-WpfColor "#FFFFFF"; $btnThSelAll.Width   = 85;  $btnThSelAll.Height   = 25; $btnThSelAll.BorderThickness   = 0; $btnThSelAll.Cursor   = [System.Windows.Input.Cursors]::Hand; $btnThSelAll.Margin   = New-Object System.Windows.Thickness(0,0,8,0)
     $btnThDeselAll = New-Object System.Windows.Controls.Button; $btnThDeselAll.Content = "Deselect All"; $btnThDeselAll.Background = Get-WpfColor "#2A2C35"; $btnThDeselAll.Foreground = Get-WpfColor "#FFFFFF"; $btnThDeselAll.Width = 85;  $btnThDeselAll.Height = 25; $btnThDeselAll.BorderThickness = 0; $btnThDeselAll.Cursor = [System.Windows.Input.Cursors]::Hand; $btnThDeselAll.Margin = New-Object System.Windows.Thickness(0,0,20,0)
@@ -4601,6 +4664,8 @@ function Build-GpJob($gpPath, $parentDict) {
     $themeBarStack.Children.Add($chkThExtract)   | Out-Null
     $themeBarStack.Children.Add($chkThImage)     | Out-Null
     $themeBarStack.Children.Add($chkThColors)    | Out-Null
+    $themeBarStack.Children.Add($chkThBOD)       | Out-Null
+    $themeBarStack.Children.Add($chkThPrintQ)    | Out-Null
     $themeBarStack.Children.Add($btnThSelAll)    | Out-Null
     $themeBarStack.Children.Add($btnThDeselAll)  | Out-Null
     $themeBarStack.Children.Add($btnThRevert)    | Out-Null
@@ -4611,6 +4676,8 @@ function Build-GpJob($gpPath, $parentDict) {
     $themeBar.Child = $themeBarStack
     $gpStack.Children.Add($themeBar) | Out-Null
     $gpJob.ThemeBar = $themeBar
+    $gpJob.BtnThProcess = $btnThProcess
+    $gpJob.BtnThRevert = $btnThRevert
     $themeBar.Visibility = if ($script:GlobalMode -eq "Editing") { "Collapsed" } else { "Visible" }
 
     # --- EDITING TASK BAR (shown only in Editing mode) ---
@@ -4667,47 +4734,60 @@ function Build-GpJob($gpPath, $parentDict) {
         $gpJob.Parents.Add($pJob) | Out-Null
     }
     Update-GpFileCount $gpJob
+    Update-ThRevertButtonState $gpJob
+    Update-ThProcessButtonState $gpJob
+    Update-GlobalProcessAllStatus
 
     # --- THEME TASK BAR HANDLERS (wired after Parents are populated) ---
     $chkThRename.Tag = $gpJob
-    $chkThRename.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { $p.ChkRename.IsChecked = $s } })
+    $chkThRename.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { $p.ChkRename.IsChecked = $s }; Update-ThProcessButtonState $this.Tag; Update-GlobalProcessAllStatus })
 
     $chkThMerge.Tag = $gpJob
-    $chkThMerge.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { if ($p.ChkMerge.IsEnabled) { $p.ChkMerge.IsChecked = $s } } })
+    $chkThMerge.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { if ($p.ChkMerge.IsEnabled) { $p.ChkMerge.IsChecked = $s } }; Update-ThProcessButtonState $this.Tag; Update-GlobalProcessAllStatus })
 
     $chkThSlice.Tag = $gpJob
-    $chkThSlice.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { $p.ChkSlice.IsChecked = $s } })
+    $chkThSlice.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { $p.ChkSlice.IsChecked = $s }; Update-ThProcessButtonState $this.Tag; Update-GlobalProcessAllStatus })
 
     $chkThExtract.Tag = $gpJob
-    $chkThExtract.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { $p.ChkExtract.IsChecked = $s } })
+    $chkThExtract.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { $p.ChkExtract.IsChecked = $s }; Update-ThProcessButtonState $this.Tag; Update-GlobalProcessAllStatus })
 
     $chkThImage.Tag = $gpJob
-    $chkThImage.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { $p.ChkImage.IsChecked = $s } })
+    $chkThImage.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { $p.ChkImage.IsChecked = $s }; Update-ThProcessButtonState $this.Tag; Update-GlobalProcessAllStatus })
 
     $chkThColors.Tag = $gpJob
-    $chkThColors.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { $p.ChkColors.IsChecked = $s } })
+    $chkThColors.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { $p.ChkColors.IsChecked = $s }; Update-ThProcessButtonState $this.Tag; Update-GlobalProcessAllStatus })
+
+    $chkThBOD.Tag = $gpJob
+    $chkThBOD.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { $p.ChkBOD.IsChecked = $s }; Update-ThProcessButtonState $this.Tag; Update-GlobalProcessAllStatus })
+
+    $chkThPrintQ.Tag = $gpJob
+    $chkThPrintQ.Add_Click({ $s = [bool]$this.IsChecked; foreach ($p in $this.Tag.Parents) { $p.ChkPrintQ.IsChecked = $s }; Update-ThProcessButtonState $this.Tag; Update-GlobalProcessAllStatus })
 
     $btnThSelAll.Tag = @{ GpJob = $gpJob; Chks = @{ Rename = $chkThRename; Merge = $chkThMerge; Slice = $chkThSlice; Extract = $chkThExtract; Image = $chkThImage; Colors = $chkThColors } }
     $btnThSelAll.Add_Click({
         $t = $this.Tag
         foreach ($p in $t.GpJob.Parents) {
             $p.ChkRename.IsChecked = $true; $p.ChkSlice.IsChecked = $true
-            $p.ChkExtract.IsChecked = $true; $p.ChkImage.IsChecked = $true
+            $p.ChkExtract.IsChecked = $true; $p.ChkImage.IsChecked = $true; $p.ChkColors.IsChecked = $true
             if ($p.ChkMerge.IsEnabled) { $p.ChkMerge.IsChecked = $true }
         }
         $t.Chks.Rename.IsChecked = $true; $t.Chks.Merge.IsChecked = $true
-        $t.Chks.Slice.IsChecked = $true; $t.Chks.Extract.IsChecked = $true; $t.Chks.Image.IsChecked = $true
+        $t.Chks.Slice.IsChecked = $true; $t.Chks.Extract.IsChecked = $true; $t.Chks.Image.IsChecked = $true; $t.Chks.Colors.IsChecked = $true
+        Update-ThProcessButtonState $t.GpJob; Update-GlobalProcessAllStatus
     })
 
-    $btnThDeselAll.Tag = @{ GpJob = $gpJob; Chks = @{ Rename = $chkThRename; Merge = $chkThMerge; Slice = $chkThSlice; Extract = $chkThExtract; Image = $chkThImage; Colors = $chkThColors } }
+    $btnThDeselAll.Tag = @{ GpJob = $gpJob; Chks = @{ Rename = $chkThRename; Merge = $chkThMerge; Slice = $chkThSlice; Extract = $chkThExtract; Image = $chkThImage; Colors = $chkThColors; BOD = $chkThBOD; PrintQ = $chkThPrintQ } }
     $btnThDeselAll.Add_Click({
         $t = $this.Tag
         foreach ($p in $t.GpJob.Parents) {
             $p.ChkRename.IsChecked = $false; $p.ChkMerge.IsChecked = $false; $p.ChkSlice.IsChecked = $false
             $p.ChkExtract.IsChecked = $false; $p.ChkImage.IsChecked = $false; $p.ChkColors.IsChecked = $false; $p.ChkLogs.IsChecked = $false
+            $p.ChkBOD.IsChecked = $false; $p.ChkPrintQ.IsChecked = $false
         }
         $t.Chks.Rename.IsChecked = $false; $t.Chks.Merge.IsChecked = $false
         $t.Chks.Slice.IsChecked = $false; $t.Chks.Extract.IsChecked = $false; $t.Chks.Image.IsChecked = $false; $t.Chks.Colors.IsChecked = $false
+        $t.Chks.BOD.IsChecked = $false; $t.Chks.PrintQ.IsChecked = $false
+        Update-ThProcessButtonState $t.GpJob; Update-GlobalProcessAllStatus
     })
 
     $btnThRevert.Tag = $gpJob
@@ -4734,6 +4814,7 @@ function Build-GpJob($gpPath, $parentDict) {
             if (-not $proc.HasExited) { try { $proc.Kill() } catch {} }
         }
         foreach ($p in @($gp.Parents)) { Refresh-PJob $p $gp }
+        Update-ThRevertButtonState $gp
     })
 
     $btnThProcess.Tag = $gpJob
@@ -5100,7 +5181,7 @@ $script:queueTimer.Add_Tick({
                 }
 
                 # Only enable revert controls if a Nest.3mf actually exists (failed merges won't have one)
-                $nestNow = Get-ChildItem -Path $pJob.FolderPath -Filter "*Nest.3mf" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+                $nestNow = Get-ChildItem -Path $pJob.FolderPath -Filter "*Nest.3mf" -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)[._ ]Nest\.3mf$' } | Select-Object -First 1
                 if ($nestNow) {
                     $pJob.BtnRevertDone.Visibility = "Visible"
                     if ($pJob.BtnRevertMerge) { $pJob.BtnRevertMerge.IsEnabled = $true; $pJob.BtnRevertMerge.Background = Get-WpfColor "#D95F5F"; $pJob.BtnRevertMerge.Foreground = Get-WpfColor "#FFFFFF"; $pJob.BtnRevertMerge.ToolTip = $null }
@@ -5505,13 +5586,14 @@ function Save-FilamentLibrary {
 function Save-PurgeDictionary {
     Write-Log "Save-PurgeDictionary: start ($($script:PurgeDict.Count) entries)"
     try {
-        # Comma-delimited with a UTF-8 BOM â€” this is the format Excel expects for .csv;
-        # a tab-delimited file (even named .csv) gets crammed into a single column on open.
+        # Tab-delimited with a UTF-8 BOM â€” this is the format Excel actually writes back
+        # to this .csv on save on this machine. Writing tab here too keeps the on-disk
+        # format consistent regardless of whether the last save came from Excel or here.
         $lines = [System.Collections.Generic.List[string]]::new()
-        $lines.Add("Source_Filament,Target_Filament,Tuned,Tuned_Volume,Base Volume")
+        $lines.Add("Source_Filament`tTarget_Filament`tTuned`tTuned_Volume`tBase Volume")
         foreach ($row in $script:PurgeDict) {
             $tunedStr = if ($row.Tuned) { "TRUE" } else { "" }
-            $lines.Add("$($row.Source_Filament),$($row.Target_Filament),$tunedStr,$($row.Tuned_Volume),$($row.Base_Volume)")
+            $lines.Add("$($row.Source_Filament)`t$($row.Target_Filament)`t$tunedStr`t$($row.Tuned_Volume)`t$($row.Base_Volume)")
         }
         [System.IO.File]::WriteAllLines($purgeDictPath, $lines, (New-Object System.Text.UTF8Encoding($true)))
         Write-Log "Save-PurgeDictionary: success"
@@ -5529,14 +5611,16 @@ function Load-PurgeDictionary {
     $lines = Get-Content -Path $purgeDictPath
     if ($lines.Count -eq 0) { return }
 
-    # Accept either delimiter on read (older/hand-edited copies may be tab-delimited) but
-    # always rewrite as comma-delimited â€” that's the format Excel expects for .csv files.
+    # Accept either delimiter on read (older comma-saved copies may still be around) but
+    # always rewrite as tab-delimited â€” that's the format Excel actually writes back to
+    # this .csv on save on this machine, so the on-disk format stays consistent.
     $delim = if ($lines[0] -match "`t") { "`t" } else { "," }
     $header = $lines[0] -split $delim
     $colIndex = @{}
     for ($i = 0; $i -lt $header.Count; $i++) { $colIndex[$header[$i].Trim()] = $i }
     # Old format carried Test_Volume/Iterations columns we no longer need; migrate them away on load.
-    $needsMigration = ($delim -eq "`t") -or (($colIndex.ContainsKey("Iterations") -or $colIndex.ContainsKey("Test_Volume")) -and (-not $colIndex.ContainsKey("Tuned")))
+    # Also migrate any leftover comma-delimited copy to tab-delimited.
+    $needsMigration = ($delim -eq ",") -or (($colIndex.ContainsKey("Iterations") -or $colIndex.ContainsKey("Test_Volume")) -and (-not $colIndex.ContainsKey("Tuned")))
 
     foreach ($line in ($lines | Select-Object -Skip 1)) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }

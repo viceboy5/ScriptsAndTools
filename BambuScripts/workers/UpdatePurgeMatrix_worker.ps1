@@ -65,7 +65,13 @@ function Resolve-FilamentName {
 # ------------------------------------------------------------
 $PurgeDict = @{}
 
-foreach ($row in (Import-Csv $PURGE_DICT)) {
+# PurgeDictionary.csv may be comma- or tab-delimited depending on the last save
+# (Excel re-saves it tab-delimited on this machine; the editor matches that format).
+$purgeDictDelim = ","
+$purgeDictFirstLine = Get-Content $PURGE_DICT -TotalCount 1 -ErrorAction SilentlyContinue
+if ($purgeDictFirstLine -match "`t") { $purgeDictDelim = "`t" }
+
+foreach ($row in (Import-Csv $PURGE_DICT -Delimiter $purgeDictDelim)) {
     $src = $row.Source_Filament.Trim()
     $tgt = $row.Target_Filament.Trim()
     $vol = $row.Tuned_Volume.Trim()
