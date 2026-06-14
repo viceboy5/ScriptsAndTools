@@ -14,27 +14,20 @@ echo BAMBU STUDIO BATCH SLICER
 echo --------------------------------------------------
 echo.
 
-:: Collect all .3mf files from every dropped item (file or folder)
+:: Collect dropped items (files and/or folders) as a PS array.
+:: Folders are passed as-is and expanded inside Slice_worker.ps1 - this avoids
+:: cmd.exe's ~8191 char command-line limit when a folder contains many files.
 set "COUNT=0"
+set "PS_PATHS="
 
 :collect_loop
 if "%~1"=="" goto run_slice
 
-if exist "%~1\" (
-    echo [ Scanning folder: %~nx1 ]
-    for /R "%~1" %%F in (*.3mf) do (
-        echo "%%F" | findstr /i /v "\.gcode\.3mf" >nul
-        if not errorlevel 1 (
-            set /a COUNT+=1
-            set "FILE_!COUNT!=%%F"
-        )
-    )
+set /a COUNT+=1
+if defined PS_PATHS (
+    set "PS_PATHS=!PS_PATHS!, '%~1'"
 ) else (
-    echo "%~1" | findstr /i /v "\.gcode\.3mf" >nul
-    if not errorlevel 1 (
-        set /a COUNT+=1
-        set "FILE_!COUNT!=%~1"
-    )
+    set "PS_PATHS='%~1'"
 )
 
 shift
@@ -42,23 +35,13 @@ goto collect_loop
 
 :run_slice
 if %COUNT%==0 (
-    echo [!] No valid .3mf files found to slice.
+    echo [!] Nothing to slice.
     pause
     exit /b 1
 )
 
-echo [ Found %COUNT% file(s) to slice ]
+echo [ Passing %COUNT% item(s) to slicer ]
 echo.
-
-:: Build PowerShell array string
-set "PS_PATHS="
-for /L %%I in (1,1,%COUNT%) do (
-    if defined PS_PATHS (
-        set "PS_PATHS=!PS_PATHS!, '!FILE_%%I!'"
-    ) else (
-        set "PS_PATHS='!FILE_%%I!'"
-    )
-)
 
 powershell.exe -ExecutionPolicy Bypass -NoProfile -Command "& '%WORKER%' -InputPaths @(%PS_PATHS%)"
 

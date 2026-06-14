@@ -4,13 +4,11 @@
 
 > **Do this at the start of every session, before anything else:**
 > 1. Read `BambuScripts/CLAUDE.md` (this file) — confirm architecture and conventions loaded
-> 2. Read `BambuScripts/PROGRESS.md` — confirm current branch status and next steps loaded
-> 3. If working inside a worktree, also read that worktree's own `PROGRESS.md` for detailed task state
-> 4. Confirm to the user: "Context loaded — [branch/worktree], next up: [top item from next steps]"
+> 2. Read `BambuScripts/PROGRESS.md` — confirm current status and next steps loaded
+> 3. Confirm to the user: "Context loaded — next up: [top item from next steps]"
 
 > **At the end of every session:**
-> - Update the worktree's `PROGRESS.md` with what was done, decisions made, and revised next steps
-> - Update the summary entry in the main `PROGRESS.md` worktree section
+> - Update `PROGRESS.md` with what was done, decisions made, and revised next steps
 > - Remind the user to let you do this if you haven't yet
 
 ---
@@ -20,9 +18,8 @@
 A Windows toolset for managing Bambu 3D printer batch workflows. Handles the full pipeline:
 color picking → 3MF merging → slicing → data extraction → preview image generation → card naming/renaming.
 
-The **CardQueueEditor** (`CardQueueEditorWPF.ps1`) is the primary interactive UI on `main` — a
-PowerShell/WPF application. A full Python/PySide6 rewrite is in progress on a separate worktree
-(see [Worktree: Python Rewrite](#worktree-python-rewrite-claudeupbeat-grothendieck) below).
+The **CardQueueEditor** (`CardQueueEditorWPF.ps1`) is the primary interactive UI — a
+PowerShell/WPF application.
 
 ---
 
@@ -118,57 +115,3 @@ $e=$null; [System.Management.Automation.Language.Parser]::ParseFile('path\to\fil
 - **No package manager / no tests**: Manual testing through the GUI
 - **Platform**: PowerShell 3.0+, .NET Framework (PresentationFramework, System.Windows.Forms)
 
----
-
-## Progress File Convention
-
-| Location | Purpose |
-|---|---|
-| `BambuScripts/PROGRESS.md` | Main branch log + brief summary of each active worktree |
-| `<worktree>/BambuScripts/PROGRESS.md` | Detailed log for that specific worktree only |
-
-**Every new worktree gets its own `PROGRESS.md` created at the start of the first session in it.**  
-The main `PROGRESS.md` worktree section is updated with a brief summary at the end of each session.
-
----
-
-## Worktree: Python Rewrite (`claude/upbeat-grothendieck`)
-
-A full Python/PySide6 rewrite of the CardQueueEditor is in progress on a separate git worktree.
-It is **not yet merged to main**.
-
-**Worktree path:** `BambuScripts/.claude/worktrees/upbeat-grothendieck/`  
-**Branch:** `claude/upbeat-grothendieck`  
-**Run:** `cd BambuScripts/.claude/worktrees/upbeat-grothendieck/BambuScripts/workers/py && python app.py`
-
-**Additional dependencies:** `pip install PySide6 Pillow`
-
-### Python rewrite structure (`workers/py/`)
-
-| File | Purpose |
-|---|---|
-| `app.py` | Entry point — QApplication + MainWindow |
-| `main_window.py` | Top-level window, drag-drop, process queue |
-| `parent_widget.py` | `PJobWidget` (one card row) + `_SquareCard` |
-| `gp_widget.py` | `GpWidget` — one theme group of cards |
-| `color_slot_widget.py` | Single filament slot row widget |
-| `models.py` | Dataclasses + color palette constants |
-| `color_library.py` | Loads `colorNamesCSV.csv`, hex↔name lookup |
-| `file_utils.py` | 3MF parsing, SmartFill, file sort keys |
-| `image_utils.py` | Pick-color randomize, merge-map visualization |
-| `theme.py` | Global dark QSS stylesheet |
-| `py_workers/` | Subprocess workers: extract, merge, isolate, slice |
-
-### Key architecture decision: square card layout
-
-`_SquareCard` is **passive** — only `set_side(n)` → `setFixedSize(n, n)` + fires callback.  
-`PJobWidget.resizeEvent` drives all sizing: `_update_card_sizes()` → `set_side()` → `_on_card_resize(scale)` → `slot.set_scale(scale, swatch_px, combo_max)`.  
-No `hasHeightForWidth` / no `resizeEvent` on the card itself — avoids oscillating resize loops.
-
-### Python code conventions
-
-- `snake_case` functions/variables, `PascalCase` classes, `SCREAMING_SNAKE` constants
-- `from __future__ import annotations` at top of every file
-- All color constants in `models.py` — never hardcode hex in widget files
-- `QTimer.singleShot(0, fn)` for all deferred layout work
-- Store widget/layout refs as `self._xxx` at build time so `set_scale` can update without rebuilding

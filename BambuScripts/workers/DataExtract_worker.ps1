@@ -1,4 +1,4 @@
-param (
+﻿param (
     [Parameter(Mandatory=$true, Position=0)]
     [ValidateNotNullOrEmpty()]
     [string]$InputFile,
@@ -28,7 +28,11 @@ $colorCsvPath = Join-Path $scriptDir "..\libraries\FilamentLibrary.csv"
 $LibraryNames = @{}
 $NameToHex = @{}
 if (Test-Path $colorCsvPath) {
-    $csvLines = [System.IO.File]::ReadAllLines($colorCsvPath)
+    # Open with ReadWrite share so this succeeds even when CardQueueEditor has the file open.
+    $csvFs     = [System.IO.File]::Open($colorCsvPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    $csvReader = [System.IO.StreamReader]::new($csvFs)
+    $csvLines  = $csvReader.ReadToEnd() -split "`r?`n"
+    $csvReader.Dispose(); $csvFs.Dispose()
     foreach ($line in $csvLines) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         $parts = $line -split ','
@@ -64,6 +68,7 @@ using System.Globalization;
 public class GcodeAnalyzer {
     public double FlushGrams { get; set; }
     public double TowerGrams { get; set; }
+    public double VirtualFlushMm { get; set; }  // linear mm of filament for P2S virtual flush
     public string PrintTime { get; set; }
     public int ColorChanges { get; set; }
 
@@ -78,8 +83,15 @@ public class GcodeAnalyzer {
             double currentE = 0;
             double maxE = 0;
 
+            // Virtual flush tracking (P2S): flush_volumes_matrix + T toolchange commands
+            double[] flushMatrix = null;
+            int matrixSize = 0;
+            int currentFilament = -1;
+            const double filamentArea = 2.4053; // pi * (1.75/2)^2 mm^2 for 1.75mm filament
+
             this.PrintTime = "Not found";
             this.ColorChanges = 0;
+            this.VirtualFlushMm = 0;
 
             while ((line = reader.ReadLine()) != null) {
                 line = line.TrimStart();
@@ -132,13 +144,28 @@ public class GcodeAnalyzer {
                     }
                 }
                 else if (c == ';') {
-                    if (line.StartsWith("; FLUSH_START")) inFlush = true;
-                    else if (line.StartsWith("; FLUSH_END")) inFlush = false;
+                    if (line.StartsWith("; FLUSH_START") || line.StartsWith("; VFLUSH_START")) inFlush = true;
+                    else if (line.StartsWith("; FLUSH_END") || line.StartsWith("; VFLUSH_END")) inFlush = false;
                     else if (line.StartsWith("; WIPE_TOWER_START")) inTower = true;
                     else if (line.StartsWith("; WIPE_TOWER_END")) inTower = false;
                     else if (line.StartsWith("; TYPE:")) {
                         if (line.Contains("Wipe tower") || line.Contains("Prime tower")) inTower = true;
                         else inTower = false;
+                    }
+                    else if (line.StartsWith("; flush_volumes_matrix = ")) {
+                        // Parse NxN flush volume matrix (mm^3 per filament A->B transition)
+                        string matStr = line.Substring(25).Trim();
+                        string[] parts = matStr.Split(',');
+                        int n = (int)Math.Sqrt(parts.Length);
+                        if (n > 0 && n * n == parts.Length) {
+                            matrixSize = n;
+                            flushMatrix = new double[parts.Length];
+                            for (int i = 0; i < parts.Length; i++) {
+                                double v = 0;
+                                double.TryParse(parts[i].Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out v);
+                                flushMatrix[i] = v;
+                            }
+                        }
                     }
                     else if (line.Contains("total estimated time:")) {
                         int colIdx = line.IndexOf("total estimated time:");
@@ -164,6 +191,22 @@ public class GcodeAnalyzer {
                     else if (line.StartsWith("M82")) isRelative = false;
                     else if (line.StartsWith("M620 S")) this.ColorChanges++;
                 }
+                else if (c == 'T' && line.Length >= 2 && char.IsDigit(line[1])) {
+                    // T0 / T1 / T2 / T3 — filament toolchange
+                    // Used to track A->B transitions for virtual flush volume (P2S)
+                    string numStr = line.Substring(1);
+                    int sp = numStr.IndexOf(' ');  if (sp > 0) numStr = numStr.Substring(0, sp);
+                    int sc = numStr.IndexOf(';');  if (sc > 0) numStr = numStr.Substring(0, sc);
+                    int nextFil;
+                    if (int.TryParse(numStr.Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out nextFil)) {
+                        if (flushMatrix != null && currentFilament >= 0 && nextFil != currentFilament
+                            && currentFilament < matrixSize && nextFil < matrixSize) {
+                            double vol = flushMatrix[currentFilament * matrixSize + nextFil]; // mm^3
+                            this.VirtualFlushMm += vol / filamentArea; // convert to linear mm
+                        }
+                        currentFilament = nextFil;
+                    }
+                }
             }
 
             this.FlushGrams = flushE * gramsPerMm;
@@ -180,6 +223,26 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 # INITIALIZE VARIABLES
 # ---------------------------------------------------------------------------------
 $projectName = ((Split-Path $InputFile -Leaf) -replace '\.gcode\.3mf$', '') -replace '(?i)_Full$', ''
+
+# --- READ EXISTING SKU (preserved from seed TSV if present) ---
+# Old format: Printer|FileType|FileName|Theme|Date|H|M|...  (Date at col 4)
+# New format: Printer|FileType|FileName|SKU|Theme|Date|H|M| (Date at col 5)
+# Seed row:   |||SKU                                         (4 cols, no date)
+$existingSku = ""
+if ($IndividualTsvPath -ne "" -and (Test-Path $IndividualTsvPath)) {
+    try {
+        $skuLine = Get-Content $IndividualTsvPath | Select-Object -Last 1
+        $skuCols = $skuLine -split "`t"
+        $datePattern = '^\d{1,2}/\d{1,2}/\d{4}$'
+        # Old format has Date at col 4 — skip read so we don't pull Theme as SKU.
+        # Also require a 5-digit value so hours/minutes/theme text from older TSV layouts
+        # are never mistaken for a SKU.
+        $isOldFormat = $skuCols.Count -gt 4 -and $skuCols[4] -match $datePattern
+        if (-not $isOldFormat -and $skuCols.Count -ge 4 -and $skuCols[3].Trim() -match '^[^\s]{3,}$') {
+            $existingSku = $skuCols[3].Trim()
+        }
+    } catch {}
+}
 
 # --- DETECT PRINTER PREFIX and TAG, then derive clean columns ---
 $detectedTag    = ''
@@ -221,9 +284,6 @@ if ($nameParts.Count -ge 3) {
 }
 
 $themeOutput = $themeSlot
-if ($adjSlot -match '(?i)Rare|Legendary|Epic') {
-    $themeOutput = "RARE " + $themeSlot
-}
 # -------------------------------------------------
 
 $timeAdd = 0
@@ -322,7 +382,18 @@ if (-not $SkipExtraction) {
         $zipArchive.Dispose()
 
         # --- 5. Crunch Final Math & Format ---
-        $modelGrams = $totalGrams - $analyzer.FlushGrams - $analyzer.TowerGrams
+        # X1C: FlushGrams > 0 (FLUSH_START/END detected in gcode) — subtract directly.
+        # P2S: FlushGrams = 0 (virtual flush has no gcode E-moves) — fall back to the
+        #      flush_volumes_matrix + T-command path which gives VirtualFlushMm.
+        #      result.json will override ModelGrams later if available (most accurate).
+        if ($analyzer.FlushGrams -gt 0) {
+            $modelGrams = $totalGrams - $analyzer.FlushGrams - $analyzer.TowerGrams
+            Write-Host "  -> Gcode flush path (X1C): FlushGrams=$([math]::Round($analyzer.FlushGrams,2))g  TowerGrams=$([math]::Round($analyzer.TowerGrams,2))g  ModelGrams=$([math]::Round($modelGrams,2))g" -ForegroundColor DarkCyan
+        } else {
+            $virtualFlushGrams = [math]::Round($analyzer.VirtualFlushMm * $gramsPerMm, 2)
+            $modelGrams = $totalGrams - $virtualFlushGrams - $analyzer.TowerGrams
+            Write-Host "  -> Virtual flush path (P2S): VirtualFlushGrams=${virtualFlushGrams}g  TowerGrams=$([math]::Round($analyzer.TowerGrams,2))g  ModelGrams=$([math]::Round($modelGrams,2))g" -ForegroundColor DarkCyan
+        }
 
         $d = 0; $h = 0; $m = 0
         if ($analyzer.PrintTime -match '(\d+)d') { $d = [int]$matches[1] }
@@ -370,9 +441,36 @@ if (-not $SkipExtraction) {
             }
         }
 
+        # ── result.json: model grams only ────────────────────────────────────
+        # Bambu writes result.json to the same folder as the gcode.3mf after
+        # slicing.  main_used_g is the slicer's own model-only gram figure —
+        # it excludes purge and prime-tower waste for ALL printer types (X1C
+        # physical flush and P2S virtual flush alike).  total_used_g matches
+        # the XML used_g values we already read, so only ModelGrams changes.
+        # H/M, per-slot grams, and TimeAdd all stay on the gcode/XML path.
+        # Falls back silently to the gcode-derived value when absent.
+        $inputBase      = (Split-Path $InputFile -Leaf) -replace '\.gcode\.3mf$', ''
+        $resultJsonPath = Join-Path (Split-Path $InputFile -Parent) "${inputBase}_result.json"
+        if (-not (Test-Path $resultJsonPath)) {
+            $resultJsonPath = Join-Path $env:TEMP "${inputBase}_result.json"
+        }
+        if (Test-Path $resultJsonPath) {
+            try {
+                $rj = Get-Content $resultJsonPath -Raw -ErrorAction Stop | ConvertFrom-Json
+                if ($rj.return_code -eq 0 -and $rj.sliced_plates.Count -gt 0) {
+                    $rPlate = $rj.sliced_plates[0]
+                    $rModel = [math]::Round(($rPlate.filaments | Measure-Object -Property main_used_g -Sum).Sum, 2)
+                    if ($rModel -gt 0) {
+                        $modelGrams = $rModel
+                        Write-Host "  -> result.json: ModelGrams overridden with main_used_g ($modelGrams g)" -ForegroundColor DarkCyan
+                    }
+                }
+            } catch {}
+        }
+
         # Always output all 8 filament slots; unused slots get empty strings so columns stay consistent
-        # Columns: Printer, FileType, FileName, Theme, Date, H, M, [8x (grams, color)], ColorSwaps, ObjCount, ModelGrams, TotalGrams, TimeAdd
-        $outputValues = @($printerPrefix, $fileTypeLabel, $fileNameClean, $themeOutput, (Get-Date).ToString("M/d/yyyy"), $h, $m)
+        # Columns: Printer, FileType, FileName, SKU, Theme, Date, H, M, [8x (grams, color)], ColorSwaps, ObjCount, ModelGrams, TotalGrams, TimeAdd
+        $outputValues = @($printerPrefix, $fileTypeLabel, $fileNameClean, $existingSku, $themeOutput, (Get-Date).ToString("M/d/yyyy"), $h, $m)
         for ($i = 1; $i -le 8; $i++) {
             $outputValues += $(if ($filData[$i].g -gt 0) { $filData[$i].g } else { "" })
             $outputValues += $filData[$i].color
@@ -400,17 +498,26 @@ if (-not $SkipExtraction) {
             $existingData = Get-Content $IndividualTsvPath | Select-Object -Last 1
             $cols = $existingData -split "`t"
 
-            if ($cols.Count -ge 20) {
-                # Slot data starts at index 7 (after Printer,FileType,FileName,Theme,Date,H,M); always read up to 8 slots
+            if ($cols.Count -ge 21) {
+                # Slot data starts at index 8 (after Printer,FileType,FileName,SKU,Theme,Date,H,M); always read up to 8 slots
                 for ($i = 1; $i -le 8; $i++) {
-                    $gIdx = 7 + (($i - 1) * 2)
+                    $gIdx = 8 + (($i - 1) * 2)
                     $cIdx = $gIdx + 1
                     if ($gIdx -lt $cols.Count -and [double]::TryParse($cols[$gIdx], [ref]$null)) { $filData[$i].g = [double]$cols[$gIdx] }
                     if ($cIdx -lt $cols.Count) {
                         $filData[$i].color = $cols[$cIdx]
                         if ($filData[$i].color -ne "") {
                             if ($filData[$i].color.StartsWith("#")) {
-                                $filData[$i].rawHex = $filData[$i].color
+                                # Stored value is a raw hex code (lookup failed when TSV was written).
+                                # Re-attempt name resolution now that the library may have been updated.
+                                $storedHex = $filData[$i].color.TrimStart('#').ToUpper()
+                                if ($storedHex.Length -eq 6) { $storedHex = $storedHex + "FF" }
+                                if ($LibraryNames.ContainsKey($storedHex)) {
+                                    $filData[$i].color  = $LibraryNames[$storedHex]
+                                    $filData[$i].rawHex = "#" + $storedHex
+                                } else {
+                                    $filData[$i].rawHex = $filData[$i].color
+                                }
                             } else {
                                 $filData[$i].rawHex = $NameToHex[$filData[$i].color]
                             }

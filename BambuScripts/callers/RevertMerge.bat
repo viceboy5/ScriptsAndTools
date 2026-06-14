@@ -47,7 +47,6 @@ set "BASE_PREFIX=!INPUTBASE:~0,-5!"
 REM Rebuild the file names using the detected separator
 set "FULLBASE=!BASE_PREFIX!!SEP!Full"
 set "NESTBASE=!BASE_PREFIX!!SEP!Nest"
-set "FINALBASE=!BASE_PREFIX!!SEP!Final"
 
 echo [ Reverting: !FULLBASE! ]
 
@@ -65,16 +64,6 @@ if exist "!INPUTDIR!!FULLBASE!.3mf" (
 if exist "!INPUTDIR!!FULLBASE!_Data.tsv" (
     echo   [-] Deleting !FULLBASE!_Data.tsv...
     del /f /q "!INPUTDIR!!FULLBASE!_Data.tsv"
-)
-
-if exist "!INPUTDIR!!FINALBASE!.3mf" (
-    echo   [-] Deleting !FINALBASE!.3mf...
-    del /f /q "!INPUTDIR!!FINALBASE!.3mf"
-)
-
-if exist "!INPUTDIR!!FINALBASE!.gcode.3mf" (
-    echo   [-] Deleting !FINALBASE!.gcode.3mf...
-    del /f /q "!INPUTDIR!!FINALBASE!.gcode.3mf"
 )
 
 REM 2. Restore the original file

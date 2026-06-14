@@ -9,10 +9,22 @@ $ErrorActionPreference = 'Stop'
 
 # Build the full list of files to slice.
 # Master-Controller passes -InputPath (single file) - that path is honoured as-is.
-# Standalone / Slice.bat passes -InputPaths (array) for multi-file drag-drop.
+# Standalone / Slice.bat passes -InputPaths which can be individual .3mf files OR
+# folder paths - folders are expanded recursively here so Slice.bat never has to
+# pre-expand large directories into a giant command-line string (which would exceed
+# cmd.exe's ~8191 char limit for folders containing many files).
 $allInputs = [System.Collections.Generic.List[string]]::new()
 if ($InputPath -ne "") { $allInputs.Add($InputPath) }
-foreach ($p in $InputPaths) { if ($p -ne "") { $allInputs.Add($p) } }
+foreach ($p in $InputPaths) {
+    if ($p -eq "") { continue }
+    if (Test-Path $p -PathType Container) {
+        Get-ChildItem -Path $p -Filter "*.3mf" -Recurse |
+            Where-Object { $_.Name -notlike "*.gcode.3mf" } |
+            ForEach-Object { $allInputs.Add($_.FullName) }
+    } else {
+        $allInputs.Add($p)
+    }
+}
 
 if ($allInputs.Count -eq 0) {
     Write-Host "  [!] ERROR: No input file specified." -ForegroundColor Red
@@ -46,9 +58,13 @@ function Invoke-SliceFile([string]$filePath, [string]$label, [string]$sf, [int]$
     $startTime  = Get-Date
     Write-SliceProgress $sf 0 $phaseStart $phaseEnd
 
-    # Added --uptodate and --allow-newer-file to bypass all version mismatch prompts
+    # Added --uptodate and --allow-newer-file to bypass all version mismatch prompts.
+    # WorkingDirectory is set to TEMP so result.json (written by Bambu v02.05+) lands
+    # there instead of in the design folder, keeping design folders clean.
     $procArgs = "--debug 3 --no-check --uptodate --allow-newer-file --slice 1 --min-save --export-3mf `"$slicedOut`" `"$filePath`""
-    $proc = Start-Process -FilePath $BambuPath -ArgumentList $procArgs -RedirectStandardOutput $logOut -RedirectStandardError $logErr -WindowStyle Hidden -PassThru
+    $proc = Start-Process -FilePath $BambuPath -ArgumentList $procArgs `
+        -WorkingDirectory $env:TEMP `
+        -RedirectStandardOutput $logOut -RedirectStandardError $logErr -WindowStyle Hidden -PassThru
 
     while (-not $proc.HasExited) {
         # Try to parse a progress percentage from the Bambu Studio log first.
@@ -92,6 +108,16 @@ function Invoke-SliceFile([string]$filePath, [string]$label, [string]$sf, [int]$
         if (Test-Path $logOut) { Remove-Item $logOut -Force -ErrorAction SilentlyContinue }
         if (Test-Path $logErr) { Remove-Item $logErr -Force -ErrorAction SilentlyContinue }
         return $false
+    }
+
+    # Bambu Studio (v02.05+) writes result.json to WorkingDirectory ($env:TEMP) after a
+    # successful slice.  Rename it to {baseName}_result.json so a second slice (Isolated
+    # object) doesn't overwrite the first.  DataExtract_worker reads from $env:TEMP and
+    # deletes the file after use.
+    $genericResult = Join-Path $env:TEMP "result.json"
+    $namedResult   = Join-Path $env:TEMP "${baseName}_result.json"
+    if (Test-Path $genericResult) {
+        Move-Item -Path $genericResult -Destination $namedResult -Force -ErrorAction SilentlyContinue
     }
 
     if (Test-Path $logOut) { Remove-Item $logOut -Force -ErrorAction SilentlyContinue }

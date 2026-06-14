@@ -3,7 +3,8 @@ param(
     [string]$InputPath,
     [string]$OutputPath,
     [string]$ReportPath,
-    [string]$DoColors = "0"
+    [string]$DoColors = "0",
+    [string]$BambuPath = "C:\Program Files\Bambu Studio\bambu-studio.exe"
 )
 $ErrorActionPreference = 'Stop'
 
@@ -831,6 +832,24 @@ while (-not $lockReleased -and $attempts -lt 20) {
 }
 if (-not $lockReleased) {
     Write-Host "WARNING: File is still locked after 10 seconds!" -ForegroundColor Red
+}
+
+# ── Bambu Studio resave to clean metadata ─────────────────────────────────────
+if (Test-Path $BambuPath) {
+    Write-Host "Running Bambu Studio resave to clean metadata..." -NoNewline
+    $tempResave = $OutputPath + ".resave.tmp.3mf"
+    $logOut = Join-Path $env:TEMP "bambu_merge_out.txt"
+    $logErr = Join-Path $env:TEMP "bambu_merge_err.txt"
+    $procArgs = "--debug 3 --no-check --uptodate --allow-newer-file --export-3mf `"$tempResave`" `"$OutputPath`""
+    $proc = Start-Process -FilePath $BambuPath -ArgumentList $procArgs `
+                          -RedirectStandardOutput $logOut -RedirectStandardError $logErr `
+                          -WindowStyle Hidden -PassThru
+    $proc.WaitForExit()
+    foreach ($log in @($logOut, $logErr)) { if (Test-Path $log) { Remove-Item $log -Force -ErrorAction SilentlyContinue } }
+    if (Test-Path $tempResave) { Move-Item $tempResave $OutputPath -Force; Write-Host " done." }
+    else { Write-Host " skipped (export produced no output)." }
+} else {
+    Write-Host "Bambu Studio not found at '$BambuPath' - skipping metadata resave."
 }
 
 $finalCount = $mergePlan.Count + $lone
