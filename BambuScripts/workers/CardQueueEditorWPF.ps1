@@ -1025,6 +1025,8 @@ $script:activeProcess = $null
 $script:activeProcessJob = $null
 $script:editQueue = New-Object System.Collections.Queue
 $script:editActiveJob = $null
+$script:ShowMerged   = $true   # design-card visibility filter (Show Merged checkbox)
+$script:ShowUnmerged = $true   # design-card visibility filter (Show Unmerged checkbox)
 . (Join-Path $PSScriptRoot "..\libraries\NamesLibrary.ps1")
 $script:AdjPresets = @('Common','RARE','EPIC','LEGENDARY','Default')
 
@@ -1122,7 +1124,10 @@ if ($args.Count -gt 0) {
                 </StackPanel>
 
                 <Border Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3" Background="#14151A" BorderBrush="#2A2C35" BorderThickness="0,1,0,0" Padding="12,6,12,6">
-                    <StackPanel Name="TopModeBar" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    <Grid>
+                        <StackPanel Name="TopFilterBar" Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                        <StackPanel Name="TopModeBar" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Grid>
                 </Border>
             </Grid>
         </Border>
@@ -1153,6 +1158,7 @@ $btnImportSkus  = $window.FindName("BtnImportSkus")
 $btnBrowse      = $window.FindName("BtnBrowse") # <--- ADD THIS LINE BACK
 $mainStack      = $window.FindName("MainStack")
 $topModeBar     = $window.FindName("TopModeBar")
+$topFilterBar   = $window.FindName("TopFilterBar")
 $scrollViewer   = $mainStack.Parent   # ScrollViewer wrapping MainStack
 $script:LibrariesPanel = $null        # built later by Build-LibrariesPanel
 
@@ -1461,6 +1467,7 @@ function Refresh-PJob($pJob, $gpJob) {
         Update-ThRevertButtonState $gpJob
         Update-ThProcessButtonState $gpJob
         Update-GlobalProcessAllStatus
+        Apply-MergeFilter
         return
     }
 
@@ -1481,6 +1488,7 @@ function Refresh-PJob($pJob, $gpJob) {
     Update-ThRevertButtonState $gpJob
     Update-ThProcessButtonState $gpJob
     Update-GlobalProcessAllStatus
+    Apply-MergeFilter
 }
 
 function Enqueue-PJob($pJob, $gpJob) {
@@ -2629,6 +2637,27 @@ function Apply-GpReviewMode($gpJob, [bool]$enter) {
     }
 }
 
+# Applies the current merge filter: shows/hides each design card by its merge
+# state ($pJob.IsMerged, kept current at build/refresh/merge-complete time)
+# against the two "Show Merged"/"Show Unmerged" toggles, and collapses any theme
+# whose cards are all hidden so empty headers don't clutter the queue.
+# Orthogonal to the workspace mode (which never touches RowPanel/Container
+# visibility).
+function Apply-MergeFilter {
+    foreach ($gpJob in $script:jobs) {
+        $anyVisible = $false
+        foreach ($pj in $gpJob.Parents) {
+            if ($null -eq $pj.RowPanel) { continue }
+            $show = if ([bool]$pj.IsMerged) { $script:ShowMerged } else { $script:ShowUnmerged }
+            $pj.RowPanel.Visibility = if ($show) { "Visible" } else { "Collapsed" }
+            if ($show) { $anyVisible = $true }
+        }
+        if ($null -ne $gpJob.Container) {
+            $gpJob.Container.Visibility = if ($anyVisible) { "Visible" } else { "Collapsed" }
+        }
+    }
+}
+
 # Switch the global workspace mode and update every loaded group/card.
 # $mode : "FilePr" | "Editing" | "Review"
 function Set-GlobalMode([string]$mode) {
@@ -2929,6 +2958,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         BtnEdQueue = $null; LblEdQueueStatus = $null
         EdIsQueued = $false
         LblReviewPrintQStatus = $null
+        IsMerged = $false
         _GpJob = $gpJob
     }
 
@@ -3492,6 +3522,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
     # Merge detected banner (top of pick image)
     $nestExists = Get-ChildItem -Path $parentPath -Filter "*Nest.3mf" -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)[._ ]Nest\.3mf$' } | Select-Object -First 1
+    $pJob.IsMerged = ($null -ne $nestExists)
     $mergeBanner = New-Object System.Windows.Controls.TextBlock
     $mergeBanner.Text = "MERGE DETECTED"
     $mergeBanner.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(210,30,140,60))
@@ -5656,6 +5687,7 @@ $script:queueTimer.Add_Tick({
 
                 # Only enable revert controls if a Nest.3mf actually exists (failed merges won't have one)
                 $nestNow = Get-ChildItem -Path $pJob.FolderPath -Filter "*Nest.3mf" -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)[._ ]Nest\.3mf$' } | Select-Object -First 1
+                $pJob.IsMerged = ($null -ne $nestNow)
                 if ($nestNow) {
                     $pJob.BtnRevertDone.Visibility = "Visible"
                     if ($pJob.BtnRevertMerge) { $pJob.BtnRevertMerge.IsEnabled = $true; $pJob.BtnRevertMerge.Background = Get-WpfColor "#D95F5F"; $pJob.BtnRevertMerge.Foreground = Get-WpfColor "#FFFFFF"; $pJob.BtnRevertMerge.ToolTip = $null }
@@ -5666,6 +5698,10 @@ $script:queueTimer.Add_Tick({
             }
 
             $script:activeProcess = $null; $script:activeProcessJob = $null
+
+            # A just-merged (or reverted) design may now match/leave the active
+            # filter - re-apply so its card shows/hides accordingly.
+            Apply-MergeFilter
 
             # Start next job immediately rather than waiting for the next tick
             if ($script:processQueue.Count -gt 0) { Start-NextProcess }
@@ -5724,6 +5760,7 @@ $btnBrowse.Add_Click({
 
     $lblGlobalTitle.Text = "Queue Dashboard ($($script:jobs.Count) Theme(s) found)"
     if ($script:jobs.Count -gt 0) { Update-GlobalProcessAllStatus }
+    Apply-MergeFilter
 })
 
 
@@ -5784,6 +5821,7 @@ $window.Add_Drop({
 
         $lblGlobalTitle.Text = "Queue Dashboard ($($script:jobs.Count) Theme(s) found)"
         if ($script:jobs.Count -gt 0) { Update-GlobalProcessAllStatus }
+        Apply-MergeFilter
         [System.IO.File]::AppendAllText($dbgLog, "[DROP] Complete. Jobs: $($script:jobs.Count)`r`n")
     } catch {
         $errMsg = $_.Exception.Message
@@ -5911,6 +5949,7 @@ $window.Add_Loaded({
     }
     $lblGlobalTitle.Text = "Queue Dashboard ($($gpQueue.Count) Theme(s) found)"
     Update-GlobalProcessAllStatus
+    Apply-MergeFilter
     $script:queueTimer.Start()
 })
 
@@ -7608,6 +7647,36 @@ $script:BtnModeLibraries.Add_Click({ Write-Log "BtnModeLibraries: clicked"; Set-
 $topModeBar.Children.Add($script:BtnModeFilePr)    | Out-Null
 $topModeBar.Children.Add($script:BtnModeEditing)   | Out-Null
 $topModeBar.Children.Add($script:BtnModeReview)    | Out-Null
+
+# --- Merged/Unmerged design filter: two checkboxes pinned to the far left ---
+$lblFilter = New-Object System.Windows.Controls.TextBlock
+$lblFilter.Text = "Show:"; $lblFilter.Foreground = Get-WpfColor "#9A9DB0"
+$lblFilter.FontSize = 11; $lblFilter.VerticalAlignment = "Center"
+$lblFilter.Margin = New-Object System.Windows.Thickness(0,0,8,0)
+$topFilterBar.Children.Add($lblFilter) | Out-Null
+
+$script:ChkShowMerged = New-Object System.Windows.Controls.CheckBox
+$script:ChkShowMerged.Content = "Merged"; $script:ChkShowMerged.IsChecked = $script:ShowMerged
+$script:ChkShowMerged.Foreground = Get-WpfColor "#CCCCCC"; $script:ChkShowMerged.FontSize = 11
+$script:ChkShowMerged.VerticalAlignment = "Center"; $script:ChkShowMerged.Margin = New-Object System.Windows.Thickness(0,0,12,0)
+$script:ChkShowMerged.ToolTip = "Show designs that have been merged (a Nest.3mf exists)"
+
+$script:ChkShowUnmerged = New-Object System.Windows.Controls.CheckBox
+$script:ChkShowUnmerged.Content = "Unmerged"; $script:ChkShowUnmerged.IsChecked = $script:ShowUnmerged
+$script:ChkShowUnmerged.Foreground = Get-WpfColor "#CCCCCC"; $script:ChkShowUnmerged.FontSize = 11
+$script:ChkShowUnmerged.VerticalAlignment = "Center"; $script:ChkShowUnmerged.Margin = New-Object System.Windows.Thickness(0,0,0,0)
+$script:ChkShowUnmerged.ToolTip = "Show designs that have not been merged yet"
+
+$filterChkHandler = {
+    $script:ShowMerged   = [bool]$script:ChkShowMerged.IsChecked
+    $script:ShowUnmerged = [bool]$script:ChkShowUnmerged.IsChecked
+    Apply-MergeFilter
+}
+$script:ChkShowMerged.Add_Checked($filterChkHandler);   $script:ChkShowMerged.Add_Unchecked($filterChkHandler)
+$script:ChkShowUnmerged.Add_Checked($filterChkHandler); $script:ChkShowUnmerged.Add_Unchecked($filterChkHandler)
+
+$topFilterBar.Children.Add($script:ChkShowMerged)   | Out-Null
+$topFilterBar.Children.Add($script:ChkShowUnmerged) | Out-Null
 
 # â”€â”€ Libraries button sits LEFT of the Browse button in the center column â”€â”€
 # Navigate up from BtnBrowse: StackPanel â†’ header Grid (col 1)
