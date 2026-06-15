@@ -2693,6 +2693,25 @@ function Save-SkuToTsv([string]$skuVal, [string]$folderPath, $anchorFile) {
     }
 }
 
+# Returns a list of @{ DesignName; FolderPath } for every other card in the
+# queue that already has the given SKU assigned, so callers can warn before
+# creating a duplicate.
+function Find-DuplicateSku([string]$sku, [string]$excludeFolderPath) {
+    $result = New-Object System.Collections.ArrayList
+    if ([string]::IsNullOrWhiteSpace($sku)) { return $result }
+    foreach ($gp in $script:jobs) {
+        foreach ($p in $gp.Parents) {
+            if ($p.FolderPath -eq $excludeFolderPath) { continue }
+            if ($null -eq $p.TxtSKU) { continue }
+            $val = $p.TxtSKU.Text.Trim()
+            if ($val -ne '' -and $val -ieq $sku) {
+                [void]$result.Add(@{ DesignName = $p.DesignName; FolderPath = $p.FolderPath })
+            }
+        }
+    }
+    return $result
+}
+
 # Searches sibling printer folders under the same theme root for a Data TSV
 # that shares the same design name and already has a SKU assigned.
 # Returns a hashtable { SKU; Printer; FilePath } or $null if nothing found.
@@ -3787,6 +3806,18 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
                 $t.LblStatus.Text = "SKU must be 3+ chars, no spaces"
                 $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"
                 return
+            }
+            $dupes = Find-DuplicateSku $skuVal $t.FolderPath
+            if ($dupes.Count -gt 0) {
+                $dupeList = ($dupes | ForEach-Object { "  $(Split-Path $_.FolderPath -Leaf)" }) -join "`n"
+                $resp = [System.Windows.MessageBox]::Show(
+                    "SKU '$skuVal' is already assigned to:`n$dupeList`n`nUse it for this card too?",
+                    "Duplicate SKU", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
+                if ($resp -ne [System.Windows.MessageBoxResult]::Yes) {
+                    $t.LblStatus.Text = "Not saved (duplicate SKU)"
+                    $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"
+                    return
+                }
             }
             Save-SkuToTsv $skuVal $t.FolderPath $t.AnchorFile
             $t.TxtSku.IsReadOnly = $true
@@ -5924,6 +5955,23 @@ $btnImportSkus.Add_Click({
 
         $assignCount = [Math]::Min($skusFromCsv.Count, $targetJobs.Count)
 
+        # Check for duplicates: SKUs repeated within the CSV itself, and SKUs
+        # that are already assigned to other cards in the queue.
+        $dupeWarnings = New-Object System.Collections.ArrayList
+        $seenInCsv = @{}
+        for ($i = 0; $i -lt $assignCount; $i++) {
+            $sku = $skusFromCsv[$i]
+            if ($seenInCsv.ContainsKey($sku.ToLower())) {
+                [void]$dupeWarnings.Add("  '$sku' appears more than once in the CSV")
+            }
+            $seenInCsv[$sku.ToLower()] = $true
+            $existing = Find-DuplicateSku $sku $targetJobs[$i].FolderPath
+            if ($existing.Count -gt 0) {
+                $existingNames = ($existing | ForEach-Object { Split-Path $_.FolderPath -Leaf }) -join ", "
+                [void]$dupeWarnings.Add("  '$sku' already assigned to: $existingNames")
+            }
+        }
+
         # Build confirmation list
         $sb = New-Object System.Text.StringBuilder
         [void]$sb.AppendLine("Assign $assignCount SKU(s) to queue cards?")
@@ -5940,11 +5988,17 @@ $btnImportSkus.Add_Click({
             [void]$sb.AppendLine("")
             [void]$sb.AppendLine("  ($($skusFromCsv.Count - $targetJobs.Count) SKU(s) in CSV will not be used)")
         }
+        if ($dupeWarnings.Count -gt 0) {
+            [void]$sb.AppendLine("")
+            [void]$sb.AppendLine("WARNING - duplicate SKU(s) detected:")
+            foreach ($w in $dupeWarnings) { [void]$sb.AppendLine($w) }
+        }
 
+        $confirmIcon = if ($dupeWarnings.Count -gt 0) { [System.Windows.MessageBoxImage]::Warning } else { [System.Windows.MessageBoxImage]::Question }
         $result = [System.Windows.MessageBox]::Show(
             $sb.ToString(), "Import SKUs - Confirm",
             [System.Windows.MessageBoxButton]::YesNo,
-            [System.Windows.MessageBoxImage]::Question)
+            $confirmIcon)
         if ($result -ne [System.Windows.MessageBoxResult]::Yes) { return }
 
         # Apply â€” bypass the lock, write to TSV, update the display box
