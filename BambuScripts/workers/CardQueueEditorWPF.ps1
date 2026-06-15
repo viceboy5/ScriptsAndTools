@@ -1403,6 +1403,45 @@ function Add-FileRow($pJob, $gpJob, $fi) {
     $pJob.PnlFiles.Children.Add($fRow) | Out-Null
 }
 
+# Runs RevertMerge.bat for a single target path without blocking the UI
+# thread - polls the process's exit via a DispatcherTimer instead of a
+# Start-Sleep loop (a blocking loop here used to freeze the whole editor
+# for up to 10 seconds per revert). Calls $onDone (a scriptblock taking no
+# args) once the process has exited or been killed on timeout.
+function Start-RevertMergeAsync([string]$batPath, [string]$targetPath, [scriptblock]$onDone) {
+    try {
+        $argList = '/c ""' + $batPath + '" "' + $targetPath + '""'
+        $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $argList -WindowStyle Hidden -PassThru
+    } catch {
+        & $onDone
+        return
+    }
+
+    $rmTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $rmTimer.Interval = [TimeSpan]::FromMilliseconds(100)
+    $rmState = @{ Proc = $proc; Timeout = 100; Timer = $rmTimer; OnDone = $onDone }
+    $rmTimer.Add_Tick({
+        $r = $rmState
+        $r.Timeout--
+        if (-not $r.Proc.HasExited -and $r.Timeout -gt 0) { return }
+        $r.Timer.Stop()
+        if (-not $r.Proc.HasExited) { try { $r.Proc.Kill() } catch {} }
+        & $r.OnDone
+    }.GetNewClosure())
+    $rmTimer.Start()
+}
+
+# Runs RevertMerge.bat sequentially (one at a time, non-blocking) for each
+# path in $targets, then refreshes every card in the theme.
+function Invoke-ThemeRevertStep([string]$batPath, [string[]]$targets, [int]$idx, $gp) {
+    if ($idx -ge $targets.Count) {
+        foreach ($p in @($gp.Parents)) { Refresh-PJob $p $gp }
+        Update-ThRevertButtonState $gp
+        return
+    }
+    Start-RevertMergeAsync $batPath $targets[$idx] { Invoke-ThemeRevertStep $batPath $targets ($idx + 1) $gp }.GetNewClosure()
+}
+
 function Refresh-PJob($pJob, $gpJob) {
     $folderPath = $pJob.FolderPath
 
@@ -3939,18 +3978,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $pj.CardStatusLabel.Text       = "[REVERTING...]"
         $pj.CardStatusLabel.Foreground = $redBrush
         $pj.ProcessingOverlay.Visibility = "Visible"
-        [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
-        try {
-            $argList = '/c ""' + $batPath + '" "' + $targetPath + '""'
-            $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $argList -WindowStyle Hidden -PassThru
-            $timeout = 100
-            while (-not $proc.HasExited -and $timeout -gt 0) {
-                [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
-                Start-Sleep -Milliseconds 100; $timeout--
-            }
-            if (-not $proc.HasExited) { try { $proc.Kill() } catch {} }
-        } catch {}
-        Refresh-PJob $pj $gp
+        Start-RevertMergeAsync $batPath $targetPath { Refresh-PJob $pj $gp }.GetNewClosure()
     })
 
     # Edit boxes
@@ -4701,18 +4729,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         $pj.CardStatusLabel.Text       = "[REVERTING...]"
         $pj.CardStatusLabel.Foreground = $redBrush
         $pj.ProcessingOverlay.Visibility = "Visible"
-        [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
-        try {
-            $argList = '/c ""' + $batPath + '" "' + $targetPath + '""'
-            $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $argList -WindowStyle Hidden -PassThru
-            $timeout = 100
-            while (-not $proc.HasExited -and $timeout -gt 0) {
-                [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
-                Start-Sleep -Milliseconds 100; $timeout--
-            }
-            if (-not $proc.HasExited) { try { $proc.Kill() } catch {} }
-        } catch {}
-        Refresh-PJob $pj $gp
+        Start-RevertMergeAsync $batPath $targetPath { Refresh-PJob $pj $gp }.GetNewClosure()
     })
 
     $tbChar.Tag = @{ P = $pJob; G = $gpJob }; $tbChar.Add_TextChanged({ $t = $this.Tag; Update-ParentPreview $t.P $t.G })
@@ -5271,18 +5288,7 @@ function Build-GpJob($gpPath, $parentDict) {
             }
         }
         if ($targets.Count -eq 0) { return }
-        foreach ($tp in $targets) {
-            $argList = '/c ""' + $batPath + '" "' + $tp + '""'
-            $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $argList -WindowStyle Hidden -PassThru
-            $timeout = 100
-            while (-not $proc.HasExited -and $timeout -gt 0) {
-                [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
-                Start-Sleep -Milliseconds 100; $timeout--
-            }
-            if (-not $proc.HasExited) { try { $proc.Kill() } catch {} }
-        }
-        foreach ($p in @($gp.Parents)) { Refresh-PJob $p $gp }
-        Update-ThRevertButtonState $gp
+        Invoke-ThemeRevertStep $batPath $targets 0 $gp
     })
 
     $btnThProcess.Tag = $gpJob
