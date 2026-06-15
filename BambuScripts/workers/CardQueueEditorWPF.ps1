@@ -2575,6 +2575,39 @@ function Set-PJobEditMode($pJob) {
     }
 }
 
+# Recomputes the theme-level Review summary (Wigglitz/Day avg, "Ready: X/Y", and
+# the "Send to Production (Theme)" lock) from the group's current Parents. Call
+# whenever the set of designs in a reviewed theme changes (e.g. a card is removed).
+function Update-GpReviewSummary($gpJob) {
+    if ($null -eq $gpJob) { return }
+    if ($null -ne $gpJob.LblWigglitzAvg) {
+        $wigglitzVals = @($gpJob.Parents | Where-Object { $null -ne $_.WigglitzValue } | ForEach-Object { $_.WigglitzValue })
+        if ($wigglitzVals.Count -gt 0) {
+            $avgVal = ($wigglitzVals | Measure-Object -Average).Average
+            $gpJob.LblWigglitzAvg.Text = "Wigglitz/Day avg: {0:N2} ({1} designs)" -f $avgVal, $wigglitzVals.Count
+        } else {
+            $gpJob.LblWigglitzAvg.Text = "Wigglitz/Day avg: n/a"
+        }
+    }
+    # Theme-wide "X/Y designs ready" readout + theme-wide action button lock
+    $totalCount = $gpJob.Parents.Count
+    $readyCount = @($gpJob.Parents | Where-Object { $_.IsProdReady }).Count
+    if ($null -ne $gpJob.LblReadyCount) {
+        $gpJob.LblReadyCount.Text = "Ready: $readyCount/$totalCount"
+        $gpJob.LblReadyCount.Foreground = if ($totalCount -gt 0 -and $readyCount -eq $totalCount) { Get-WpfColor "#4CAF72" } else { Get-WpfColor "#E8A135" }
+    }
+    $allReady = ($totalCount -gt 0 -and $readyCount -eq $totalCount)
+    if ($null -ne $gpJob.BtnThSendProdReview) {
+        $gpJob.BtnThSendProdReview.IsEnabled  = $allReady
+        $gpJob.BtnThSendProdReview.Background = if ($allReady) { Get-WpfColor "#4CAF72" } else { Get-WpfColor "#3A3D4A" }
+        $gpJob.BtnThSendProdReview.ToolTip = if ($allReady) {
+            "Runs Send to Production for every design in this theme."
+        } else {
+            "Locked: $readyCount/$totalCount designs pass the Production Checklist. All designs must be ready first."
+        }
+    }
+}
+
 # Apply a review-mode state to a single group (direction: $true = enter, $false = exit)
 function Apply-GpReviewMode($gpJob, [bool]$enter) {
     if ($enter) {
@@ -2590,36 +2623,11 @@ function Apply-GpReviewMode($gpJob, [bool]$enter) {
         # the folder name readout at the left of the header bar is enough.
         if ($null -ne $gpJob.RenameGroup) { $gpJob.RenameGroup.Visibility = "Collapsed" }
         foreach ($pj in $gpJob.Parents) { Set-PJobReviewMode $pj }
-        if ($null -ne $gpJob.LblWigglitzAvg) {
-            $wigglitzVals = @($gpJob.Parents | Where-Object { $null -ne $_.WigglitzValue } | ForEach-Object { $_.WigglitzValue })
-            if ($wigglitzVals.Count -gt 0) {
-                $avgVal = ($wigglitzVals | Measure-Object -Average).Average
-                $gpJob.LblWigglitzAvg.Text = "Wigglitz/Day avg: {0:N2} ({1} designs)" -f $avgVal, $wigglitzVals.Count
-            } else {
-                $gpJob.LblWigglitzAvg.Text = "Wigglitz/Day avg: n/a"
-            }
-            $gpJob.LblWigglitzAvg.Visibility = "Visible"
-        }
-        # Theme-wide "X/Y designs ready" readout + theme-wide action buttons
-        $totalCount = $gpJob.Parents.Count
-        $readyCount = @($gpJob.Parents | Where-Object { $_.IsProdReady }).Count
-        if ($null -ne $gpJob.LblReadyCount) {
-            $gpJob.LblReadyCount.Text = "Ready: $readyCount/$totalCount"
-            $gpJob.LblReadyCount.Foreground = if ($totalCount -gt 0 -and $readyCount -eq $totalCount) { Get-WpfColor "#4CAF72" } else { Get-WpfColor "#E8A135" }
-            $gpJob.LblReadyCount.Visibility = "Visible"
-        }
-        $allReady = ($totalCount -gt 0 -and $readyCount -eq $totalCount)
+        Update-GpReviewSummary $gpJob
+        if ($null -ne $gpJob.LblWigglitzAvg)    { $gpJob.LblWigglitzAvg.Visibility = "Visible" }
+        if ($null -ne $gpJob.LblReadyCount)     { $gpJob.LblReadyCount.Visibility = "Visible" }
         if ($null -ne $gpJob.BtnThPrintQReview) { $gpJob.BtnThPrintQReview.Visibility = "Visible" }
-        if ($null -ne $gpJob.BtnThSendProdReview) {
-            $gpJob.BtnThSendProdReview.Visibility = "Visible"
-            $gpJob.BtnThSendProdReview.IsEnabled  = $allReady
-            $gpJob.BtnThSendProdReview.Background = if ($allReady) { Get-WpfColor "#4CAF72" } else { Get-WpfColor "#3A3D4A" }
-            $gpJob.BtnThSendProdReview.ToolTip = if ($allReady) {
-                "Runs Send to Production for every design in this theme."
-            } else {
-                "Locked: $readyCount/$totalCount designs pass the Production Checklist. All designs must be ready first."
-            }
-        }
+        if ($null -ne $gpJob.BtnThSendProdReview) { $gpJob.BtnThSendProdReview.Visibility = "Visible" }
     } else {
         $gpJob.ReviewMode = $false
         $gpJob.HeaderGrid.Background   = Get-WpfColor "#2A2C35"
@@ -3622,6 +3630,9 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             $script:jobs.Remove($t.G) | Out-Null
         } else {
             Update-GpFileCount $t.G
+            # Keep the theme-level Review readouts (Wigglitz/Day avg, Ready X/Y)
+            # in sync with the now-smaller design set.
+            Update-GpReviewSummary $t.G
         }
     })
     $btnHdrStack.Children.Add($btnRemoveP) | Out-Null
