@@ -173,6 +173,7 @@ public class PurgeDictRow : INotifyPropertyChanged {
 
 $script:LibraryColors = [ordered]@{}
 $script:HexToName = @{}
+$script:LibraryGradients = [ordered]@{}
 if (Test-Path $colorCsvPath) {
     $csvLines = Get-Content -Path $colorCsvPath
     foreach ($line in $csvLines) {
@@ -189,6 +190,15 @@ if (Test-Path $colorCsvPath) {
                 $script:LibraryColors[$name] = $hex
                 $script:HexToName[$hex] = $name
                 $script:HexToName[$hex.Substring(0,7)] = $name
+                if ($parts.Count -gt 4) {
+                    $gradVals = @()
+                    for ($gi = 4; $gi -lt $parts.Count; $gi++) {
+                        $gradVals += $parts[$gi].Replace('"','').Trim()
+                    }
+                    if (($gradVals | Where-Object { $_ -match '^#' }).Count -gt 0) {
+                        $script:LibraryGradients[$name] = $gradVals
+                    }
+                }
             } catch { continue }
         }
     }
@@ -5983,7 +5993,14 @@ function Save-FilamentLibrary {
             $r = [Convert]::ToInt32($hex.Substring(1,2),16)
             $g = [Convert]::ToInt32($hex.Substring(3,2),16)
             $b = [Convert]::ToInt32($hex.Substring(5,2),16)
-            $lines.Add("$($kv.Key),$r,$g,$b,,,,")
+            $gradCols = @("","","","")
+            if ($script:LibraryGradients.Contains($kv.Key)) {
+                $gradVals = $script:LibraryGradients[$kv.Key]
+                for ($gi = 0; $gi -lt 4 -and $gi -lt $gradVals.Count; $gi++) {
+                    $gradCols[$gi] = $gradVals[$gi]
+                }
+            }
+            $lines.Add("$($kv.Key),$r,$g,$b,$($gradCols -join ',')")
         }
         [System.IO.File]::WriteAllLines($colorCsvPath, $lines, (New-Object System.Text.UTF8Encoding($false)))
         # Refresh $script:HexToName
@@ -6629,6 +6646,7 @@ function Build-LibrariesPanel {
     # accessible inside .GetNewClosure() closures running on the WPF dispatcher thread.
     $capturedLibColors = $script:LibraryColors
     $capturedHexToName = $script:HexToName
+    $capturedLibGradients = $script:LibraryGradients
 
     # â”€â”€ Shared picker state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $pickerState = @{
@@ -6726,6 +6744,10 @@ function Build-LibrariesPanel {
                 $oldHex = $capturedLibColors[$pickerState.EditingName]
                 $capturedLibColors.Remove($pickerState.EditingName) | Out-Null
                 if ($oldHex) { $capturedHexToName.Remove($oldHex) | Out-Null; $capturedHexToName.Remove($oldHex.Substring(0,7)) | Out-Null }
+                if ($capturedLibGradients.Contains($pickerState.EditingName)) {
+                    $capturedLibGradients[$nm] = $capturedLibGradients[$pickerState.EditingName]
+                    $capturedLibGradients.Remove($pickerState.EditingName) | Out-Null
+                }
             }
             $capturedLibColors[$nm] = $hex9; $capturedHexToName[$hex9] = $nm; $capturedHexToName[$hex9.Substring(0,7)] = $nm
             $pickerState.EditingName = $nm
@@ -6752,6 +6774,7 @@ function Build-LibrariesPanel {
             $pickerState.StatusLbl.Text = "Nothing selected to delete."; return
         }
         $capturedLibColors.Remove($nm) | Out-Null
+        $capturedLibGradients.Remove($nm) | Out-Null
         if (Save-FilamentLibrary) {
             $pickerState.EditingName = ""; $pickerState.NameBox.Text = ""
             $pickerState.RBox.Text="0"; $pickerState.GBox.Text="0"; $pickerState.BBox.Text="0"
