@@ -1291,14 +1291,15 @@ function Update-ParentPreview($pJob, $gpJob) {
         $baseLen = $r.TargetName.Length - $sfxPart.Length
         $basePart = if ($baseLen -gt 0) { $r.TargetName.Substring(0, $baseLen) } else { "" }
         if ($nameCounts[$r.TargetName] -gt 1) {
-            $run = New-Object System.Windows.Documents.Run($r.TargetName); $run.Foreground = Get-WpfColor "#D95F5F"
-            $r.NewLbl.Inlines.Add($run)
+            $runBase = New-Object System.Windows.Documents.Run($basePart); $runBase.Foreground = Get-WpfColor "#D95F5F"
+            $runSfx  = New-Object System.Windows.Documents.Run($sfxPart);  $runSfx.Foreground  = Get-WpfColor "#D95F5F"
+            $r.NewLbl.Inlines.Add($runBase); $r.NewLbl.Inlines.Add((New-Object System.Windows.Documents.LineBreak)); $r.NewLbl.Inlines.Add($runSfx)
             if ($r.OldLbl) { $r.OldLbl.Foreground = Get-WpfColor "#D95F5F" }
             $hasCollision = $true
         } else {
             $runBase = New-Object System.Windows.Documents.Run($basePart); $runBase.Foreground = Get-WpfColor "#90B8C8"
             $runSfx  = New-Object System.Windows.Documents.Run($sfxPart);  $runSfx.Foreground  = Get-WpfColor $r.BaseColor
-            $r.NewLbl.Inlines.Add($runBase); $r.NewLbl.Inlines.Add($runSfx)
+            $r.NewLbl.Inlines.Add($runBase); $r.NewLbl.Inlines.Add((New-Object System.Windows.Documents.LineBreak)); $r.NewLbl.Inlines.Add($runSfx)
             if ($r.OldLbl) { $r.OldLbl.Foreground = Get-WpfColor "#6B6E7A" }
         }
     }
