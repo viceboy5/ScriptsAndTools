@@ -859,7 +859,6 @@ function Initialize-OrientationState([hashtable]$t) {
     Update-AxisPickerPreview $t
     Update-NestRefAxesOverlay $t
     Update-FinalCurrentAxesOverlay $t
-    $t.BorderAxisPicker.Visibility = "Visible"
     return $true
 }
 
@@ -2082,13 +2081,41 @@ function Count-3mfObjects([string]$path) {
     } catch { if ($null -ne $zip) { try { $zip.Dispose() } catch {} }; return 0 }
 }
 
+# Read a single named entry's raw bytes out of a .3mf (zip) file, or $null if missing
+function Get-ZipEntryBytes([string]$zipPath, [string]$entryName) {
+    if (-not (Test-Path -LiteralPath $zipPath)) { return $null }
+    try {
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+        $entry = $zip.Entries | Where-Object { ($_.FullName -replace '\\','/') -eq $entryName } | Select-Object -First 1
+        if ($null -eq $entry) { $zip.Dispose(); return $null }
+        $ms = New-Object System.IO.MemoryStream
+        $entry.Open().CopyTo($ms)
+        $zip.Dispose()
+        return $ms.ToArray()
+    } catch { return $null }
+}
+
+# True if the named zip entry exists in both files and its bytes differ
+function Compare-ZipEntryImagesDiffer([string]$pathA, [string]$pathB, [string]$entryName) {
+    $a = Get-ZipEntryBytes $pathA $entryName
+    $b = Get-ZipEntryBytes $pathB $entryName
+    if ($null -eq $a -or $null -eq $b) { return $false }
+    if ($a.Length -ne $b.Length) { return $true }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $hashA = [System.Convert]::ToBase64String($sha.ComputeHash($a))
+    $hashB = [System.Convert]::ToBase64String($sha.ComputeHash($b))
+    return ($hashA -ne $hashB)
+}
+
 # Build the read-only review content into $pJob.ReviewStack (called lazily on first toggle)
 function Build-ReviewContent($pJob) {
     $sp = $pJob.ReviewStack
 
-    # --- Print time from *_Data.tsv (col 6 = hours, col 7 = minutes) ---
-    # TSV layout: Printer(0), FileType(1), FileName(2), SKU(3), Theme(4), Date(5), H(6), M(7), ...
+    # --- Print time and pre-merge object count from *_Data.tsv ---
+    # TSV layout: Printer(0), FileType(1), FileName(2), SKU(3), Theme(4), Date(5), H(6), M(7), ... ObjCount(25)
     $printTimeStr = "n/a"
+    $printHours = 0.0
+    $objCount = 0
     $tsvFile = Get-ChildItem -Path $pJob.FolderPath -Filter "*_Data.tsv" -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($tsvFile) {
         try {
@@ -2100,35 +2127,62 @@ function Build-ReviewContent($pJob) {
                     [int]::TryParse($cols[6], [ref]$th) | Out-Null
                     [int]::TryParse($cols[7], [ref]$tm) | Out-Null
                     $printTimeStr = if ($th -gt 0) { "${th}h ${tm}m" } else { "${tm}m" }
+                    $printHours = $th + ($tm / 60.0)
+                }
+                if ($cols.Count -ge 26) {
+                    [int]::TryParse($cols[25], [ref]$objCount) | Out-Null
                 }
             }
         } catch {}
     }
 
+    # --- Locate the base files this design depends on ---
+    $allFiles  = Get-ChildItem -Path $pJob.FolderPath -File -ErrorAction SilentlyContinue
+    $finalFile = $allFiles | Where-Object { $_.Name -imatch '(?i)[._ ]Final\.3mf$' }       | Select-Object -First 1
+    $nestFile  = $allFiles | Where-Object { $_.Name -imatch '(?i)[._ ]Nest\.3mf$' }        | Select-Object -First 1
+    $fullFile  = $allFiles | Where-Object { $_.Name -imatch 'Full\.3mf$' -and $_.Name -notmatch '(?i)gcode' } | Select-Object -First 1
+    $gcodeFile = $allFiles | Where-Object { $_.Name -imatch '(?i)Full\.gcode\.3mf$' }      | Select-Object -First 1
+    $pngFile   = $allFiles | Where-Object { $_.Name -imatch '\.png$' }                    | Select-Object -First 1
+
     # --- Pre / Post merge object counts ---
     $preCount = "n/a"; $postCount = "n/a"
-    $nestFile = Get-ChildItem -Path $pJob.FolderPath -Filter "*Nest.3mf" -ErrorAction SilentlyContinue | Select-Object -First 1
-    $fullFile = Get-ChildItem -Path $pJob.FolderPath -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -imatch 'Full\.3mf$' -and $_.Name -notmatch '(?i)gcode' } | Select-Object -First 1
     if ($nestFile) { $preCount  = (Count-3mfObjects $nestFile.FullName).ToString() }
     if ($fullFile) { $postCount = (Count-3mfObjects $fullFile.FullName).ToString() }
 
-    # --- Files section ---
-    $hdrFiles = Create-TextBlock "Files" "#A0A0A0" 11 "Bold"
-    $hdrFiles.Margin = New-Object System.Windows.Thickness(0,0,0,4)
-    $sp.Children.Add($hdrFiles) | Out-Null
+    # --- Production-readiness checklist ---
+    $checkSku    = -not [string]::IsNullOrWhiteSpace($pJob.TxtSKU.Text)
+    $checkMerged = ($null -ne $nestFile)
+    $checkImage  = ($null -ne $fullFile) -and ($null -ne $gcodeFile) -and
+                   (Compare-ZipEntryImagesDiffer $fullFile.FullName $gcodeFile.FullName "Metadata/plate_1.png")
+    $checkFiles  = ($null -ne $finalFile) -and ($null -ne $nestFile) -and ($null -ne $fullFile) -and
+                   ($null -ne $gcodeFile) -and ($null -ne $pngFile) -and ($null -ne $tsvFile)
+    $isProdReady = $checkSku -and $checkMerged -and $checkImage -and $checkFiles
 
-    $reviewFiles = Get-ChildItem -Path $pJob.FolderPath -File -ErrorAction SilentlyContinue |
-        Sort-Object { switch -Regex ($_.Name) { 'Final\.3mf$' {0} 'Nest\.3mf$' {1} 'Full\.3mf$' {2} 'Full\.gcode\.3mf$' {3} default {9} } }, Name
-    foreach ($fi in $reviewFiles) {
-        $fc = if     ($fi.Name -imatch 'Nest\.3mf$')        { "#FF69B4" }
-              elseif ($fi.Name -imatch 'Full\.gcode\.3mf$') { "#4CAF72" }
-              elseif ($fi.Name -imatch 'Full\.3mf$')        { "#B57BFF" }
-              elseif ($fi.Name -imatch 'Final\.3mf$')       { "#FFD700" }
-              else                                           { "#90B8C8" }
-        $lbl = Create-TextBlock $fi.Name $fc 11 "Normal"
-        $lbl.Margin = New-Object System.Windows.Thickness(0,1,0,1); $lbl.TextWrapping = "Wrap"
-        $sp.Children.Add($lbl) | Out-Null
+    if ($isProdReady) {
+        $pJob.RowPanel.BorderBrush     = Get-WpfColor "#4CAF72"
+        $pJob.RowPanel.BorderThickness = New-Object System.Windows.Thickness(5)
+        $hdrReady = Create-TextBlock "PRODUCTION READY" "#4CAF72" 13 "Bold"
+        $hdrReady.Margin = New-Object System.Windows.Thickness(0,0,0,8)
+        $sp.Children.Add($hdrReady) | Out-Null
+    }
+
+    # --- Checklist section ---
+    $hdrChecklist = Create-TextBlock "Production Checklist" "#A0A0A0" 11 "Bold"
+    $hdrChecklist.Margin = New-Object System.Windows.Thickness(0,0,0,4)
+    $sp.Children.Add($hdrChecklist) | Out-Null
+    foreach ($item in @(
+        @{ Label = "SKU exists";           Ok = $checkSku }
+        @{ Label = "File merged";          Ok = $checkMerged }
+        @{ Label = "Gcode image replaced"; Ok = $checkImage }
+        @{ Label = "Base files present";   Ok = $checkFiles }
+    )) {
+        $row = New-Object System.Windows.Controls.StackPanel; $row.Orientation = "Horizontal"
+        $row.Margin = New-Object System.Windows.Thickness(0,1,0,1)
+        $mark  = if ($item.Ok) { "[OK]  " } else { "[ ]  " }
+        $color = if ($item.Ok) { "#4CAF72" } else { "#D95F5F" }
+        $row.Children.Add((Create-TextBlock $mark $color 11 "Bold")) | Out-Null
+        $row.Children.Add((Create-TextBlock $item.Label "#CCCCCC" 11 "Normal")) | Out-Null
+        $sp.Children.Add($row) | Out-Null
     }
 
     # --- Print time ---
@@ -2140,27 +2194,6 @@ function Build-ReviewContent($pJob) {
     $ptRow.Children.Add((Create-TextBlock $printTimeStr "#FFFFFF" 12 "Bold")) | Out-Null
     $sp.Children.Add($ptRow) | Out-Null
 
-    # --- Filament colors ---
-    $sep2 = New-Object System.Windows.Controls.Separator
-    $sep2.Margin = New-Object System.Windows.Thickness(0,6,0,6)
-    $sep2.Background = Get-WpfColor "#2A2C35"; $sp.Children.Add($sep2) | Out-Null
-    $sp.Children.Add((Create-TextBlock "Filament Colors" "#A0A0A0" 11 "Bold")) | Out-Null
-    foreach ($slot in $pJob.UISlots) {
-        $cRow = New-Object System.Windows.Controls.StackPanel; $cRow.Orientation = "Horizontal"
-        $cRow.Margin = New-Object System.Windows.Thickness(0,2,0,2)
-        $sw = New-Object System.Windows.Controls.Border
-        $sw.Width = 14; $sw.Height = 14; $sw.CornerRadius = New-Object System.Windows.CornerRadius(3)
-        $sw.Margin = New-Object System.Windows.Thickness(0,0,6,0); $sw.VerticalAlignment = "Center"
-        $hexShort = if ($slot.OldHex.Length -ge 7) { $slot.OldHex.Substring(0,7) } else { "#888888" }
-        try { $sw.Background = Get-WpfColor $hexShort } catch { $sw.Background = Get-WpfColor "#888888" }
-        $cRow.Children.Add($sw) | Out-Null
-        $numTxt = if ($null -ne $slot.LblNum) { $slot.LblNum.Text } else { "?" }
-        $cRow.Children.Add((Create-TextBlock "Slot ${numTxt}:  " "#888888" 11 "Normal")) | Out-Null
-        $colorName = if ($null -ne $slot.Combo) { $slot.Combo.Text } else { "n/a" }
-        $cRow.Children.Add((Create-TextBlock $colorName "#DDDDDD" 11 "Normal")) | Out-Null
-        $sp.Children.Add($cRow) | Out-Null
-    }
-
     # --- Merge counts ---
     $sep3 = New-Object System.Windows.Controls.Separator
     $sep3.Margin = New-Object System.Windows.Thickness(0,6,0,6)
@@ -2171,6 +2204,214 @@ function Build-ReviewContent($pJob) {
     $mRow.Children.Add((Create-TextBlock "Post-merge:  " "#A0A0A0" 11 "Normal")) | Out-Null
     $mRow.Children.Add((Create-TextBlock $postCount      "#4CAF72" 11 "Bold"))   | Out-Null
     $sp.Children.Add($mRow) | Out-Null
+
+    # --- Wigglitz per day = (pre-merge object count / print hours) * 24 ---
+    # Rolled up into the theme-level average shown at the top of the group header.
+    if ($objCount -gt 0 -and $printHours -gt 0 -and $null -ne $pJob._GpJob) {
+        $wigglitzVal = ($objCount / $printHours) * 24
+        [void]$pJob._GpJob.WigglitzValues.Add($wigglitzVal)
+    }
+
+    # --- Action buttons: Printing Queue / Send to Production ---
+    $sep4 = New-Object System.Windows.Controls.Separator
+    $sep4.Margin = New-Object System.Windows.Thickness(0,6,0,6)
+    $sep4.Background = Get-WpfColor "#2A2C35"; $sp.Children.Add($sep4) | Out-Null
+
+    $reviewActionRow = New-Object System.Windows.Controls.StackPanel
+    $reviewActionRow.Orientation = "Horizontal"
+
+    $btnReviewPrintQ = New-Object System.Windows.Controls.Button
+    $btnReviewPrintQ.Content = "Printing Queue"; $btnReviewPrintQ.Height = 32; $btnReviewPrintQ.Width = 130
+    $btnReviewPrintQ.FontWeight = [System.Windows.FontWeights]::Bold; $btnReviewPrintQ.FontSize = 11
+    $btnReviewPrintQ.Background = Get-WpfColor "#3A5080"; $btnReviewPrintQ.Foreground = Get-WpfColor "#FFFFFF"
+    $btnReviewPrintQ.BorderThickness = 0; $btnReviewPrintQ.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnReviewPrintQ.Margin = New-Object System.Windows.Thickness(0,0,10,0)
+    $btnReviewPrintQ.ToolTip = "Copies the existing Full.gcode.3mf to the Printing Queue folder with today's date"
+    $reviewActionRow.Children.Add($btnReviewPrintQ) | Out-Null
+
+    $btnSendToProduction = New-Object System.Windows.Controls.Button
+    $btnSendToProduction.Content = "Send to Production"; $btnSendToProduction.Height = 32; $btnSendToProduction.Width = 150
+    $btnSendToProduction.FontWeight = [System.Windows.FontWeights]::Bold; $btnSendToProduction.FontSize = 11
+    $btnSendToProduction.Background = Get-WpfColor "#4CAF72"; $btnSendToProduction.Foreground = Get-WpfColor "#FFFFFF"
+    $btnSendToProduction.BorderThickness = 0; $btnSendToProduction.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnSendToProduction.ToolTip = "Runs Deploy_Gcode.bat to copy the gcode/Nest/Data files into the production libraries and upload the Data.tsv row to Google Sheets"
+    $reviewActionRow.Children.Add($btnSendToProduction) | Out-Null
+
+    $sp.Children.Add($reviewActionRow) | Out-Null
+
+    $lblReviewPrintQStatus = New-Object System.Windows.Controls.TextBlock
+    $lblReviewPrintQStatus.FontSize = 11; $lblReviewPrintQStatus.TextWrapping = "Wrap"
+    $lblReviewPrintQStatus.Margin = New-Object System.Windows.Thickness(0,6,0,0)
+    $lblReviewPrintQStatus.Foreground = Get-WpfColor "#888A9A"
+    $sp.Children.Add($lblReviewPrintQStatus) | Out-Null
+    $pJob.LblReviewPrintQStatus = $lblReviewPrintQStatus
+
+    $btnReviewPrintQ.Tag = @{ P = $pJob }
+    $btnReviewPrintQ.Add_Click({
+        $t = $this.Tag; $pj = $t.P
+        $gcodeFile = Get-ChildItem -Path $pj.FolderPath -Filter "*Full.gcode.3mf" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $gcodeFile) {
+            $pj.LblReviewPrintQStatus.Text = "No Full.gcode.3mf found - run Slice first."
+            $pj.LblReviewPrintQStatus.Foreground = Get-WpfColor "#D95F5F"
+            return
+        }
+        $pqBase   = "C:\Users\Owner\SynologyDrive\WIGGLITEERZ\THEKITCHEN\Printing Queue"
+        $pqDate   = Get-Date -Format 'MMMM d'
+        $pqFolder = Join-Path $pqBase $pqDate
+        New-Item -ItemType Directory -Path $pqFolder -Force | Out-Null
+        $pqDest = Join-Path $pqFolder $gcodeFile.Name
+        Copy-Item -LiteralPath $gcodeFile.FullName -Destination $pqDest -Force
+        $pj.LblReviewPrintQStatus.Text = "Copied to Printing Queue: $pqDest"
+        $pj.LblReviewPrintQStatus.Foreground = Get-WpfColor "#4CAF72"
+    })
+
+    $btnSendToProduction.Tag = @{ P = $pJob }
+    $btnSendToProduction.Add_Click({
+        $t = $this.Tag; $pj = $t.P
+        try {
+            $deployScript = "C:\Users\Owner\SynologyDrive\WIGGLITEERZ\04.5 Chippy Queue\Deploy_Gcode.bat"
+            if (-not (Test-Path -LiteralPath $deployScript)) {
+                $pj.LblReviewPrintQStatus.Text = "Deploy script not found: $deployScript"
+                $pj.LblReviewPrintQStatus.Foreground = Get-WpfColor "#D95F5F"
+                return
+            }
+
+            $choice = [System.Windows.MessageBox]::Show(
+                "Is this a NEW design (not previously sent to production)?`n`nYes = New Designs`nNo = Fixed Designs",
+                "Send to Production",
+                [System.Windows.MessageBoxButton]::YesNoCancel,
+                [System.Windows.MessageBoxImage]::Question)
+            if ($choice -eq [System.Windows.MessageBoxResult]::Cancel) { return }
+            $isFix = ($choice -eq [System.Windows.MessageBoxResult]::No)
+
+            # --- Pre-check: warn if files of the same name already exist at the destination ---
+            $deployDir    = Split-Path $deployScript -Parent
+            $parentFolder = Split-Path $pj.FolderPath -Leaf
+            $printerPrefix = ($parentFolder -split '_')[0]
+            $printerBase = $null
+            if ($printerPrefix -ieq "X1C") { $printerBase = "X1C" }
+            elseif ($printerPrefix -ieq "P2S") { $printerBase = "P2S" }
+
+            if ($null -eq $printerBase) {
+                $pj.LblReviewPrintQStatus.Text = "Unrecognized printer prefix '$printerPrefix' in folder '$parentFolder' - Deploy_Gcode.bat will skip this folder."
+                $pj.LblReviewPrintQStatus.Foreground = Get-WpfColor "#D95F5F"
+                return
+            }
+
+            $kindFolder = if ($isFix) { "Fixed Files" } else { "New Files" }
+            $targetDir  = Join-Path (Join-Path $deployDir "$printerBase $kindFolder") $parentFolder
+
+            $gcodeFiles = Get-ChildItem -Path $pj.FolderPath -Filter "*Full.gcode.3mf" -File -Recurse -ErrorAction SilentlyContinue
+            $existingNames = New-Object System.Collections.Generic.List[string]
+            if (Test-Path -LiteralPath $targetDir) {
+                foreach ($gf in $gcodeFiles) {
+                    $names = @($gf.Name, ($gf.Name -replace 'Full\.gcode\.3mf$','Nest.3mf'), ($gf.Name -replace 'Full\.gcode\.3mf$','Data.tsv'))
+                    foreach ($n in $names) {
+                        if (Test-Path -LiteralPath (Join-Path $targetDir $n)) { $existingNames.Add($n) }
+                    }
+                }
+            }
+
+            if ($existingNames.Count -gt 0) {
+                $msg = "The following file(s) already exist in:`n$targetDir`n`n" + (($existingNames | ForEach-Object { "  - $_" }) -join "`n") + "`n`nThey will be overwritten. Continue?"
+                $overwrite = [System.Windows.MessageBox]::Show($msg, "Send to Production - Files Exist",
+                    [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
+                if ($overwrite -ne [System.Windows.MessageBoxResult]::Yes) {
+                    $pj.LblReviewPrintQStatus.Text = "Send to Production cancelled - existing files in $targetDir were not overwritten."
+                    $pj.LblReviewPrintQStatus.Foreground = Get-WpfColor "#E8A135"
+                    return
+                }
+            }
+
+            $deployArgs = @("`"$($pj.FolderPath)`"", "--fork")
+            if ($isFix) { $deployArgs += "--fix" }
+
+            $pj.LblReviewPrintQStatus.Text = "Sending to production..."
+            $pj.LblReviewPrintQStatus.Foreground = Get-WpfColor "#888A9A"
+
+            $outFile = [System.IO.Path]::GetTempFileName()
+            $errFile = [System.IO.Path]::GetTempFileName()
+            try {
+                Start-Process -FilePath $deployScript -ArgumentList $deployArgs -NoNewWindow -Wait `
+                    -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+                $output = (Get-Content -Path $outFile -Raw -ErrorAction SilentlyContinue)
+                $errOutput = (Get-Content -Path $errFile -Raw -ErrorAction SilentlyContinue)
+            } finally {
+                Remove-Item -Path $outFile, $errFile -ErrorAction SilentlyContinue
+            }
+
+            # --- Build a friendly step-by-step summary instead of dumping raw bat output ---
+            $summary = New-Object System.Collections.Generic.List[string]
+            $allOk = $true
+
+            if ($output -match "Unrecognized prefix") {
+                $summary.Add("[SKIPPED] Unrecognized printer prefix - nothing was deployed.")
+                $allOk = $false
+            } elseif ($gcodeFiles.Count -eq 0 -or $output -notmatch "Deployment Complete") {
+                $summary.Add("[FAIL] No Full.gcode.3mf package was deployed.")
+                $allOk = $false
+            } else {
+                foreach ($gf in $gcodeFiles) {
+                    $nestName = $gf.Name -replace 'Full\.gcode\.3mf$','Nest.3mf'
+                    $dataName = $gf.Name -replace 'Full\.gcode\.3mf$','Data.tsv'
+                    $summary.Add("Package: $($gf.Name)")
+
+                    $gcodeOk = Test-Path -LiteralPath (Join-Path $targetDir $gf.Name)
+                    $summary.Add("  [$(if ($gcodeOk) {'OK'} else {'FAIL'})] $($gf.Name) copied")
+                    if (-not $gcodeOk) { $allOk = $false }
+
+                    if (Test-Path -LiteralPath (Join-Path $gf.DirectoryName $nestName)) {
+                        $nestOk = Test-Path -LiteralPath (Join-Path $targetDir $nestName)
+                        $summary.Add("  [$(if ($nestOk) {'OK'} else {'FAIL'})] $nestName copied")
+                        if (-not $nestOk) { $allOk = $false }
+                    } else {
+                        $summary.Add("  [MISSING] $nestName not found in design folder - not copied")
+                        $allOk = $false
+                    }
+
+                    if (Test-Path -LiteralPath (Join-Path $gf.DirectoryName $dataName)) {
+                        $dataOk = Test-Path -LiteralPath (Join-Path $targetDir $dataName)
+                        $summary.Add("  [$(if ($dataOk) {'OK'} else {'FAIL'})] $dataName copied")
+                        if (-not $dataOk) { $allOk = $false }
+
+                        if ($output -match "SHEETS ERROR:(.+)") {
+                            $summary.Add("  [FAIL] Google Sheet row - $($Matches[1].Trim())")
+                            $allOk = $false
+                        } elseif ($output -match "Uploading .*to Google Sheets") {
+                            $summary.Add("  [OK] Google Sheet row added")
+                        } else {
+                            $summary.Add("  [FAIL] Google Sheet row not attempted")
+                            $allOk = $false
+                        }
+                    } else {
+                        $summary.Add("  [MISSING] $dataName not found in design folder - not copied, Google Sheet not updated")
+                        $allOk = $false
+                    }
+                }
+                $summary.Add("")
+                $summary.Add("Target: $targetDir")
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($errOutput)) {
+                $summary.Add("")
+                $summary.Add("Errors: $errOutput")
+                $allOk = $false
+            }
+
+            $summaryText = $summary -join "`n"
+            if ($allOk) {
+                $pj.LblReviewPrintQStatus.Text = "Sent to production:`n$summaryText"
+                $pj.LblReviewPrintQStatus.Foreground = Get-WpfColor "#4CAF72"
+            } else {
+                $pj.LblReviewPrintQStatus.Text = "Send to Production completed with issues:`n$summaryText"
+                $pj.LblReviewPrintQStatus.Foreground = Get-WpfColor "#D95F5F"
+            }
+        } catch {
+            $pj.LblReviewPrintQStatus.Text = "Send to Production error: $($_.Exception.Message)"
+            $pj.LblReviewPrintQStatus.Foreground = Get-WpfColor "#D95F5F"
+            Write-Log "Send to Production error ($($pj.FolderPath)): $($_.Exception.Message)" "ERROR"
+        }
+    }.GetNewClosure())
 }
 
 # Put a single parent into Review mode
@@ -2179,11 +2420,11 @@ function Set-PJobReviewMode($pJob) {
         Build-ReviewContent $pJob
         $pJob.ReviewBuilt = $true
     }
-    if ($null -eq $pJob.ReviewCardOverlay.Source -and
-        $pJob.GcodeImgPath -ne "" -and (Test-Path $pJob.GcodeImgPath)) {
-        $pJob.ReviewCardOverlay.Source = Load-WpfImage $pJob.GcodeImgPath
-    }
-    $pJob.ReviewCardOverlay.Visibility = "Visible"
+    # Review uses the same plate/card images shown in File Prep - leave the
+    # gcode plate overlay and the Re-Nest editor's preview/axis-picker images hidden.
+    $pJob.ReviewCardOverlay.Visibility = "Collapsed"
+    if ($null -ne $pJob.RnOvLeft)  { $pJob.RnOvLeft.Visibility  = "Collapsed" }
+    if ($null -ne $pJob.RnOvRight) { $pJob.RnOvRight.Visibility = "Collapsed" }
     $pJob.ReviewPanel.Visibility       = "Visible"
     $pJob.TasksBox.Visibility          = "Collapsed"
     $pJob.EditBox.Visibility           = "Collapsed"
@@ -2233,7 +2474,17 @@ function Apply-GpReviewMode($gpJob, [bool]$enter) {
         $gpJob.ChkSkip.IsEnabled       = $false
         $gpJob.LblGpPreview.Visibility = "Collapsed"
         if ($null -ne $gpJob.ThemeBar) { $gpJob.ThemeBar.Visibility = "Collapsed" }
+        if ($null -ne $gpJob.RenameGroup) { $gpJob.RenameGroup.Visibility = "Visible" }
         foreach ($pj in $gpJob.Parents) { Set-PJobReviewMode $pj }
+        if ($null -ne $gpJob.LblWigglitzAvg) {
+            if ($gpJob.WigglitzValues.Count -gt 0) {
+                $avgVal = ($gpJob.WigglitzValues | Measure-Object -Average).Average
+                $gpJob.LblWigglitzAvg.Text = "Wigglitz/Day avg: {0:N2} ({1} designs)" -f $avgVal, $gpJob.WigglitzValues.Count
+            } else {
+                $gpJob.LblWigglitzAvg.Text = "Wigglitz/Day avg: n/a"
+            }
+            $gpJob.LblWigglitzAvg.Visibility = "Visible"
+        }
     } else {
         $gpJob.ReviewMode = $false
         $gpJob.HeaderGrid.Background   = Get-WpfColor "#2A2C35"
@@ -2242,6 +2493,7 @@ function Apply-GpReviewMode($gpJob, [bool]$enter) {
         $gpJob.ChkSkip.IsEnabled       = $true
         $gpJob.LblGpPreview.Visibility = "Visible"
         if ($null -ne $gpJob.ThemeBar) { $gpJob.ThemeBar.Visibility = "Visible" }
+        if ($null -ne $gpJob.LblWigglitzAvg) { $gpJob.LblWigglitzAvg.Visibility = "Collapsed" }
         foreach ($pj in $gpJob.Parents) { Set-PJobEditMode $pj }
     }
 }
@@ -2525,6 +2777,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         ChkEdReNest = $null
         BtnEdQueue = $null; LblEdQueueStatus = $null
         EdIsQueued = $false
+        LblReviewPrintQStatus = $null
         _GpJob = $gpJob
     }
 
@@ -3802,23 +4055,8 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $renestRow.Children.Add($lblRenestStatus) | Out-Null
     $panelRenest.Children.Add($renestRow) | Out-Null
 
-    # â”€â”€ Inline orientation/axis picker panel (drawn directly on the Nest Source / Final
-    # previews above - no popup window) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    $borderAxisPicker = New-Object System.Windows.Controls.Border
-    $borderAxisPicker.Background = Get-WpfColor "#13151C"
-    $borderAxisPicker.BorderBrush = Get-WpfColor "#3A3C4A"; $borderAxisPicker.BorderThickness = 1
-    $borderAxisPicker.CornerRadius = New-Object System.Windows.CornerRadius(4)
-    $borderAxisPicker.Margin = New-Object System.Windows.Thickness(0,8,0,0)
-    $borderAxisPicker.Width = 438
-    $borderAxisPicker.HorizontalAlignment = "Left"
-    $borderAxisPicker.Visibility = "Collapsed"
-    $axisPickerInner = New-Object System.Windows.Controls.StackPanel
-    $axisPickerInner.Margin = New-Object System.Windows.Thickness(8)
-
+    # Off-tree placeholder so Update-AxisPickerPreview can still set .Text safely.
     $lblAxisRef = New-Object System.Windows.Controls.TextBlock
-    $lblAxisRef.Foreground = Get-WpfColor "#CCCCDD"; $lblAxisRef.FontSize = 11
-    $lblAxisRef.TextWrapping = "Wrap"; $lblAxisRef.Margin = New-Object System.Windows.Thickness(0,0,0,6)
-    $axisPickerInner.Children.Add($lblAxisRef) | Out-Null
 
     # Rotate 90 button - always visible in the right-side Re-Nest panel
     # (renestRow). The orientation state loads automatically with the card,
@@ -3832,12 +4070,6 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnAxisRotate.Margin = New-Object System.Windows.Thickness(8,0,0,0)
     [System.Windows.Controls.Grid]::SetColumn($btnAxisRotate, 1)
     $renestRow.Children.Add($btnAxisRotate) | Out-Null
-
-    $borderAxisPicker.Child = $axisPickerInner
-    [System.Windows.Controls.Grid]::SetRow($borderAxisPicker, 1)
-    [System.Windows.Controls.Grid]::SetColumn($borderAxisPicker, 0)
-    [System.Windows.Controls.Grid]::SetColumnSpan($borderAxisPicker, 2)
-    $leftGrid.Children.Add($borderAxisPicker) | Out-Null
 
     # â”€â”€ Review panel (hidden until success) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $borderReview = New-Object System.Windows.Controls.Border
@@ -3944,7 +4176,6 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         SrcRefYawDeg      = 0.0
         SrcNestAngleDeg   = 0.0
         AxisYawSteps      = 0
-        BorderAxisPicker  = $borderAxisPicker
         LblAxisRef        = $lblAxisRef
         BtnAxisRotate     = $btnAxisRotate
         RotCorrTempPath   = ""
@@ -4390,7 +4621,7 @@ function Build-GpJob($gpPath, $parentDict) {
         if ($detectedTheme) { $gpNameForTheme = $detectedTheme }
     }
 
-    $gpJob = @{ GpPath = $gpPath; DiGrand = $diGrand; Parents = New-Object System.Collections.ArrayList; CbPrefix = $null; CbTag = $null; GpRenameConfirmed = $false; ReviewMode = $false; HeaderGrid = $null; ThemeBar = $null; EditingThemeBar = $null; RenameGroup = $null; BtnThProcess = $null; BtnThRevert = $null }
+    $gpJob = @{ GpPath = $gpPath; DiGrand = $diGrand; Parents = New-Object System.Collections.ArrayList; CbPrefix = $null; CbTag = $null; GpRenameConfirmed = $false; ReviewMode = $false; HeaderGrid = $null; ThemeBar = $null; EditingThemeBar = $null; RenameGroup = $null; BtnThProcess = $null; BtnThRevert = $null; WigglitzValues = New-Object System.Collections.ArrayList; LblWigglitzAvg = $null }
     $script:jobs.Add($gpJob) | Out-Null
 
     $container = New-Object System.Windows.Controls.Border
@@ -4401,11 +4632,12 @@ function Build-GpJob($gpPath, $parentDict) {
 
     $gpStack = New-Object System.Windows.Controls.StackPanel; $container.Child = $gpStack
 
-    $headerGrid = New-Object System.Windows.Controls.Grid
-    $headerGrid.Background = Get-WpfColor "#2A2C35"; $headerGrid.Height = 60
+    $headerGrid = New-Object System.Windows.Controls.WrapPanel
+    $headerGrid.Background = Get-WpfColor "#2A2C35"
     $gpJob.HeaderGrid = $headerGrid
 
     $headerStack = New-Object System.Windows.Controls.StackPanel; $headerStack.Orientation = "Horizontal"
+    $headerStack.Margin = New-Object System.Windows.Thickness(0,13,0,13)
 
     # Current folder name (far left)
     $lblCurrentName = Create-TextBlock $gpName "#CCCCCC" 13 "Bold"
@@ -4507,11 +4739,17 @@ function Build-GpJob($gpPath, $parentDict) {
     $lblFileCount.VerticalAlignment = "Center"; $lblFileCount.Margin = New-Object System.Windows.Thickness(15,0,0,0)
     $renameGroup.Children.Add($lblFileCount) | Out-Null; $gpJob.LblFileCount = $lblFileCount
 
+    # Review-mode only: theme-wide Wigglitz/Day average
+    $lblWigglitzAvg = Create-TextBlock "" "#4CAF72" 13 "Bold"
+    $lblWigglitzAvg.VerticalAlignment = "Center"; $lblWigglitzAvg.Margin = New-Object System.Windows.Thickness(20,0,0,0)
+    $lblWigglitzAvg.Visibility = "Collapsed"
+    $renameGroup.Children.Add($lblWigglitzAvg) | Out-Null; $gpJob.LblWigglitzAvg = $lblWigglitzAvg
+
     $headerGrid.Children.Add($headerStack) | Out-Null
 
     $gpRightBtnStack = New-Object System.Windows.Controls.StackPanel
     $gpRightBtnStack.Orientation = "Horizontal"; $gpRightBtnStack.HorizontalAlignment = "Right"
-    $gpRightBtnStack.VerticalAlignment = "Center"; $gpRightBtnStack.Margin = New-Object System.Windows.Thickness(0,0,15,0)
+    $gpRightBtnStack.VerticalAlignment = "Center"; $gpRightBtnStack.Margin = New-Object System.Windows.Thickness(0,13,15,13)
 
     # (Review Mode is now a global top-bar button â€” no per-group toggle needed)
 
@@ -4575,8 +4813,7 @@ function Build-GpJob($gpPath, $parentDict) {
     $themeBar.BorderThickness = New-Object System.Windows.Thickness(0,0,0,1)
     $themeBar.Padding = New-Object System.Windows.Thickness(15,10,15,10)
 
-    $themeBarStack = New-Object System.Windows.Controls.StackPanel
-    $themeBarStack.Orientation = "Horizontal"
+    $themeBarStack = New-Object System.Windows.Controls.WrapPanel
 
     $chkThRename  = New-Object System.Windows.Controls.CheckBox; $chkThRename.Content  = "Rename";  $chkThRename.IsChecked  = $false; $chkThRename.Foreground  = Get-WpfColor "#CCCCCC"; $chkThRename.VerticalAlignment  = "Center"; $chkThRename.Margin  = New-Object System.Windows.Thickness(0,0,15,0)
     $chkThMerge   = New-Object System.Windows.Controls.CheckBox; $chkThMerge.Content   = "Merge";   $chkThMerge.IsChecked   = $false; $chkThMerge.Foreground   = Get-WpfColor "#CCCCCC"; $chkThMerge.VerticalAlignment   = "Center"; $chkThMerge.Margin   = New-Object System.Windows.Thickness(0,0,15,0)
