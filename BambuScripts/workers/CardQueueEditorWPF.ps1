@@ -3127,14 +3127,21 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
         $combo.Tag = @{ StatusLbl = $lblStatus; OrigName = $slotData.Name; P = $pJob; Swatch = $swatchBorder; LblNum = $lblNum; AllKeys = $allColorKeys; ComboView = $comboView; Filtering = $false; NeedsFilter = $false; Confirmed = $true; TypedText = $(if ($slotData.Name) { $slotData.Name } else { "" }) }
 
-        # Flag re-filter on typing/deletion; select-all when starting fresh after a confirmed value
+        # Flag re-filter on typing/deletion; replace confirmed value cleanly on first keystroke.
+        # We handle the keystroke ourselves (set Text directly + e.Handled = $true) instead of
+        # relying on SelectAll() + WPF's default insertion - timing/focus quirks in editable
+        # ComboBoxes can otherwise drop or revert the first character.
         $combo.Add_PreviewTextInput({
             param($s, $e)
             $data = $s.Tag
             if ($data.Confirmed) {
                 $data.Confirmed = $false
+                $data.NeedsFilter = $true
+                $s.Text = $e.Text
                 $tb = $s.Template.FindName("PART_EditableTextBox", $s)
-                if ($tb -ne $null) { $tb.SelectAll() }  # Replace confirmed value cleanly on first keystroke
+                if ($tb -ne $null) { $tb.CaretIndex = $tb.Text.Length }
+                $e.Handled = $true
+                return
             }
             $data.NeedsFilter = $true
         })
@@ -7148,12 +7155,26 @@ function Build-LibrariesPanel {
         $combo.IsTextSearchEnabled = $false
         $combo.SelectedIndex = 0
 
-        $state = @{ Filtering = $false; NeedsFilter = $false; View = $view }
+        $state = @{ Filtering = $false; NeedsFilter = $false; View = $view; Confirmed = $true }
         $combo.Tag = $state
 
+        # Replace the preset value cleanly on the first keystroke. We handle the keystroke
+        # ourselves (set Text directly + e.Handled = $true) instead of relying on SelectAll() +
+        # WPF's default insertion - timing/focus quirks in editable ComboBoxes can otherwise
+        # drop or revert the first character.
         $combo.Add_PreviewTextInput({
             param($s, $e)
-            $s.Tag.NeedsFilter = $true
+            $st = $s.Tag
+            if ($st.Confirmed) {
+                $st.Confirmed = $false
+                $st.NeedsFilter = $true
+                $s.Text = $e.Text
+                $tb = $s.Template.FindName("PART_EditableTextBox", $s)
+                if ($tb -ne $null) { $tb.CaretIndex = $tb.Text.Length }
+                $e.Handled = $true
+                return
+            }
+            $st.NeedsFilter = $true
         }) | Out-Null
 
         $combo.Add_PreviewKeyDown({
@@ -7174,6 +7195,7 @@ function Build-LibrariesPanel {
                         $s.SelectedItem = $accepted
                         $tb = $s.Template.FindName("PART_EditableTextBox", $s)
                         if ($tb) { $tb.SelectAll() }
+                        $st.Confirmed = $true
                         $e.Handled = $true
                     }
                 }
@@ -7184,6 +7206,7 @@ function Build-LibrariesPanel {
                         $st.View.Filter = $null
                         $st.Filtering = $false
                         if ($s.SelectedItem) { $s.Text = $s.SelectedItem.ToString() }
+                        $st.Confirmed = $true
                         $e.Handled = $true
                     }
                 }
