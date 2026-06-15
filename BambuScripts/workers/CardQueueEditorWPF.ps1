@@ -2207,9 +2207,8 @@ function Build-ReviewContent($pJob) {
 
     # --- Wigglitz per day = (pre-merge object count / print hours) * 24 ---
     # Rolled up into the theme-level average shown at the top of the group header.
-    if ($objCount -gt 0 -and $printHours -gt 0 -and $null -ne $pJob._GpJob) {
-        $wigglitzVal = ($objCount / $printHours) * 24
-        [void]$pJob._GpJob.WigglitzValues.Add($wigglitzVal)
+    if ($objCount -gt 0 -and $printHours -gt 0) {
+        $pJob.WigglitzValue = ($objCount / $printHours) * 24
     }
 
     # --- Action buttons: Printing Queue / Send to Production ---
@@ -2477,9 +2476,10 @@ function Apply-GpReviewMode($gpJob, [bool]$enter) {
         if ($null -ne $gpJob.RenameGroup) { $gpJob.RenameGroup.Visibility = "Visible" }
         foreach ($pj in $gpJob.Parents) { Set-PJobReviewMode $pj }
         if ($null -ne $gpJob.LblWigglitzAvg) {
-            if ($gpJob.WigglitzValues.Count -gt 0) {
-                $avgVal = ($gpJob.WigglitzValues | Measure-Object -Average).Average
-                $gpJob.LblWigglitzAvg.Text = "Wigglitz/Day avg: {0:N2} ({1} designs)" -f $avgVal, $gpJob.WigglitzValues.Count
+            $wigglitzVals = @($gpJob.Parents | Where-Object { $null -ne $_.WigglitzValue } | ForEach-Object { $_.WigglitzValue })
+            if ($wigglitzVals.Count -gt 0) {
+                $avgVal = ($wigglitzVals | Measure-Object -Average).Average
+                $gpJob.LblWigglitzAvg.Text = "Wigglitz/Day avg: {0:N2} ({1} designs)" -f $avgVal, $wigglitzVals.Count
             } else {
                 $gpJob.LblWigglitzAvg.Text = "Wigglitz/Day avg: n/a"
             }
@@ -2763,7 +2763,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         FileRows = New-Object System.Collections.ArrayList
         IsDone = $false; IsQueued = $false; HasCollision = $false
         RenameOnlyBypass = $false; SliceOnlyBypass = $false; ColorOnlyBypass = $false
-        ReviewBuilt = $false
+        ReviewBuilt = $false; WigglitzValue = $null
         GcodeImgPath = ""; ReviewCardOverlay = $null; ReviewPanel = $null; ReviewStack = $null
         TasksBox = $null; EditBox = $null; ApplyRow = $null
         BtnApply = $null; BtnRenameOnly = $null; BtnColorOnly = $null
@@ -4090,6 +4090,15 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $btnReplaceSource.Margin = New-Object System.Windows.Thickness(0,0,8,0)
     $reviewBtnRow.Children.Add($btnReplaceSource) | Out-Null
 
+    $btnOpenRenest = New-Object System.Windows.Controls.Button
+    $btnOpenRenest.Content = "Open in Bambu"; $btnOpenRenest.Height = 30; $btnOpenRenest.Width = 110
+    $btnOpenRenest.FontSize = 11; $btnOpenRenest.Background = Get-WpfColor "#2A2C38"
+    $btnOpenRenest.Foreground = Get-WpfColor "#7AAABB"; $btnOpenRenest.BorderThickness = 0
+    $btnOpenRenest.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnOpenRenest.Margin = New-Object System.Windows.Thickness(0,0,8,0)
+    $btnOpenRenest.ToolTip = "Open the re-nested .3mf in Bambu Studio without replacing the source file"
+    $reviewBtnRow.Children.Add($btnOpenRenest) | Out-Null
+
     $btnDiscardRenest = New-Object System.Windows.Controls.Button
     $btnDiscardRenest.Content = "Discard"; $btnDiscardRenest.Height = 30; $btnDiscardRenest.Width = 80
     $btnDiscardRenest.FontSize = 11; $btnDiscardRenest.Background = Get-WpfColor "#3A2020"
@@ -4182,6 +4191,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     }
     $btnRunRenest.Tag        = $renestTag
     $btnReplaceSource.Tag    = $renestTag
+    $btnOpenRenest.Tag       = $renestTag
     $btnDiscardRenest.Tag    = $renestTag
     $btnOpenDebug.Tag        = $renestTag
     $btnSaveDebug.Tag        = $renestTag
@@ -4326,6 +4336,24 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             }
         } catch {
             $t.LblStatus.Text = "Replace failed: $($_.Exception.Message)"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"
+        }
+    })
+
+    $btnOpenRenest.Add_Click({
+        $t = $this.Tag
+        if ([string]::IsNullOrEmpty($t.RenestPath) -or -not (Test-Path -LiteralPath $t.RenestPath)) {
+            $t.LblStatus.Text = "Renest file not found"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"; return
+        }
+        $bambuPath = "C:\Program Files\Bambu Studio\bambu-studio.exe"
+        if (-not (Test-Path -LiteralPath $bambuPath)) {
+            $t.LblStatus.Text = "Bambu Studio not found: $bambuPath"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"; return
+        }
+        try {
+            Start-Process -FilePath $bambuPath -ArgumentList "`"$($t.RenestPath)`""
+            $t.LblStatus.Text = "Opened re-nested file in Bambu Studio for review."
+            $t.LblStatus.Foreground = Get-WpfColor "#888A9A"
+        } catch {
+            $t.LblStatus.Text = "Failed to open: $($_.Exception.Message)"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"
         }
     })
 
@@ -4621,7 +4649,7 @@ function Build-GpJob($gpPath, $parentDict) {
         if ($detectedTheme) { $gpNameForTheme = $detectedTheme }
     }
 
-    $gpJob = @{ GpPath = $gpPath; DiGrand = $diGrand; Parents = New-Object System.Collections.ArrayList; CbPrefix = $null; CbTag = $null; GpRenameConfirmed = $false; ReviewMode = $false; HeaderGrid = $null; ThemeBar = $null; EditingThemeBar = $null; RenameGroup = $null; BtnThProcess = $null; BtnThRevert = $null; WigglitzValues = New-Object System.Collections.ArrayList; LblWigglitzAvg = $null }
+    $gpJob = @{ GpPath = $gpPath; DiGrand = $diGrand; Parents = New-Object System.Collections.ArrayList; CbPrefix = $null; CbTag = $null; GpRenameConfirmed = $false; ReviewMode = $false; HeaderGrid = $null; ThemeBar = $null; EditingThemeBar = $null; RenameGroup = $null; BtnThProcess = $null; BtnThRevert = $null; LblWigglitzAvg = $null }
     $script:jobs.Add($gpJob) | Out-Null
 
     $container = New-Object System.Windows.Controls.Border
