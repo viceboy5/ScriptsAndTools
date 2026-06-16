@@ -9,7 +9,7 @@ $script:GpThemes = @(
     'RTC', 'Artemis', 'Punch', 'SixSeven', 'GlobalSoccer', 'Summer',
     'Jungle', 'Halloween26', 'MothersDay', 'SciFi', 'Sports', 'KidsCreations',
     'Careers', 'Maverik', 'KPop', 'GirlScouts', 'Bluey', 'Hersheys',
-    'Wicked', 'Geppettos'
+    'Wicked', 'Geppettos', 'Christmas26'
 )
 
 $script:PrinterPrefixes = @('X1C', 'P2S', 'H2S')
@@ -19,6 +19,6 @@ $script:Tags = @('KC', 'Big', 'Huge', 'High')
 $script:TagLabels = @{
     'KC'   = 'Keychain'
     'Huge'   = 'Huge Wig'
-    'Big'   = 'Big Wig'
     'High'   = 'High Res'
+    'Big'   = 'Big Wig'
 }
