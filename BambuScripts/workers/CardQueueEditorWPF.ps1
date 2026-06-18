@@ -1124,10 +1124,13 @@ if ($args.Count -gt 0) {
                 </StackPanel>
 
                 <Border Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3" Background="#14151A" BorderBrush="#2A2C35" BorderThickness="0,1,0,0" Padding="12,6,12,6">
-                    <Grid>
-                        <StackPanel Name="TopFilterBar" Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center"/>
-                        <StackPanel Name="TopModeBar" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                    </Grid>
+                    <StackPanel Orientation="Vertical">
+                        <Grid>
+                            <StackPanel Name="TopFilterBar" Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                            <StackPanel Name="TopModeBar" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Grid>
+                        <WrapPanel Name="StatsTopBar" Orientation="Horizontal" Margin="0,8,0,0" Visibility="Collapsed"/>
+                    </StackPanel>
                 </Border>
             </Grid>
         </Border>
@@ -1159,6 +1162,7 @@ $btnBrowse      = $window.FindName("BtnBrowse") # <--- ADD THIS LINE BACK
 $mainStack      = $window.FindName("MainStack")
 $topModeBar     = $window.FindName("TopModeBar")
 $topFilterBar   = $window.FindName("TopFilterBar")
+$script:StatsTopBar = $window.FindName("StatsTopBar")   # shared Stats variable toggles
 $scrollViewer   = $mainStack.Parent   # ScrollViewer wrapping MainStack
 $script:LibrariesPanel = $null        # built later by Build-LibrariesPanel
 
@@ -2540,9 +2544,12 @@ function Set-PJobReviewMode($pJob) {
     $pJob.ApplyRow.Visibility          = "Collapsed"
     $pJob.BtnRefresh.Visibility        = "Collapsed"
     $pJob.BtnRemoveP.Visibility        = "Visible"
-    # Hide both tab panels so no empty space shows
-    if ($null -ne $pJob.FilePrepPanel) { $pJob.FilePrepPanel.Visibility = "Collapsed" }
+    if ($null -ne $pJob.CardHeaderStack) { $pJob.CardHeaderStack.Visibility = "Visible" }
+    # File Prep stays Hidden (reserves its height = the height anchor); Editing/Stats collapsed.
+    if ($null -ne $pJob.FilePrepPanel) { $pJob.FilePrepPanel.Visibility = "Hidden" }
     if ($null -ne $pJob.EditingPanel)  { $pJob.EditingPanel.Visibility  = "Collapsed" }
+    if ($null -ne $pJob.StatsCardPanel) { $pJob.StatsCardPanel.Visibility = "Collapsed" }
+    $pJob._InStats = $false
 }
 
 # Put a single parent back into Edit mode
@@ -2562,9 +2569,13 @@ function Set-PJobEditMode($pJob) {
     $pJob.BtnRemoveP.Visibility        = "Visible"
     $pJob.BtnKeepReview.Visibility     = "Collapsed"
     $pJob.BtnRevertReview.Visibility   = "Collapsed"
-    # Restore the correct tab panel based on the current global mode
+    if ($null -ne $pJob.StatsCardPanel) { $pJob.StatsCardPanel.Visibility = "Collapsed" }
+    if ($null -ne $pJob.CardHeaderStack) { $pJob.CardHeaderStack.Visibility = "Visible" }
+    $pJob._InStats = $false
+    # Restore the correct tab panel based on the current global mode. File Prep is
+    # the height anchor: Hidden (reserves height) when Editing is active, never Collapsed.
     $mode = if ([string]::IsNullOrEmpty($script:GlobalMode)) { "FilePr" } else { $script:GlobalMode }
-    if ($null -ne $pJob.FilePrepPanel) { $pJob.FilePrepPanel.Visibility = if ($mode -eq "Editing") { "Collapsed" } else { "Visible" } }
+    if ($null -ne $pJob.FilePrepPanel) { $pJob.FilePrepPanel.Visibility = if ($mode -eq "Editing") { "Hidden" } else { "Visible" } }
     if ($null -ne $pJob.EditingPanel)  { $pJob.EditingPanel.Visibility  = if ($mode -eq "Editing") { "Visible"   } else { "Collapsed" } }
     # Reset review border and status label
     $pJob.RowPanel.BorderBrush     = Get-WpfColor "#2A2C35"
@@ -2666,79 +2677,109 @@ function Apply-MergeFilter {
     }
 }
 
+# Re-styles the top-bar mode buttons so the active mode is highlighted and
+# disabled. One place to keep them consistent as tabs are added.
+function Update-ModeButtonStyles([string]$mode) {
+    if ($null -eq $script:BtnModeFilePr) { return }
+    $inactive = @{ bg = "#252630"; fg = "#7A7D90"; border = "#3A3D50" }
+    $styles = @{
+        FilePr    = @{ bg = "#3A5080"; fg = "#FFFFFF"; border = "#5A78C4" }
+        Editing   = @{ bg = "#3A5080"; fg = "#FFFFFF"; border = "#5A78C4" }
+        Review    = @{ bg = "#7A5A2A"; fg = "#FFFFFF"; border = "#C4943A" }
+        Libraries = @{ bg = "#5A3A80"; fg = "#FFFFFF"; border = "#8A5AC4" }
+        Stats     = @{ bg = "#2E6E5A"; fg = "#FFFFFF"; border = "#3FB48A" }
+    }
+    foreach ($p in @(
+        @{ Btn = $script:BtnModeFilePr;    Mode = "FilePr" },
+        @{ Btn = $script:BtnModeEditing;   Mode = "Editing" },
+        @{ Btn = $script:BtnModeReview;    Mode = "Review" },
+        @{ Btn = $script:BtnModeLibraries; Mode = "Libraries" },
+        @{ Btn = $script:BtnModeStats;     Mode = "Stats" }
+    )) {
+        if ($null -eq $p.Btn) { continue }
+        $active = ($mode -eq $p.Mode)
+        $s = if ($active) { $styles[$p.Mode] } else { $inactive }
+        $p.Btn.Background  = Get-WpfColor $s.bg
+        $p.Btn.Foreground  = Get-WpfColor $s.fg
+        $p.Btn.BorderBrush = Get-WpfColor $s.border
+        $p.Btn.IsEnabled   = -not $active
+    }
+}
+
 # Switch the global workspace mode and update every loaded group/card.
-# $mode : "FilePr" | "Editing" | "Review"
+# $mode : "FilePr" | "Editing" | "Review" | "Libraries" | "Stats"
 function Set-GlobalMode([string]$mode) {
-    $script:GlobalMode = $mode
-    # Libraries mode: swap to the libraries panel and skip all card iteration
-    $isLibraries = ($mode -eq "Libraries")
-    if ($null -ne $scrollViewer)              { $scrollViewer.Visibility              = if ($isLibraries) { "Collapsed" } else { "Visible" } }
-    if ($null -ne $script:LibrariesPanel)     { $script:LibrariesPanel.Visibility     = if ($isLibraries) { "Visible"   } else { "Collapsed" } }
-    if ($isLibraries) {
-        # Update top-bar button styles then return â€” no card panels to iterate
-        if ($null -ne $script:BtnModeFilePr) {
-            $activeStyle   = @{ bg = "#3A5080"; fg = "#FFFFFF"; border = "#5A78C4" }
-            $inactiveStyle = @{ bg = "#252630"; fg = "#7A7D90"; border = "#3A3D50" }
-            $libStyle      = @{ bg = "#5A3A80"; fg = "#FFFFFF"; border = "#8A5AC4" }
-            foreach ($pair in @(
-                @{ Btn=$script:BtnModeFilePr;   Active=($false); Style=$inactiveStyle },
-                @{ Btn=$script:BtnModeEditing;  Active=($false); Style=$inactiveStyle },
-                @{ Btn=$script:BtnModeReview;   Active=($false); Style=$inactiveStyle },
-                @{ Btn=$script:BtnModeLibraries;Active=($true);  Style=$libStyle }
-            )) {
-                $pair.Btn.Background  = Get-WpfColor $pair.Style.bg
-                $pair.Btn.Foreground  = Get-WpfColor $pair.Style.fg
-                $pair.Btn.BorderBrush = Get-WpfColor $pair.Style.border
-                $pair.Btn.IsEnabled   = -not $pair.Active
+    # Capture each card's File Prep height before leaving File Prep (the tallest
+    # view). The other tabs pin to it via MinHeight so cards don't reflow when
+    # switching - a far more reliable lock than reserving panel space, since the
+    # File Prep panel's measured height varies as its children get toggled.
+    if ($script:GlobalMode -eq "FilePr" -and $mode -ne "FilePr") {
+        foreach ($gpJob in $script:jobs) {
+            foreach ($pj in $gpJob.Parents) {
+                if ($null -ne $pj.RowPanel) {
+                    $ah = $pj.RowPanel.ActualHeight
+                    if ($ah -gt 50) { $pj._FilePrepHeight = $ah }
+                }
             }
         }
-        return
     }
+    $script:GlobalMode = $mode
+    $isLibraries = ($mode -eq "Libraries")   # Libraries stays a full-panel takeover
+    $isStats     = ($mode -eq "Stats")       # Stats is now an IN-CARD mode (cards stay put)
+    if ($null -ne $scrollViewer)          { $scrollViewer.Visibility          = if ($isLibraries) { "Collapsed" } else { "Visible" } }
+    if ($null -ne $script:LibrariesPanel) { $script:LibrariesPanel.Visibility = if ($isLibraries) { "Visible" } else { "Collapsed" } }
+    if ($null -ne $script:StatsTopBar)    { $script:StatsTopBar.Visibility    = if ($isStats) { "Visible" } else { "Collapsed" } }
+    if ($isLibraries) { Update-ModeButtonStyles $mode; return }
+
     $enterReview = ($mode -eq "Review")
+    $isEditing   = ($mode -eq "Editing")
     foreach ($gpJob in $script:jobs) {
         if ($enterReview -and -not $gpJob.ReviewMode) {
             Apply-GpReviewMode $gpJob $true
         } elseif (-not $enterReview -and $gpJob.ReviewMode) {
             Apply-GpReviewMode $gpJob $false
         }
-        # For non-review modes, flip the tab panels on every card and the group task bars
         if (-not $enterReview) {
-            if ($null -ne $gpJob.ThemeBar)        { $gpJob.ThemeBar.Visibility        = if ($mode -eq "Editing") { "Collapsed" } else { "Visible"   } }
-            if ($null -ne $gpJob.EditingThemeBar) { $gpJob.EditingThemeBar.Visibility = if ($mode -eq "Editing") { "Visible"   } else { "Collapsed" } }
-            if ($null -ne $gpJob.RenameGroup)     { $gpJob.RenameGroup.Visibility     = if ($mode -eq "Editing") { "Collapsed" } else { "Visible"   } }
+            if ($isStats) {
+                # Stats hides ALL the theme-level File Prep controls (like Review does),
+                # leaving just the folder-name readout.
+                if ($null -ne $gpJob.ThemeBar)        { $gpJob.ThemeBar.Visibility        = "Collapsed" }
+                if ($null -ne $gpJob.EditingThemeBar) { $gpJob.EditingThemeBar.Visibility = "Collapsed" }
+                if ($null -ne $gpJob.RenameGroup)     { $gpJob.RenameGroup.Visibility     = "Collapsed" }
+                if ($null -ne $gpJob.BtnCombineGp)    { $gpJob.BtnCombineGp.Visibility    = "Collapsed" }
+            } else {
+                if ($null -ne $gpJob.ThemeBar)        { $gpJob.ThemeBar.Visibility        = if ($isEditing) { "Collapsed" } else { "Visible"   } }
+                if ($null -ne $gpJob.EditingThemeBar) { $gpJob.EditingThemeBar.Visibility = if ($isEditing) { "Visible"   } else { "Collapsed" } }
+                if ($null -ne $gpJob.RenameGroup)     { $gpJob.RenameGroup.Visibility     = if ($isEditing) { "Collapsed" } else { "Visible"   } }
+                if ($null -ne $gpJob.BtnCombineGp)    { $gpJob.BtnCombineGp.Visibility    = "Visible" }
+            }
             foreach ($pj in $gpJob.Parents) {
-                if ($null -ne $pj.FilePrepPanel) {
-                    $pj.FilePrepPanel.Visibility = if ($mode -eq "Editing") { "Collapsed" } else { "Visible" }
+                if ($isStats) {
+                    Set-PJobStatsMode $pj
+                } else {
+                    if ($pj._InStats) { Set-PJobEditMode $pj }   # restore the normal card from Stats
+                    if ($null -ne $pj.CardHeaderStack) { $pj.CardHeaderStack.Visibility = "Visible" }
+                    if ($null -ne $pj.FilePrepPanel) { $pj.FilePrepPanel.Visibility = if ($isEditing) { "Hidden" } else { "Visible" } }
+                    if ($null -ne $pj.EditingPanel)  { $pj.EditingPanel.Visibility  = if ($isEditing) { "Visible"   } else { "Collapsed" } }
+                    if ($null -ne $pj.RnOvLeft)  { $pj.RnOvLeft.Visibility  = if ($isEditing) { "Visible" } else { "Collapsed" } }
+                    if ($null -ne $pj.RnOvRight) { $pj.RnOvRight.Visibility = if ($isEditing) { "Visible" } else { "Collapsed" } }
                 }
-                if ($null -ne $pj.EditingPanel) {
-                    $pj.EditingPanel.Visibility  = if ($mode -eq "Editing") { "Visible" } else { "Collapsed" }
-                }
-                # Edit overlays: show in Editing mode, hide in FilePr/Review
-                if ($null -ne $pj.RnOvLeft)  { $pj.RnOvLeft.Visibility  = if ($mode -eq "Editing") { "Visible" } else { "Collapsed" } }
-                if ($null -ne $pj.RnOvRight) { $pj.RnOvRight.Visibility = if ($mode -eq "Editing") { "Visible" } else { "Collapsed" } }
             }
         }
     }
-    # Update top-bar button styles
-    if ($null -ne $script:BtnModeFilePr -and $null -ne $script:BtnModeEditing -and $null -ne $script:BtnModeReview) {
-        $activeStyle   = @{ bg = "#3A5080"; fg = "#FFFFFF"; border = "#5A78C4" }
-        $inactiveStyle = @{ bg = "#252630"; fg = "#7A7D90"; border = "#3A3D50" }
-        $reviewActive  = @{ bg = "#7A5A2A"; fg = "#FFFFFF"; border = "#C4943A" }
-        $libActive     = @{ bg = "#5A3A80"; fg = "#FFFFFF"; border = "#8A5AC4" }
-        foreach ($pair in @(
-            @{ Btn=$script:BtnModeFilePr;   Active=($mode -eq "FilePr");   Style=$activeStyle  },
-            @{ Btn=$script:BtnModeEditing;  Active=($mode -eq "Editing");  Style=$activeStyle  },
-            @{ Btn=$script:BtnModeReview;   Active=($mode -eq "Review");   Style=$reviewActive },
-            @{ Btn=$script:BtnModeLibraries;Active=($mode -eq "Libraries");Style=$libActive    }
-        )) {
-            if ($null -eq $pair.Btn) { continue }
-            $s = if ($pair.Active) { $pair.Style } else { $inactiveStyle }
-            $pair.Btn.Background   = Get-WpfColor $s.bg
-            $pair.Btn.Foreground   = Get-WpfColor $s.fg
-            $pair.Btn.BorderBrush  = Get-WpfColor $s.border
-            $pair.Btn.IsEnabled    = -not $pair.Active
+    if ($isStats -and $null -ne $script:StatsSummaryLbl) { Refresh-StatsSummary }
+    # Pin every card to its captured File Prep height so all tabs share the same
+    # footprint (Review may still be taller by its action-button footer).
+    if (-not $isLibraries) {
+        foreach ($gpJob in $script:jobs) {
+            foreach ($pj in $gpJob.Parents) {
+                if ($null -ne $pj.RowPanel -and $pj._FilePrepHeight -gt 50) {
+                    $pj.RowPanel.MinHeight = $pj._FilePrepHeight
+                }
+            }
         }
     }
+    Update-ModeButtonStyles $mode
 }
 
 # Saves a SKU value to the TSV for a given card folder.
@@ -2967,6 +3008,8 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         EdIsQueued = $false
         LblReviewPrintQStatus = $null
         IsMerged = $false
+        StatsCardPanel = $null; _InStats = $false; PnlFiles = $null
+        ModeHost = $null; CardHeaderStack = $null; _FilePrepHeight = 0
         _GpJob = $gpJob
     }
 
@@ -3691,14 +3734,28 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $headerStack.Children.Add($btnHdrStack) | Out-Null
     $rightStack.Children.Add($headerStack) | Out-Null
 
-    # â”€â”€ Tab content panels (visibility controlled globally from the top-bar buttons)
+    # â”€â”€ Tab content panels. They OVERLAP in a single-cell Grid so the card height
+    # locks to the tallest view: filePrep stays "Hidden" (reserves its height,
+    # invisible) when another mode is active, so the card never reflows between
+    # File Prep / Editing / Review / Stats.
+    $modeHost = New-Object System.Windows.Controls.Grid
+    $rightStack.Children.Add($modeHost) | Out-Null
+    $pJob.ModeHost = $modeHost
+    $pJob.CardHeaderStack = $headerStack
+
     $filePrepPanel = New-Object System.Windows.Controls.StackPanel
-    $filePrepPanel.Visibility = if ($script:GlobalMode -eq "Editing") { "Collapsed" } else { "Visible" }
-    $rightStack.Children.Add($filePrepPanel) | Out-Null
+    $filePrepPanel.Visibility = if ($script:GlobalMode -eq "Editing") { "Hidden" } else { "Visible" }
+    $modeHost.Children.Add($filePrepPanel) | Out-Null
 
     $editingPanel = New-Object System.Windows.Controls.StackPanel
     $editingPanel.Visibility = if ($script:GlobalMode -eq "Editing") { "Visible" } else { "Collapsed" }
-    $rightStack.Children.Add($editingPanel) | Out-Null
+    $modeHost.Children.Add($editingPanel) | Out-Null
+
+    # Per-card Stats panel (shown when the global mode is "Stats"; built lazily).
+    $statsCardPanel = New-Object System.Windows.Controls.StackPanel
+    $statsCardPanel.Visibility = "Collapsed"
+    $modeHost.Children.Add($statsCardPanel) | Out-Null
+    $pJob.StatsCardPanel = $statsCardPanel
 
     $pJob.FilePrepPanel = $filePrepPanel; $pJob.EditingPanel = $editingPanel
     $pJob.MainTabFilePrepBtn = $null; $pJob.MainTabEditingBtn = $null
@@ -4089,7 +4146,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $reviewPanelBorder.Visibility = "Collapsed"
     $reviewStack = New-Object System.Windows.Controls.StackPanel
     $reviewPanelBorder.Child = $reviewStack
-    $rightStack.Children.Add($reviewPanelBorder) | Out-Null
+    $modeHost.Children.Add($reviewPanelBorder) | Out-Null
     $pJob.ReviewPanel = $reviewPanelBorder; $pJob.ReviewStack = $reviewStack
 
     # Files list
@@ -6482,6 +6539,811 @@ function Invoke-SaveTagsSection($stack) {
     return $false
 }
 
+# ============================================================================
+#  EFFICIENCY STATS (Phase 1 - cheap data only: gcode header + slice_info +
+#  plate_1.json + _Data.tsv; no full gcode-body parse)
+# ============================================================================
+
+# Per-variable scoring config. Phase 1 sources EVERYTHING from each design's
+# _Data.tsv (written by DataExtract_worker); designs without an extracted TSV
+# row are skipped entirely. Baselines are ARBITRARY best-guesses for now (see
+# PROGRESS.md for the plan to replace them with corpus percentiles).
+# Direction: "Higher" = bigger is better, "Lower" = smaller is better.
+# A score of 100 means "exactly at baseline"; bars cap at 200.
+# Baselines are the MEANS (+ SD) from the harvested production corpus
+# (data/production_metrics.csv, n=298 X1C-Standard designs; real outliers kept
+# in, per Hank). They line up within ~1% of the old master-sheet means, which
+# validates both. Throughput is the DEPENDENT variable (the headline business
+# number); it decomposes EXACTLY into two orthogonal factors via the identity
+#   throughput = 1440 / (filament_per_unit * time_per_gram)
+# so filament_per_unit and time_per_gram are the two levers (the "Decomposition"
+# view attributes each design's throughput gap to them). time_per_gram is the
+# execution-efficiency factor ("can we make THIS design print faster per gram?")
+# and is supplementary - weight 0 so it shows its own bar but is excluded from
+# the blended Total. The remaining vars (objs/plate, color changes, print time,
+# model filament) are plate-level context, kept as light-weight toggles.
+$script:EfficiencyVars = @(
+    @{ Key = "throughput";        Label = "Throughput";      Unit = "obj/day"; Baseline = 75.1;  Sd = 17.6; Direction = "Higher"; Weight = 3.0; Fmt = "N1" }
+    @{ Key = "objs_per_plate";    Label = "Objects / Plate"; Unit = "";        Baseline = 90.5;  Sd = 18.1; Direction = "Higher"; Weight = 2.0; Fmt = "N0" }
+    @{ Key = "color_changes";     Label = "Color Changes";   Unit = "";        Baseline = 145.3; Sd = 49.0; Direction = "Lower";  Weight = 1.5; Fmt = "N0" }
+    @{ Key = "filament_per_unit"; Label = "Filament / Unit"; Unit = "g";       Baseline = 3.52;  Sd = 0.60; Direction = "Lower";  Weight = 1.5; Fmt = "N2" }
+    @{ Key = "time_per_gram";     Label = "Time / Gram";     Unit = "min/g";   Baseline = 5.75;  Sd = 0.99; Direction = "Lower";  Weight = 0.0; Fmt = "N2" }
+    @{ Key = "print_time";        Label = "Print Time";      Unit = "h";       Baseline = 30.0;  Sd = 7.5;  Direction = "Lower";  Weight = 1.0; Fmt = "N1" }
+    @{ Key = "model_usage";       Label = "Model Filament";  Unit = "g";       Baseline = 315.0; Sd = 67.1; Direction = "Lower";  Weight = 1.0; Fmt = "N0" }
+)
+
+$script:StatsResults     = @()       # cached per-design computed efficiency
+$script:StatsSelectedVar = "total"   # "total", "decomp", or a var Key
+$script:StatsPanel       = $null
+$script:StatsListPanel   = $null
+$script:StatsSummaryLbl  = $null
+$script:StatsLegendLbl   = $null
+$script:StatsVarButtons  = @{}
+$script:StatsSortMode    = "fileorder"   # "fileorder" | "throughput" | "percentile" | "name"
+
+# The headline "Efficiency" score IS the throughput index: throughput is the
+# dependent variable (it correlated 0.948 with the old weighted blend, so the
+# blend was ~95% throughput anyway and double-counted its own drivers). Index =
+# design throughput / corpus-mean throughput * 100, so 100 = average obj/day.
+# Corpus throughput mean 75.1, sd 17.6 -> index sd 17.6/75.1*100 = 23.4.
+$script:StatsTotalBaseline = 100.0
+$script:StatsTotalSd       = 23.4
+
+function Get-EffVar([string]$key) {
+    foreach ($v in $script:EfficiencyVars) { if ($v.Key -eq $key) { return $v } }
+    return $null
+}
+
+# Extracts Phase-1 metrics for one design from its _Data.tsv (the row written
+# by DataExtract_worker). Returns a hashtable, or $null if there is no TSV or
+# the row isn't a fully-extracted data row (so the design is skipped).
+#
+# TSV column layout (DataExtract_worker):
+#   Printer, FileType, FileName, SKU, Theme, Date, H, M, [8x (grams,color)],
+#   ColorSwaps, ObjCount, ModelGrams, TotalGrams, TimeAdd
+# The 5 summary columns are ALWAYS the last 5, so we index them from the end -
+# that stays correct across the old (no-SKU) and new TSV formats. H/M sit right
+# after the Date column, which we locate by its m/d/yyyy pattern.
+function Get-PJobEfficiencyData($pj) {
+    $tsv = Get-ChildItem -Path $pj.FolderPath -Filter "*_Data.tsv" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $tsv) { return $null }
+    $last = $null
+    try { $last = Get-Content $tsv.FullName -ErrorAction SilentlyContinue | Select-Object -Last 1 } catch {}
+    if (-not $last) { return $null }
+    $cols = $last -split "`t"
+    # A SKU-seed stub is ~4 cols; a real extracted row is ~29. Require a date col.
+    if ($cols.Count -lt 13) { return $null }
+    $datePat = '^\d{1,2}/\d{1,2}/\d{4}$'
+    $dateIdx = -1
+    foreach ($di in 4, 5) { if ($di -lt $cols.Count -and $cols[$di].Trim() -match $datePat) { $dateIdx = $di; break } }
+    if ($dateIdx -lt 0) { return $null }
+    if (($dateIdx + 2) -ge ($cols.Count - 5)) { return $null }   # H/M would overlap the trailing summary cols
+
+    $n = $cols.Count
+    $colorSwaps = $null; $objCount = $null; $modelG = $null; $totalG = $null
+    $ti = 0; $td = 0.0
+    if ([int]::TryParse($cols[$n - 5].Trim(), [ref]$ti))    { $colorSwaps = $ti }
+    if ([int]::TryParse($cols[$n - 4].Trim(), [ref]$ti))    { $objCount   = $ti }
+    if ([double]::TryParse($cols[$n - 3].Trim(), [ref]$td)) { $modelG     = $td }
+    if ([double]::TryParse($cols[$n - 2].Trim(), [ref]$td)) { $totalG     = $td }
+
+    $H = 0; $M = 0
+    [int]::TryParse($cols[$dateIdx + 1].Trim(), [ref]$H) | Out-Null
+    [int]::TryParse($cols[$dateIdx + 2].Trim(), [ref]$M) | Out-Null
+    $timeH = $H + ($M / 60.0)
+
+    # Need a real time + object count to score this design.
+    if ($null -eq $objCount -or $objCount -le 0 -or $timeH -le 0) { return $null }
+
+    return @{ TimeH = $timeH; Objects = $objCount; ColorSwaps = $colorSwaps; ModelG = $modelG; TotalG = $totalG }
+}
+
+# value -> 0..200 score vs baseline (100 = at baseline)
+function Get-VarScore([double]$value, [double]$baseline, [string]$direction) {
+    if ($baseline -le 0 -or $value -le 0) { return 0.0 }
+    $s = if ($direction -eq 'Lower') { ($baseline / $value) * 100.0 } else { ($value / $baseline) * 100.0 }
+    if ($s -gt 200) { $s = 200.0 }
+    if ($s -lt 0)   { $s = 0.0 }
+    return $s
+}
+
+# Computes raw metrics, per-variable scores, and a weighted total for one design.
+function Compute-PJobEfficiency($pj) {
+    $d = Get-PJobEfficiencyData $pj
+    $res = @{ PJob = $pj; Name = (Split-Path $pj.FolderPath -Leaf); HasData = $false; Raw = @{}; Scores = @{}; Total = $null; Data = $d }
+    if ($null -eq $d -or $null -eq $d.TimeH -or $d.TimeH -le 0) { return $res }
+    $obj = if ($d.Objects -and $d.Objects -gt 0) { [double]$d.Objects } else { $null }
+
+    $raw = @{}
+    if ($obj) {
+        $raw.throughput     = ($obj / $d.TimeH) * 24.0   # objects per day (Wigglitz/Day)
+        $raw.objs_per_plate = $obj                       # pre-merge object count
+    }
+    if ($null -ne $d.ColorSwaps)                            { $raw.color_changes     = [double]$d.ColorSwaps }   # total AMS swaps on the plate
+    if ($obj -and $null -ne $d.ModelG -and $d.ModelG -gt 0) { $raw.filament_per_unit = $d.ModelG / $obj }        # model grams per unit
+    if ($null -ne $d.ModelG -and $d.ModelG -gt 0 -and $d.TimeH -gt 0) { $raw.time_per_gram = ($d.TimeH * 60.0) / $d.ModelG }  # minutes per model gram (execution efficiency)
+    if ($d.TimeH -gt 0)                                     { $raw.print_time        = $d.TimeH }                 # plate print time (h)
+    if ($null -ne $d.ModelG -and $d.ModelG -gt 0)          { $raw.model_usage       = $d.ModelG }               # plate model filament (g)
+    $res.Raw = $raw
+
+    # Throughput two-factor decomposition (exact identity):
+    #   throughput = 1440 / (filament_per_unit * time_per_gram)
+    # => throughput / baseline = (fpuBase/fpu) * (tpgBase/tpg).
+    # Each multiplier > 1 means that factor LIFTS throughput above baseline (good),
+    # < 1 means it DRAGS it below. The two multiply to the overall throughput ratio.
+    $fpuV = if ($raw.ContainsKey('filament_per_unit')) { [double]$raw.filament_per_unit } else { $null }
+    $tpgV = if ($raw.ContainsKey('time_per_gram'))     { [double]$raw.time_per_gram }     else { $null }
+    $fpuDef = Get-EffVar 'filament_per_unit'; $tpgDef = Get-EffVar 'time_per_gram'
+    if ($fpuV -and $fpuV -gt 0 -and $tpgV -and $tpgV -gt 0 -and $fpuDef -and $tpgDef) {
+        $res.MatMult   = [double]$fpuDef.Baseline / $fpuV   # filament/unit lever
+        $res.SpeedMult = [double]$tpgDef.Baseline / $tpgV   # time/gram (speed) lever
+        $res.TpRatio   = $res.MatMult * $res.SpeedMult
+    }
+
+    # Per-variable scores (still used for the decomposition view's coloring).
+    foreach ($v in $script:EfficiencyVars) {
+        if (-not $raw.ContainsKey($v.Key)) { continue }
+        $res.Scores[$v.Key] = Get-VarScore ([double]$raw[$v.Key]) $v.Baseline $v.Direction
+    }
+    # Headline Efficiency score = throughput index (100 = corpus-average obj/day).
+    if ($raw.ContainsKey('throughput')) {
+        $tpDef = Get-EffVar 'throughput'
+        $tpBase = if ($tpDef) { [double]$tpDef.Baseline } else { 75.1 }
+        if ($tpBase -gt 0) { $res.Total = ($raw.throughput / $tpBase) * 100.0; $res.HasData = $true }
+    }
+    return $res
+}
+
+# Score -> bar colour
+function Get-StatsScoreColor([double]$score) {
+    if ($score -ge 100) { return "#4CAF72" }
+    if ($score -ge 70)  { return "#E8A135" }
+    return "#D95F5F"
+}
+
+# Builds one design's bar row for the currently-selected variable.
+function New-StatsRow($res, [string]$key) {
+    $isTotal = ($key -eq 'total')
+    $row = New-Object System.Windows.Controls.StackPanel
+    $row.Orientation = "Horizontal"; $row.Margin = New-Object System.Windows.Thickness(0,0,0,4)
+
+    $lblName = New-Object System.Windows.Controls.TextBlock
+    $lblName.Text = $res.Name; $lblName.Width = 240; $lblName.Foreground = Get-WpfColor "#D0D0D0"
+    $lblName.FontSize = 12; $lblName.VerticalAlignment = "Center"
+    $lblName.TextTrimming = "CharacterEllipsis"; $lblName.Margin = New-Object System.Windows.Thickness(0,0,10,0)
+    $row.Children.Add($lblName) | Out-Null
+
+    $hasVal = if ($isTotal) { $null -ne $res.Total } else { $res.Scores.ContainsKey($key) }
+    if (-not $hasVal) {
+        $lblNo = New-Object System.Windows.Controls.TextBlock
+        $lblNo.Text = "not sliced / no data"; $lblNo.Foreground = Get-WpfColor "#666870"
+        $lblNo.FontStyle = "Italic"; $lblNo.FontSize = 11; $lblNo.VerticalAlignment = "Center"
+        $row.Children.Add($lblNo) | Out-Null
+        return $row
+    }
+
+    $score = if ($isTotal) { [double]$res.Total } else { [double]$res.Scores[$key] }
+    $trackW = 360.0
+    $track = New-Object System.Windows.Controls.Canvas
+    $track.Width = $trackW; $track.Height = 18; $track.Background = Get-WpfColor "#1C1D23"
+    $track.VerticalAlignment = "Center"
+    $bar = New-Object System.Windows.Shapes.Rectangle
+    $bar.Width = [Math]::Max(1.0, ([Math]::Min($score,200.0) / 200.0) * $trackW); $bar.Height = 18
+    $bar.Fill = Get-WpfColor (Get-StatsScoreColor $score)
+    [System.Windows.Controls.Canvas]::SetLeft($bar, 0); [System.Windows.Controls.Canvas]::SetTop($bar, 0)
+    $track.Children.Add($bar) | Out-Null
+    $baseMark = New-Object System.Windows.Shapes.Rectangle
+    $baseMark.Width = 2; $baseMark.Height = 18; $baseMark.Fill = Get-WpfColor "#FFFFFF"
+    [System.Windows.Controls.Canvas]::SetLeft($baseMark, ($trackW / 2.0)); [System.Windows.Controls.Canvas]::SetTop($baseMark, 0)
+    $track.Children.Add($baseMark) | Out-Null
+    $row.Children.Add($track) | Out-Null
+
+    # Raw value (for variable views) + score
+    $valText = ""
+    if (-not $isTotal -and $res.Raw.ContainsKey($key)) {
+        $vdef = Get-EffVar $key
+        $fmt  = if ($vdef) { $vdef.Fmt } else { "N1" }
+        $unit = if ($vdef -and $vdef.Unit -ne "") { " $($vdef.Unit)" } else { "" }
+        $valText = ("{0:$fmt}{1}" -f [double]$res.Raw[$key], $unit)
+    }
+    $lblVal = New-Object System.Windows.Controls.TextBlock
+    $lblVal.Text = $valText; $lblVal.Width = 110; $lblVal.Foreground = Get-WpfColor "#9AA0B0"
+    $lblVal.FontSize = 11; $lblVal.VerticalAlignment = "Center"; $lblVal.TextAlignment = "Right"
+    $lblVal.Margin = New-Object System.Windows.Thickness(10,0,10,0)
+    $row.Children.Add($lblVal) | Out-Null
+
+    $lblScore = New-Object System.Windows.Controls.TextBlock
+    $lblScore.Text = ("{0:N0}" -f $score); $lblScore.Width = 44
+    $lblScore.Foreground = Get-WpfColor (Get-StatsScoreColor $score)
+    $lblScore.FontWeight = [System.Windows.FontWeights]::Bold; $lblScore.FontSize = 12
+    $lblScore.VerticalAlignment = "Center"; $lblScore.TextAlignment = "Right"
+    $row.Children.Add($lblScore) | Out-Null
+    return $row
+}
+
+# Builds one design's throughput-decomposition row: the throughput value plus
+# two factor chips (Material = filament/unit, Speed = time/gram) showing each
+# lever's percentage effect on throughput vs baseline (they multiply to the
+# overall throughput ratio).
+function New-StatsDecompRow($res) {
+    $row = New-Object System.Windows.Controls.StackPanel
+    $row.Orientation = "Horizontal"; $row.Margin = New-Object System.Windows.Thickness(0,0,0,4)
+
+    $lblName = New-Object System.Windows.Controls.TextBlock
+    $lblName.Text = $res.Name; $lblName.Width = 200; $lblName.Foreground = Get-WpfColor "#D0D0D0"
+    $lblName.FontSize = 12; $lblName.VerticalAlignment = "Center"
+    $lblName.TextTrimming = "CharacterEllipsis"; $lblName.Margin = New-Object System.Windows.Thickness(0,0,10,0)
+    $row.Children.Add($lblName) | Out-Null
+
+    if (-not $res.MatMult) {
+        $no = New-Object System.Windows.Controls.TextBlock
+        $no.Text = "no data"; $no.Foreground = Get-WpfColor "#666870"
+        $no.FontStyle = "Italic"; $no.FontSize = 11; $no.VerticalAlignment = "Center"
+        $row.Children.Add($no) | Out-Null
+        return $row
+    }
+
+    $tpScore = if ($res.Scores.ContainsKey('throughput')) { [double]$res.Scores['throughput'] } else { 0.0 }
+    $tpRaw   = if ($res.Raw.ContainsKey('throughput'))    { [double]$res.Raw['throughput'] }    else { 0.0 }
+    $tpColor = Get-StatsScoreColor $tpScore
+    $lblTp = New-Object System.Windows.Controls.TextBlock
+    $lblTp.Text = ("{0:N1} obj/day" -f $tpRaw); $lblTp.Width = 110
+    $lblTp.Foreground = Get-WpfColor $tpColor; $lblTp.FontWeight = [System.Windows.FontWeights]::Bold
+    $lblTp.FontSize = 12; $lblTp.VerticalAlignment = "Center"
+    $row.Children.Add($lblTp) | Out-Null
+
+    $eq = New-Object System.Windows.Controls.TextBlock
+    $eq.Text = "="; $eq.Foreground = Get-WpfColor "#555868"; $eq.FontSize = 12
+    $eq.VerticalAlignment = "Center"; $eq.Margin = New-Object System.Windows.Thickness(0,0,8,0)
+    $row.Children.Add($eq) | Out-Null
+
+    foreach ($f in @(@{ N = "Material"; M = [double]$res.MatMult }, @{ N = "Speed"; M = [double]$res.SpeedMult })) {
+        $pct  = ($f.M - 1.0) * 100.0
+        $good = ($pct -ge 0)
+        $bgHex = if ($good) { "#1E3A2E" } else { "#3A1E1E" }
+        $bdHex = if ($good) { "#4CAF72" } else { "#D95F5F" }
+        $fgHex = if ($good) { "#7FE0A8" } else { "#E89090" }
+        $sign  = if ($pct -ge 0) { "+" } else { "" }
+        $chip = New-Object System.Windows.Controls.Border
+        $chip.Background = Get-WpfColor $bgHex; $chip.BorderBrush = Get-WpfColor $bdHex
+        $chip.BorderThickness = New-Object System.Windows.Thickness(1)
+        $chip.CornerRadius = New-Object System.Windows.CornerRadius(3)
+        $chip.Margin = New-Object System.Windows.Thickness(0,0,8,0)
+        $chip.Padding = New-Object System.Windows.Thickness(8,2,8,2)
+        $t = New-Object System.Windows.Controls.TextBlock
+        $t.Text = ("{0}  {1}{2:N0}%" -f $f.N, $sign, $pct)
+        $t.Foreground = Get-WpfColor $fgHex; $t.FontSize = 12; $t.VerticalAlignment = "Center"
+        $chip.Child = $t
+        $row.Children.Add($chip) | Out-Null
+    }
+    return $row
+}
+
+# --- Bell-curve helpers ------------------------------------------------------
+
+# Per-variable distribution metadata (mean/sd/direction/unit/fmt) for the curve.
+# "total" is the synthetic blended-score distribution (corpus constants above).
+function Get-StatsVarMeta([string]$key) {
+    if ($key -eq 'total') {
+        return @{ Mean = $script:StatsTotalBaseline; Sd = $script:StatsTotalSd; Direction = 'Higher'; Unit = ''; Fmt = 'N0'; Label = 'Throughput index' }
+    }
+    $v = Get-EffVar $key
+    if ($null -eq $v) { return $null }
+    $sd = if ($v.ContainsKey('Sd')) { [double]$v.Sd } else { 0.0 }
+    return @{ Mean = [double]$v.Baseline; Sd = $sd; Direction = $v.Direction; Unit = $v.Unit; Fmt = $v.Fmt; Label = $v.Label }
+}
+
+# This design's raw value for the selected variable (or its Total score).
+function Get-StatsCardValue($res, [string]$key) {
+    if ($key -eq 'total') { if ($null -ne $res.Total) { return [double]$res.Total } else { return $null } }
+    if ($res.Raw.ContainsKey($key)) { return [double]$res.Raw[$key] }
+    return $null
+}
+
+# Normal CDF via Abramowitz-Stegun erf approximation -> percentile.
+function Get-Erf([double]$x) {
+    $t = 1.0 / (1.0 + 0.3275911 * [Math]::Abs($x))
+    $y = 1.0 - ((((1.061405429 * $t - 1.453152027) * $t + 1.421413741) * $t - 0.284496736) * $t + 0.254829592) * $t * [Math]::Exp(-$x * $x)
+    if ($x -lt 0) { return -$y }
+    return $y
+}
+function Get-NormalCdf([double]$z) { return 0.5 * (1.0 + (Get-Erf ($z / [Math]::Sqrt(2.0)))) }
+
+function Add-StatsVLine($cv, [double]$x, [string]$hex, [double]$thick, [bool]$dash, [double]$y1, [double]$y2) {
+    $ln = New-Object System.Windows.Shapes.Line
+    $ln.X1 = $x; $ln.X2 = $x; $ln.Y1 = $y1; $ln.Y2 = $y2
+    $ln.Stroke = Get-WpfColor $hex; $ln.StrokeThickness = $thick
+    if ($dash) { $dc = New-Object System.Windows.Media.DoubleCollection; $dc.Add(3); $dc.Add(3); $ln.StrokeDashArray = $dc }
+    $cv.Children.Add($ln) | Out-Null
+}
+function Add-StatsText($cv, [double]$x, [double]$y, [string]$s, [string]$hex, [double]$size, [bool]$center) {
+    $t = New-Object System.Windows.Controls.TextBlock
+    $t.Text = $s; $t.Foreground = Get-WpfColor $hex; $t.FontSize = $size
+    $cv.Children.Add($t) | Out-Null
+    $t.Measure((New-Object System.Windows.Size([double]::PositiveInfinity, [double]::PositiveInfinity)))
+    $left = if ($center) { $x - ($t.DesiredSize.Width / 2.0) } else { $x }
+    [System.Windows.Controls.Canvas]::SetLeft($t, $left); [System.Windows.Controls.Canvas]::SetTop($t, $y)
+}
+function Add-StatsArea($cv, $pts, [double]$fromX, [double]$toX, [double]$baseY, [string]$hex) {
+    $poly = New-Object System.Windows.Shapes.Polygon
+    $poly.Fill = Get-WpfColor $hex; $poly.Opacity = 0.16
+    $pc = New-Object System.Windows.Media.PointCollection
+    $pc.Add((New-Object System.Windows.Point($fromX, $baseY)))
+    foreach ($p in $pts) { if ($p[0] -ge ($fromX - 0.01) -and $p[0] -le ($toX + 0.01)) { $pc.Add((New-Object System.Windows.Point($p[0], $p[1]))) } }
+    $pc.Add((New-Object System.Windows.Point($toX, $baseY)))
+    $poly.Points = $pc
+    $cv.Children.Add($poly) | Out-Null
+}
+
+# Draws the corpus normal curve for one variable. +-1 sd labels sit on TOP of
+# the curve; the bottom shows the mean value and the actual sd value (in the
+# variable's units). A marker (line + dot + value) shows this design. Drawn at a
+# fixed logical size; callers wrap it in a Viewbox so it scales to fill the column.
+function New-BellCurveCanvas([double]$mean, [double]$sd, [double]$value, [string]$direction, [string]$fmt, [string]$unit) {
+    $W = 600.0; $H = 250.0
+    $padL = 36.0; $padR = 36.0; $padTop = 44.0; $axisY = 196.0
+    $plotW = $W - $padL - $padR
+    if ($sd -le 0.0) { $sd = [Math]::Max(1.0, [Math]::Abs($mean) * 0.1) }
+    $xMin = $mean - 3.0 * $sd; $xMax = $mean + 3.0 * $sd; $span = $xMax - $xMin
+    if ($span -le 0) { $span = 1.0 }
+    $peakH = $axisY - $padTop
+    $uSuffix = if ($unit -ne "") { " " + $unit } else { "" }
+
+    $cv = New-Object System.Windows.Controls.Canvas
+    $cv.Width = $W; $cv.Height = $H
+    $px = { param([double]$v) $padL + (($v - $xMin) / $span) * $plotW }
+
+    $pts = New-Object System.Collections.Generic.List[object]
+    for ($i = 0; $i -le 90; $i++) {
+        $xv = $xMin + ($span * $i / 90.0)
+        $z = ($xv - $mean) / $sd
+        $g = [Math]::Exp(-0.5 * $z * $z)
+        $pts.Add(@((& $px $xv), ($axisY - $g * $peakH)))
+    }
+
+    $meanX = & $px $mean
+    $betterRight = ($direction -eq 'Higher')
+    $greenHex = "#1D9E75"; $redHex = "#D85A30"
+    $leftHex  = if ($betterRight) { $redHex } else { $greenHex }
+    $rightHex = if ($betterRight) { $greenHex } else { $redHex }
+    Add-StatsArea $cv $pts $padL $meanX $axisY $leftHex
+    Add-StatsArea $cv $pts $meanX ($padL + $plotW) $axisY $rightHex
+
+    $pl = New-Object System.Windows.Shapes.Polyline
+    $pl.Stroke = Get-WpfColor "#9AA0B0"; $pl.StrokeThickness = 2.0
+    $plc = New-Object System.Windows.Media.PointCollection
+    foreach ($p in $pts) { $plc.Add((New-Object System.Windows.Point($p[0], $p[1]))) }
+    $pl.Points = $plc
+    $cv.Children.Add($pl) | Out-Null
+
+    # baseline
+    Add-StatsVLine $cv $padL "#3A3D50" 1.0 $false $axisY $axisY
+    $base = New-Object System.Windows.Shapes.Line
+    $base.X1 = $padL; $base.X2 = $padL + $plotW; $base.Y1 = $axisY; $base.Y2 = $axisY
+    $base.Stroke = Get-WpfColor "#3A3D50"; $base.StrokeThickness = 1.0
+    $cv.Children.Add($base) | Out-Null
+
+    # +-1 sd / +-2 sd guide lines, with +-1 sd labelled on TOP
+    foreach ($k in @(-2, -1, 1, 2)) {
+        $xv = $mean + $k * $sd
+        if ($xv -gt $xMin -and $xv -lt $xMax) {
+            $gx = & $px $xv
+            $hex = if ([Math]::Abs($k) -eq 1) { "#54586E" } else { "#3A3D50" }
+            Add-StatsVLine $cv $gx $hex 1.0 $true $padTop $axisY
+            if ([Math]::Abs($k) -eq 1) {
+                $lbl = if ($k -lt 0) { "-1 sd" } else { "+1 sd" }
+                Add-StatsText $cv $gx ($padTop - 18) $lbl "#7E8298" 13 $true
+            }
+        }
+    }
+    # mean line
+    Add-StatsVLine $cv $meanX "#8A8EA2" 1.4 $true $padTop $axisY
+
+    # bottom labels: mean (center) + actual sd value moved to the LEFT edge so it
+    # clears the marker delta that now sits under the marker.
+    Add-StatsText $cv $meanX ($axisY + 6) ("mean " + ("{0:$fmt}" -f $mean) + $uSuffix) "#9AA0B0" 13 $true
+    Add-StatsText $cv $padL ($axisY + 6) ("1 sd = " + ("{0:$fmt}" -f $sd) + $uSuffix) "#6E7288" 12 $false
+
+    # marker for this design: value on TOP, signed delta-from-mean on the BOTTOM
+    $vClamped = [Math]::Max($xMin, [Math]::Min($xMax, $value))
+    $mx = & $px $vClamped
+    $isBetter = if ($betterRight) { $value -ge $mean } else { $value -le $mean }
+    $mkHex = if ($isBetter) { "#22D29B" } else { "#EE6A3E" }
+    Add-StatsVLine $cv $mx $mkHex 3.0 $false ($padTop - 6) $axisY
+    $dot = New-Object System.Windows.Shapes.Ellipse
+    $dot.Width = 10; $dot.Height = 10; $dot.Fill = Get-WpfColor $mkHex
+    [System.Windows.Controls.Canvas]::SetLeft($dot, $mx - 5); [System.Windows.Controls.Canvas]::SetTop($dot, $padTop - 11)
+    $cv.Children.Add($dot) | Out-Null
+    Add-StatsText $cv $mx ($padTop - 34) (("{0:$fmt}" -f $value) + $uSuffix) $mkHex 14 $true
+    $diff = $value - $mean
+    $dSign = if ($diff -ge 0) { "+" } else { "" }
+    Add-StatsText $cv $mx ($axisY + 26) ($dSign + ("{0:$fmt}" -f $diff) + $uSuffix + " vs mean") $mkHex 13 $true
+
+    return $cv
+}
+
+# Returns the variables where this design sits beyond +-1 sd of the corpus mean,
+# each tagged good/bad by the variable's better-direction. Used by the Total view.
+function Get-StatsOutliers($res) {
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($v in $script:EfficiencyVars) {
+        if (-not $res.Raw.ContainsKey($v.Key)) { continue }
+        $sd = if ($v.ContainsKey('Sd')) { [double]$v.Sd } else { 0.0 }
+        if ($sd -le 0) { continue }
+        $raw = [double]$res.Raw[$v.Key]
+        $z = ($raw - [double]$v.Baseline) / $sd
+        if ([Math]::Abs($z) -lt 1.0) { continue }
+        $good = if ($v.Direction -eq 'Higher') { $z -gt 0 } else { $z -lt 0 }
+        $out.Add(@{ Label = $v.Label; Z = $z; Good = $good; Value = $raw; Diff = ($raw - [double]$v.Baseline); Fmt = $v.Fmt; Unit = $v.Unit }) | Out-Null
+    }
+    return ($out | Sort-Object -Property @{ Expression = { [Math]::Abs($_.Z) }; Descending = $true })
+}
+
+# One text line in the right-hand info column.
+function New-StatsInfoLine([string]$text, [string]$hex, [double]$size, [bool]$bold, [double]$top) {
+    $t = New-Object System.Windows.Controls.TextBlock
+    $t.Text = $text; $t.Foreground = Get-WpfColor $hex; $t.FontSize = $size
+    $t.TextWrapping = "Wrap"; $t.Margin = New-Object System.Windows.Thickness(0,$top,0,0)
+    if ($bold) { $t.FontWeight = [System.Windows.FontWeights]::Bold }
+    return $t
+}
+
+# Builds one design's stats card. Layout mirrors the other tabs: LEFT column =
+# plate image + bell-curve graph; RIGHT column = text readout (score, this
+# variable's position, throughput effect, and - on the Total view - the list of
+# attributes sitting outside 1 sd).
+function New-StatsCardRow($res, [string]$key) {
+    $meta = Get-StatsVarMeta $key
+    $val  = Get-StatsCardValue $res $key
+
+    # Match the other tabs' card chrome so a design keeps the same footprint
+    # across File Prep / Editing / Review / Stats.
+    $card = New-Object System.Windows.Controls.Border
+    $card.Background = Get-WpfColor "#1A1C22"; $card.BorderBrush = Get-WpfColor "#2A2C35"
+    $card.BorderThickness = New-Object System.Windows.Thickness(1)
+    $card.CornerRadius = New-Object System.Windows.CornerRadius(4)
+    $card.Margin = New-Object System.Windows.Thickness(0,0,0,10); $card.Padding = New-Object System.Windows.Thickness(10)
+
+    # Same column split as the other tabs: left flexes, right rigid at 560.
+    $grid = New-Object System.Windows.Controls.Grid
+    $grid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = (New-Object System.Windows.GridLength(1, [System.Windows.GridUnitType]::Star)) })) | Out-Null
+    $grid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = (New-Object System.Windows.GridLength(560)) })) | Out-Null
+    $card.Child = $grid
+
+    # LEFT (flex): plate image (fixed) + bell-curve graph that grows to fill.
+    $leftGrid = New-Object System.Windows.Controls.Grid
+    [System.Windows.Controls.Grid]::SetColumn($leftGrid, 0)
+    $leftGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = [System.Windows.GridLength]::Auto })) | Out-Null
+    $leftGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition)) | Out-Null
+    $grid.Children.Add($leftGrid) | Out-Null
+
+    $img = New-Object System.Windows.Controls.Image
+    $img.Width = 200; $img.Height = 200; $img.Stretch = "Uniform"
+    $img.VerticalAlignment = "Top"; $img.HorizontalAlignment = "Left"
+    [System.Windows.Controls.Grid]::SetColumn($img, 0)
+    $src = $null
+    if ($res.PJob -and $res.PJob.GcodeImgPath -and (Test-Path $res.PJob.GcodeImgPath)) { $src = Load-WpfImage $res.PJob.GcodeImgPath }
+    if ($null -eq $src -and $res.PJob -and $res.PJob.FolderPath) {
+        $png = Get-ChildItem -Path $res.PJob.FolderPath -Filter "*.png" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($png) { $src = Load-WpfImage $png.FullName }
+    }
+    if ($src) { $img.Source = $src }
+    $leftGrid.Children.Add($img) | Out-Null
+
+    if ($null -ne $meta -and $null -ne $val) {
+        $curve = New-BellCurveCanvas $meta.Mean $meta.Sd $val $meta.Direction $meta.Fmt $meta.Unit
+        $vb = New-Object System.Windows.Controls.Viewbox
+        $vb.Stretch = "Uniform"; $vb.StretchDirection = "Both"
+        $vb.HorizontalAlignment = "Stretch"; $vb.VerticalAlignment = "Top"
+        $vb.MaxHeight = 250; $vb.Margin = New-Object System.Windows.Thickness(14,0,0,0)
+        $vb.Child = $curve
+        [System.Windows.Controls.Grid]::SetColumn($vb, 1)
+        $leftGrid.Children.Add($vb) | Out-Null
+    }
+
+    # RIGHT (rigid 560): text info column
+    $right = New-Object System.Windows.Controls.StackPanel
+    [System.Windows.Controls.Grid]::SetColumn($right, 1)
+    $right.Margin = New-Object System.Windows.Thickness(18,2,4,2)
+    $grid.Children.Add($right) | Out-Null
+
+    $right.Children.Add((New-StatsInfoLine $res.Name "#E2E4EC" 14 $true 0)) | Out-Null
+
+    if ($null -eq $meta -or $null -eq $val) {
+        $right.Children.Add((New-StatsInfoLine "not sliced / no data for this variable" "#666870" 12 $false 8)) | Out-Null
+        return $card
+    }
+
+    # Efficiency score block (Total, normalized so 100 = corpus average)
+    $tot = if ($null -ne $res.Total) { [double]$res.Total } else { $null }
+    if ($null -ne $tot) {
+        $scoreRow = New-Object System.Windows.Controls.StackPanel
+        $scoreRow.Orientation = "Horizontal"; $scoreRow.Margin = New-Object System.Windows.Thickness(0,6,0,0)
+        $big = New-Object System.Windows.Controls.TextBlock
+        $big.Text = ("{0:N0}" -f $tot); $big.FontSize = 30; $big.FontWeight = [System.Windows.FontWeights]::Bold
+        $big.Foreground = Get-WpfColor (Get-StatsScoreColor $tot); $big.VerticalAlignment = "Center"
+        $scoreRow.Children.Add($big) | Out-Null
+        $scoreLblStack = New-Object System.Windows.Controls.StackPanel
+        $scoreLblStack.Margin = New-Object System.Windows.Thickness(8,0,0,0); $scoreLblStack.VerticalAlignment = "Center"
+        $scoreLblStack.Children.Add((New-StatsInfoLine "Efficiency score" "#C0C4D0" 12 $false 0)) | Out-Null
+        $scoreLblStack.Children.Add((New-StatsInfoLine "100 = avg throughput" "#7A7E92" 11 $false 0)) | Out-Null
+        $scoreRow.Children.Add($scoreLblStack) | Out-Null
+        $right.Children.Add($scoreRow) | Out-Null
+    }
+
+    $tpRaw = if ($res.Raw.ContainsKey('throughput')) { [double]$res.Raw['throughput'] } else { $null }
+    if ($null -ne $tpRaw) {
+        $right.Children.Add((New-StatsInfoLine ("Throughput  {0:N1} obj/day" -f $tpRaw) "#B8BCC8" 12 $false 8)) | Out-Null
+    }
+
+    $z = ($val - $meta.Mean) / [Math]::Max($meta.Sd, 1e-9)
+    $pctile = [Math]::Round((Get-NormalCdf $z) * 100.0)
+    $diff = $val - $meta.Mean
+    $diffSign = if ($diff -ge 0) { "+" } else { "" }
+    $unitTxt = if ($meta.Unit -ne "") { " " + $meta.Unit } else { "" }
+    $dirTxt = if ($meta.Direction -eq 'Higher') { "higher is better" } else { "lower is better" }
+    # Difference between this design and the mean, with sd count only when outside 1 sd.
+    $diffTxt = ("{0}{1:$($meta.Fmt)}{2} vs mean" -f $diffSign, $diff, $unitTxt)
+    if ([Math]::Abs($z) -ge 1.0) {
+        $zsign = if ($z -ge 0) { "+" } else { "" }
+        $diffTxt += ("   ({0}{1:N1} sd)" -f $zsign, $z)
+    }
+    $right.Children.Add((New-StatsInfoLine ("{0}:  {1:$($meta.Fmt)}{2}   ({3})" -f $meta.Label, $val, $unitTxt, $dirTxt) "#C0C4D0" 12 $false 8)) | Out-Null
+    $right.Children.Add((New-StatsInfoLine ("p{0} on corpus   {1}" -f $pctile, $diffTxt) "#9AA0B0" 12 $false 2)) | Out-Null
+
+    # Throughput-effect callout for the identity keys
+    $chipPct = $null; $chipWhat = ""
+    switch ($key) {
+        'filament_per_unit' { if ($res.MatMult)   { $chipPct = ($res.MatMult   - 1.0) * 100.0; $chipWhat = "filament/unit lever" } }
+        'time_per_gram'     { if ($res.SpeedMult) { $chipPct = ($res.SpeedMult - 1.0) * 100.0; $chipWhat = "speed lever" } }
+        'throughput'        { if ($res.TpRatio)   { $chipPct = ($res.TpRatio   - 1.0) * 100.0; $chipWhat = "throughput vs baseline" } }
+        'total'             { if ($res.TpRatio)   { $chipPct = ($res.TpRatio   - 1.0) * 100.0; $chipWhat = "throughput vs baseline" } }
+    }
+    if ($null -ne $chipPct) {
+        $good = ($chipPct -ge 0)
+        $bgHex = if ($good) { "#1E3A2E" } else { "#3A1E1E" }
+        $fgHex = if ($good) { "#7FE0A8" } else { "#E89090" }
+        $verb  = if ($good) { "lifts" } else { "drags" }
+        $sign  = if ($chipPct -ge 0) { "+" } else { "" }
+        $callout = New-Object System.Windows.Controls.Border
+        $callout.CornerRadius = New-Object System.Windows.CornerRadius(4)
+        $callout.Margin = New-Object System.Windows.Thickness(0,8,0,0); $callout.Padding = New-Object System.Windows.Thickness(10,5,10,5)
+        $callout.HorizontalAlignment = "Left"; $callout.Background = Get-WpfColor $bgHex
+        $ct = New-Object System.Windows.Controls.TextBlock
+        $ct.FontSize = 12; $ct.TextWrapping = "Wrap"; $ct.Foreground = Get-WpfColor $fgHex
+        $ct.Text = ("this {0} {1} throughput {2}{3:N0}%" -f $chipWhat, $verb, $sign, $chipPct)
+        $callout.Child = $ct
+        $right.Children.Add($callout) | Out-Null
+    }
+
+    # Total view: list attributes sitting outside +-1 sd
+    if ($key -eq 'total') {
+        $outliers = @(Get-StatsOutliers $res)
+        $right.Children.Add((New-StatsInfoLine "Attributes outside 1 sd:" "#8A8E9E" 12 $true 10)) | Out-Null
+        if ($outliers.Count -eq 0) {
+            $right.Children.Add((New-StatsInfoLine "All attributes within 1 sd of average." "#7A7E92" 12 $false 2)) | Out-Null
+        } else {
+            foreach ($o in $outliers) {
+                $hex = if ($o.Good) { "#7FE0A8" } else { "#E89090" }
+                $zs  = if ($o.Z -ge 0) { "+" } else { "" }
+                $ds  = if ($o.Diff -ge 0) { "+" } else { "" }
+                $tag = if ($o.Good) { "good" } else { "watch" }
+                $u   = if ($o.Unit -ne "") { " " + $o.Unit } else { "" }
+                $right.Children.Add((New-StatsInfoLine ("{0}:  {1:$($o.Fmt)}{2}   {3}{4:$($o.Fmt)}{2} vs mean   {5}{6:N1} sd   ({7})" -f $o.Label, $o.Value, $u, $ds, $o.Diff, $zs, $o.Z, $tag) $hex 12 $false 2)) | Out-Null
+            }
+        }
+    }
+
+    return $card
+}
+
+# Builds the per-card Stats content (bell curve + readout) into $pj.StatsCardPanel
+# for the selected variable. Rendered into the card's right column so the design
+# keeps its position across tabs.
+function Build-PJobStatsContent($pj, [string]$key) {
+    $panel = $pj.StatsCardPanel
+    if ($null -eq $panel) { return }
+    $panel.Children.Clear()
+
+    $res  = Compute-PJobEfficiency $pj
+    $meta = Get-StatsVarMeta $key
+    $val  = Get-StatsCardValue $res $key
+
+    # Design name (the card header is hidden in Stats mode).
+    $panel.Children.Add((New-StatsInfoLine $res.Name "#E2E4EC" 14 $true 0)) | Out-Null
+
+    if (-not $res.HasData -or $null -eq $meta -or $null -eq $val) {
+        $panel.Children.Add((New-StatsInfoLine "No _Data.tsv metrics for this design (not scored)." "#666870" 12 $false 6)) | Out-Null
+        return
+    }
+
+    # Bell curve, scaled to fit the right column.
+    $curve = New-BellCurveCanvas $meta.Mean $meta.Sd $val $meta.Direction $meta.Fmt $meta.Unit
+    $vb = New-Object System.Windows.Controls.Viewbox
+    $vb.Stretch = "Uniform"; $vb.StretchDirection = "Both"
+    $vb.HorizontalAlignment = "Left"; $vb.MaxWidth = 535; $vb.MaxHeight = 225
+    $vb.Child = $curve
+    $panel.Children.Add($vb) | Out-Null
+
+    $dirTxt = if ($meta.Direction -eq 'Higher') { "higher is better" } else { "lower is better" }
+    $panel.Children.Add((New-StatsInfoLine ($meta.Label + " - " + $dirTxt) "#B8BCC8" 12 $false 6)) | Out-Null
+
+    # Efficiency score block (throughput index)
+    $tot = if ($null -ne $res.Total) { [double]$res.Total } else { $null }
+    if ($null -ne $tot) {
+        $scoreRow = New-Object System.Windows.Controls.StackPanel
+        $scoreRow.Orientation = "Horizontal"; $scoreRow.Margin = New-Object System.Windows.Thickness(0,6,0,0)
+        $big = New-Object System.Windows.Controls.TextBlock
+        $big.Text = ("{0:N0}" -f $tot); $big.FontSize = 28; $big.FontWeight = [System.Windows.FontWeights]::Bold
+        $big.Foreground = Get-WpfColor (Get-StatsScoreColor $tot); $big.VerticalAlignment = "Center"
+        $scoreRow.Children.Add($big) | Out-Null
+        $sl = New-Object System.Windows.Controls.StackPanel
+        $sl.Margin = New-Object System.Windows.Thickness(8,0,0,0); $sl.VerticalAlignment = "Center"
+        $sl.Children.Add((New-StatsInfoLine "Efficiency score" "#C0C4D0" 12 $false 0)) | Out-Null
+        $sl.Children.Add((New-StatsInfoLine "100 = avg throughput" "#7A7E92" 11 $false 0)) | Out-Null
+        $scoreRow.Children.Add($sl) | Out-Null
+        $panel.Children.Add($scoreRow) | Out-Null
+    }
+
+    $tpRaw = if ($res.Raw.ContainsKey('throughput')) { [double]$res.Raw['throughput'] } else { $null }
+    if ($null -ne $tpRaw) { $panel.Children.Add((New-StatsInfoLine ("Throughput  {0:N1} obj/day" -f $tpRaw) "#B8BCC8" 12 $false 8)) | Out-Null }
+
+    $z = ($val - $meta.Mean) / [Math]::Max($meta.Sd, 1e-9)
+    $pctile = [Math]::Round((Get-NormalCdf $z) * 100.0)
+    $diff = $val - $meta.Mean
+    $diffSign = if ($diff -ge 0) { "+" } else { "" }
+    $uTxt = if ($meta.Unit -ne "") { " " + $meta.Unit } else { "" }
+    $diffTxt = ("{0}{1:$($meta.Fmt)}{2} vs mean" -f $diffSign, $diff, $uTxt)
+    if ([Math]::Abs($z) -ge 1.0) { $zsg = if ($z -ge 0) { "+" } else { "" }; $diffTxt += ("   ({0}{1:N1} sd)" -f $zsg, $z) }
+    $panel.Children.Add((New-StatsInfoLine ("{0}:  {1:$($meta.Fmt)}{2}" -f $meta.Label, $val, $uTxt) "#C0C4D0" 12 $false 8)) | Out-Null
+    $panel.Children.Add((New-StatsInfoLine ("p{0} on corpus   {1}" -f $pctile, $diffTxt) "#9AA0B0" 12 $false 2)) | Out-Null
+
+    # Throughput-effect callout for the identity keys
+    $chipPct = $null; $chipWhat = ""
+    switch ($key) {
+        'filament_per_unit' { if ($res.MatMult)   { $chipPct = ($res.MatMult   - 1.0) * 100.0; $chipWhat = "filament/unit lever" } }
+        'time_per_gram'     { if ($res.SpeedMult) { $chipPct = ($res.SpeedMult - 1.0) * 100.0; $chipWhat = "speed lever" } }
+        'total'             { if ($res.TpRatio)   { $chipPct = ($res.TpRatio   - 1.0) * 100.0; $chipWhat = "throughput vs baseline" } }
+    }
+    if ($null -ne $chipPct) {
+        $good = ($chipPct -ge 0)
+        $bgHex = if ($good) { "#1E3A2E" } else { "#3A1E1E" }
+        $fgHex = if ($good) { "#7FE0A8" } else { "#E89090" }
+        $verb  = if ($good) { "lifts" } else { "drags" }
+        $sign  = if ($chipPct -ge 0) { "+" } else { "" }
+        $callout = New-Object System.Windows.Controls.Border
+        $callout.CornerRadius = New-Object System.Windows.CornerRadius(4)
+        $callout.Margin = New-Object System.Windows.Thickness(0,8,0,0); $callout.Padding = New-Object System.Windows.Thickness(10,5,10,5)
+        $callout.HorizontalAlignment = "Left"; $callout.Background = Get-WpfColor $bgHex
+        $cct = New-Object System.Windows.Controls.TextBlock
+        $cct.FontSize = 12; $cct.TextWrapping = "Wrap"; $cct.Foreground = Get-WpfColor $fgHex
+        $cct.Text = ("this {0} {1} throughput {2}{3:N0}%" -f $chipWhat, $verb, $sign, $chipPct)
+        $callout.Child = $cct
+        $panel.Children.Add($callout) | Out-Null
+    }
+
+    # Stats Overview: list attributes sitting outside +-1 sd
+    if ($key -eq 'total') {
+        $outliers = @(Get-StatsOutliers $res)
+        $panel.Children.Add((New-StatsInfoLine "Attributes outside 1 sd:" "#8A8E9E" 12 $true 10)) | Out-Null
+        if ($outliers.Count -eq 0) {
+            $panel.Children.Add((New-StatsInfoLine "All attributes within 1 sd of average." "#7A7E92" 12 $false 2)) | Out-Null
+        } else {
+            foreach ($o in $outliers) {
+                $hex = if ($o.Good) { "#7FE0A8" } else { "#E89090" }
+                $zs  = if ($o.Z -ge 0) { "+" } else { "" }
+                $ds  = if ($o.Diff -ge 0) { "+" } else { "" }
+                $tag = if ($o.Good) { "good" } else { "watch" }
+                $u   = if ($o.Unit -ne "") { " " + $o.Unit } else { "" }
+                $panel.Children.Add((New-StatsInfoLine ("{0}:  {1:$($o.Fmt)}{2}   {3}{4:$($o.Fmt)}{2} vs mean   {5}{6:N1} sd   ({7})" -f $o.Label, $o.Value, $u, $ds, $o.Diff, $zs, $o.Z, $tag) $hex 12 $false 2)) | Out-Null
+            }
+        }
+    }
+}
+
+# Flips a single card into Stats mode. The per-card header (with all the File
+# Prep buttons) is HIDDEN (reserved, invisible) and File Prep stays Hidden as the
+# height anchor, so the card keeps its tallest-view height and nothing leaks.
+function Set-PJobStatsMode($pj) {
+    Build-PJobStatsContent $pj $script:StatsSelectedVar
+    # Left column: show the gcode plate (same as Review).
+    if ($pj.GcodeImgPath -and (Test-Path $pj.GcodeImgPath)) {
+        $pj.ReviewCardOverlay.Source     = Load-WpfImage $pj.GcodeImgPath
+        $pj.ReviewCardOverlay.Visibility = "Visible"
+    } elseif ($null -ne $pj.ReviewCardOverlay) {
+        $pj.ReviewCardOverlay.Visibility = "Collapsed"
+    }
+    if ($null -ne $pj.RnOvLeft)  { $pj.RnOvLeft.Visibility  = "Collapsed" }
+    if ($null -ne $pj.RnOvRight) { $pj.RnOvRight.Visibility = "Collapsed" }
+    if ($null -ne $pj.ColorsOverlayStack) { $pj.ColorsOverlayStack.Visibility = "Collapsed" }
+    if ($null -ne $pj.CurrentThumb) { $pj._SavedCurrentThumbVis = $pj.CurrentThumb.Visibility; $pj.CurrentThumb.Visibility = "Collapsed" }
+    # Hide the per-card header (name + all File Prep buttons) - reserve its height
+    # so the card doesn't shrink. Keep File Prep as the Hidden height anchor.
+    if ($null -ne $pj.CardHeaderStack) { $pj.CardHeaderStack.Visibility = "Hidden" }
+    if ($null -ne $pj.FilePrepPanel)   { $pj.FilePrepPanel.Visibility   = "Hidden" }
+    if ($null -ne $pj.EditingPanel)    { $pj.EditingPanel.Visibility    = "Collapsed" }
+    if ($null -ne $pj.ReviewPanel)     { $pj.ReviewPanel.Visibility     = "Collapsed" }
+    if ($null -ne $pj.ReviewFooter)    { $pj.ReviewFooter.Visibility    = "Collapsed" }
+    if ($null -ne $pj.ReviewStatusLabel) { $pj.ReviewStatusLabel.Visibility = "Collapsed" }
+    $pj.RowPanel.BorderBrush = Get-WpfColor "#2A2C35"; $pj.RowPanel.BorderThickness = New-Object System.Windows.Thickness(1)
+    $pj.StatsCardPanel.Visibility = "Visible"
+    $pj._InStats = $true
+}
+
+# Recomputes the avg-efficiency / coverage summary shown in the Stats top bar.
+function Refresh-StatsSummary {
+    if ($null -eq $script:StatsSummaryLbl) { return }
+    $scored = 0; $total = 0; $sum = 0.0
+    foreach ($gpJob in $script:jobs) {
+        foreach ($pj in $gpJob.Parents) {
+            $total++
+            $res = Compute-PJobEfficiency $pj
+            if ($res.HasData -and $null -ne $res.Total) { $scored++; $sum += [double]$res.Total }
+        }
+    }
+    if ($scored -gt 0) {
+        $script:StatsSummaryLbl.Text = "Avg efficiency: {0:N0}  |  {1}/{2} designs have data" -f ($sum / $scored), $scored, $total
+    } else {
+        $script:StatsSummaryLbl.Text = "No designs with extracted _Data.tsv yet"
+    }
+}
+
+# Highlights the selected variable button and rebuilds each card's stats content.
+function Select-StatsVar([string]$key) {
+    $script:StatsSelectedVar = $key
+    foreach ($k in $script:StatsVarButtons.Keys) {
+        $b = $script:StatsVarButtons[$k]
+        $active = ($k -eq $key)
+        $bg = if ($active) { "#2E6E5A" } else { "#252630" }
+        $fg = if ($active) { "#FFFFFF" } else { "#9AA0B0" }
+        $bd = if ($active) { "#3FB48A" } else { "#3A3D50" }
+        $b.Background  = Get-WpfColor $bg
+        $b.Foreground  = Get-WpfColor $fg
+        $b.BorderBrush = Get-WpfColor $bd
+    }
+    if ($script:GlobalMode -eq "Stats") {
+        foreach ($gpJob in $script:jobs) { foreach ($pj in $gpJob.Parents) { Build-PJobStatsContent $pj $key } }
+    }
+}
+
+# Populates the shared Stats top bar (variable toggles + summary). Shown only in
+# Stats mode. No sort control (per Hank).
+function Build-StatsTopBar {
+    $bar = $script:StatsTopBar
+    if ($null -eq $bar) { return }
+    $bar.Children.Clear()
+
+    $title = New-Object System.Windows.Controls.TextBlock
+    $title.Text = "Stats:"; $title.Foreground = Get-WpfColor "#C8CAD4"; $title.FontWeight = [System.Windows.FontWeights]::Bold
+    $title.FontSize = 12; $title.VerticalAlignment = "Center"; $title.Margin = New-Object System.Windows.Thickness(0,0,10,4)
+    $bar.Children.Add($title) | Out-Null
+
+    function New-StatsTopBtn([string]$label, [string]$key) {
+        $b = New-Object System.Windows.Controls.Button
+        $b.Content = $label; $b.Height = 26; $b.MinWidth = 80; $b.FontSize = 12
+        $b.Background = Get-WpfColor "#252630"; $b.Foreground = Get-WpfColor "#9AA0B0"
+        $b.BorderBrush = Get-WpfColor "#3A3D50"; $b.BorderThickness = New-Object System.Windows.Thickness(1)
+        $b.Cursor = [System.Windows.Input.Cursors]::Hand; $b.Margin = New-Object System.Windows.Thickness(0,0,6,4)
+        $b.Padding = New-Object System.Windows.Thickness(8,0,8,0); $b.Tag = $key
+        $b.Add_Click({ Select-StatsVar $this.Tag })
+        $script:StatsVarButtons[$key] = $b
+        return $b
+    }
+    $bar.Children.Add((New-StatsTopBtn "Stats Overview" "total")) | Out-Null
+    # The two throughput factors first (Material = filament/unit, Speed = time/gram),
+    # then the context vars. "throughput" itself is omitted - Stats Overview IS it.
+    $statsOrder = @('filament_per_unit','time_per_gram','objs_per_plate','color_changes','print_time','model_usage')
+    foreach ($k in $statsOrder) { $vv = Get-EffVar $k; if ($vv) { $bar.Children.Add((New-StatsTopBtn $vv.Label $vv.Key)) | Out-Null } }
+
+    $script:StatsSummaryLbl = New-Object System.Windows.Controls.TextBlock
+    $script:StatsSummaryLbl.Text = ""; $script:StatsSummaryLbl.Foreground = Get-WpfColor "#9AA0B0"
+    $script:StatsSummaryLbl.FontSize = 12; $script:StatsSummaryLbl.VerticalAlignment = "Center"
+    $script:StatsSummaryLbl.Margin = New-Object System.Windows.Thickness(16,0,0,4)
+    $bar.Children.Add($script:StatsSummaryLbl) | Out-Null
+
+    Select-StatsVar "total"
+}
+
 function Build-LibrariesPanel {
     # â”€â”€ Root panel: overlaps the ScrollViewer in Grid Row 1 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $outerGrid = $window.Content
@@ -7648,16 +8510,19 @@ function New-ModeButton([string]$label, [int]$width, [string]$bg, [string]$fg, [
 $script:BtnModeFilePr   = New-ModeButton "File Prep" 85  "#3A5080" "#FFFFFF" $true
 $script:BtnModeEditing  = New-ModeButton "Editing"   75  "#252630" "#7A7D90" $false
 $script:BtnModeReview   = New-ModeButton "Review"    70  "#252630" "#7A7D90" $false
+$script:BtnModeStats    = New-ModeButton "Stats"     60  "#252630" "#7A7D90" $false
 $script:BtnModeLibraries = New-ModeButton "Libraries" 80  "#252630" "#7A7D90" $false
 
 $script:BtnModeFilePr.Add_Click({   Set-GlobalMode "FilePr"   })
 $script:BtnModeEditing.Add_Click({  Set-GlobalMode "Editing"  })
 $script:BtnModeReview.Add_Click({   Set-GlobalMode "Review"   })
+$script:BtnModeStats.Add_Click({    Set-GlobalMode "Stats"    })
 $script:BtnModeLibraries.Add_Click({ Write-Log "BtnModeLibraries: clicked"; Set-GlobalMode "Libraries" })
 
 $topModeBar.Children.Add($script:BtnModeFilePr)    | Out-Null
 $topModeBar.Children.Add($script:BtnModeEditing)   | Out-Null
 $topModeBar.Children.Add($script:BtnModeReview)    | Out-Null
+$topModeBar.Children.Add($script:BtnModeStats)     | Out-Null
 
 # --- Merged/Unmerged design filter: two checkboxes pinned to the far left ---
 $lblFilter = New-Object System.Windows.Controls.TextBlock
@@ -7714,6 +8579,9 @@ $headerGrid.Children.Add($centerWrap) | Out-Null
 
 # Build the Libraries panel (attaches itself to the window's root Grid)
 Build-LibrariesPanel | Out-Null
+
+# Populate the shared Stats top bar (Stats is now an in-card mode, not an overlay)
+Build-StatsTopBar
 
 Write-Log "Entering window.ShowDialog()"
 try {
