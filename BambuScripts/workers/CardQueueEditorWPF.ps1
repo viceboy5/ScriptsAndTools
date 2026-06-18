@@ -1129,7 +1129,7 @@ if ($args.Count -gt 0) {
                             <StackPanel Name="TopFilterBar" Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center"/>
                             <StackPanel Name="TopModeBar" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Grid>
-                        <WrapPanel Name="StatsTopBar" Orientation="Horizontal" Margin="0,8,0,0" Visibility="Collapsed"/>
+                        <StackPanel Name="StatsTopBar" Orientation="Vertical" Margin="0,8,0,0" Visibility="Collapsed"/>
                     </StackPanel>
                 </Border>
             </Grid>
@@ -2549,6 +2549,7 @@ function Set-PJobReviewMode($pJob) {
     if ($null -ne $pJob.FilePrepPanel) { $pJob.FilePrepPanel.Visibility = "Hidden" }
     if ($null -ne $pJob.EditingPanel)  { $pJob.EditingPanel.Visibility  = "Collapsed" }
     if ($null -ne $pJob.StatsCardPanel) { $pJob.StatsCardPanel.Visibility = "Collapsed" }
+    if ($pJob._InStats) { Restore-PJobColumns $pJob }
     $pJob._InStats = $false
 }
 
@@ -2571,6 +2572,7 @@ function Set-PJobEditMode($pJob) {
     $pJob.BtnRevertReview.Visibility   = "Collapsed"
     if ($null -ne $pJob.StatsCardPanel) { $pJob.StatsCardPanel.Visibility = "Collapsed" }
     if ($null -ne $pJob.CardHeaderStack) { $pJob.CardHeaderStack.Visibility = "Visible" }
+    if ($pJob._InStats) { Restore-PJobColumns $pJob }
     $pJob._InStats = $false
     # Restore the correct tab panel based on the current global mode. File Prep is
     # the height anchor: Hidden (reserves height) when Editing is active, never Collapsed.
@@ -2741,12 +2743,13 @@ function Set-GlobalMode([string]$mode) {
         }
         if (-not $enterReview) {
             if ($isStats) {
-                # Stats hides ALL the theme-level File Prep controls (like Review does),
-                # leaving just the folder-name readout.
-                if ($null -ne $gpJob.ThemeBar)        { $gpJob.ThemeBar.Visibility        = "Collapsed" }
+                # Stats hides the theme-level File Prep controls but keeps their
+                # HEIGHT reserved (Hidden, not Collapsed) so the theme header stays
+                # the same size as File Prep and the rows below don't creep upward.
+                if ($null -ne $gpJob.ThemeBar)        { $gpJob.ThemeBar.Visibility        = "Hidden" }
                 if ($null -ne $gpJob.EditingThemeBar) { $gpJob.EditingThemeBar.Visibility = "Collapsed" }
-                if ($null -ne $gpJob.RenameGroup)     { $gpJob.RenameGroup.Visibility     = "Collapsed" }
-                if ($null -ne $gpJob.BtnCombineGp)    { $gpJob.BtnCombineGp.Visibility    = "Collapsed" }
+                if ($null -ne $gpJob.RenameGroup)     { $gpJob.RenameGroup.Visibility     = "Hidden" }
+                if ($null -ne $gpJob.BtnCombineGp)    { $gpJob.BtnCombineGp.Visibility    = "Hidden" }
             } else {
                 if ($null -ne $gpJob.ThemeBar)        { $gpJob.ThemeBar.Visibility        = if ($isEditing) { "Collapsed" } else { "Visible"   } }
                 if ($null -ne $gpJob.EditingThemeBar) { $gpJob.EditingThemeBar.Visibility = if ($isEditing) { "Visible"   } else { "Collapsed" } }
@@ -2767,7 +2770,7 @@ function Set-GlobalMode([string]$mode) {
             }
         }
     }
-    if ($isStats -and $null -ne $script:StatsSummaryLbl) { Refresh-StatsSummary }
+    if ($isStats -and $null -ne $script:StatsSummaryPanel) { Refresh-StatsSummary }
     # Pin every card to its captured File Prep height so all tabs share the same
     # footprint (Review may still be taller by its action-button footer).
     if (-not $isLibraries) {
@@ -3010,6 +3013,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         IsMerged = $false
         StatsCardPanel = $null; _InStats = $false; PnlFiles = $null
         ModeHost = $null; CardHeaderStack = $null; _FilePrepHeight = 0
+        PGrid = $null; LeftViewbox = $null
         _GpJob = $gpJob
     }
 
@@ -3030,6 +3034,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pGrid.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{Height=(New-Object System.Windows.GridLength(1, [System.Windows.GridUnitType]::Star))}))
     $pGrid.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{Height=[System.Windows.GridLength]::Auto}))
     $pBorder.Child = $pGrid
+    $pJob.PGrid = $pGrid
 
     # Review-mode footer: bigger Printing Queue / Send to Production buttons,
     # anchored across the full width at the bottom of the card. Populated
@@ -3061,6 +3066,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $viewbox.Child = $leftGrid
 
     [System.Windows.Controls.Grid]::SetColumn($viewbox, 0); $pGrid.Children.Add($viewbox) | Out-Null
+    $pJob.LeftViewbox = $viewbox
 
     # Card panel
     $cardGrid = New-Object System.Windows.Controls.Grid
@@ -6562,24 +6568,34 @@ function Invoke-SaveTagsSection($stack) {
 # and is supplementary - weight 0 so it shows its own bar but is excluded from
 # the blended Total. The remaining vars (objs/plate, color changes, print time,
 # model filament) are plate-level context, kept as light-weight toggles.
+# Slope/R2/ResidSd = the corpus univariate linear fit of throughput (obj/day) vs
+# that variable (n=298), baked in so the per-design "line graph" can draw the
+# trend + 1-SD band + this design's marker without loading the corpus. R2 is the
+# fit strength (only filament/unit + time/gram are true levers; the rest are
+# correlations confounded through them). Throughput is the y-axis (no fit).
 $script:EfficiencyVars = @(
     @{ Key = "throughput";        Label = "Throughput";      Unit = "obj/day"; Baseline = 75.1;  Sd = 17.6; Direction = "Higher"; Weight = 3.0; Fmt = "N1" }
-    @{ Key = "objs_per_plate";    Label = "Objects / Plate"; Unit = "";        Baseline = 90.5;  Sd = 18.1; Direction = "Higher"; Weight = 2.0; Fmt = "N0" }
-    @{ Key = "color_changes";     Label = "Color Changes";   Unit = "";        Baseline = 145.3; Sd = 49.0; Direction = "Lower";  Weight = 1.5; Fmt = "N0" }
-    @{ Key = "filament_per_unit"; Label = "Filament / Unit"; Unit = "g";       Baseline = 3.52;  Sd = 0.60; Direction = "Lower";  Weight = 1.5; Fmt = "N2" }
-    @{ Key = "time_per_gram";     Label = "Time / Gram";     Unit = "min/g";   Baseline = 5.75;  Sd = 0.99; Direction = "Lower";  Weight = 0.0; Fmt = "N2" }
-    @{ Key = "print_time";        Label = "Print Time";      Unit = "h";       Baseline = 30.0;  Sd = 7.5;  Direction = "Lower";  Weight = 1.0; Fmt = "N1" }
-    @{ Key = "model_usage";       Label = "Model Filament";  Unit = "g";       Baseline = 315.0; Sd = 67.1; Direction = "Lower";  Weight = 1.0; Fmt = "N0" }
+    @{ Key = "objs_per_plate";    Label = "Objects / Plate"; Unit = "";        Baseline = 90.5;  Sd = 18.1; Direction = "Higher"; Weight = 2.0; Fmt = "N0"; Slope = 0.362;   R2 = 0.14; ResidSd = 16.4 }
+    @{ Key = "color_changes";     Label = "Color Changes";   Unit = "";        Baseline = 145.3; Sd = 49.0; Direction = "Lower";  Weight = 1.5; Fmt = "N0"; Slope = -0.221;  R2 = 0.38; ResidSd = 13.9 }
+    @{ Key = "filament_per_unit"; Label = "Filament / Unit"; Unit = "g";       Baseline = 3.52;  Sd = 0.60; Direction = "Lower";  Weight = 1.5; Fmt = "N2"; Slope = -20.658; R2 = 0.49; ResidSd = 12.6 }
+    @{ Key = "time_per_gram";     Label = "Time / Gram";     Unit = "min/g";   Baseline = 5.75;  Sd = 0.99; Direction = "Lower";  Weight = 0.0; Fmt = "N2"; Slope = -12.107; R2 = 0.46; ResidSd = 12.9 }
+    @{ Key = "print_time";        Label = "Print Time";      Unit = "h";       Baseline = 30.0;  Sd = 7.5;  Direction = "Lower";  Weight = 1.0; Fmt = "N1"; Slope = -1.499;  R2 = 0.41; ResidSd = 13.6 }
+    @{ Key = "model_usage";       Label = "Model Filament";  Unit = "g";       Baseline = 315.0; Sd = 67.1; Direction = "Lower";  Weight = 1.0; Fmt = "N0"; Slope = -0.048;  R2 = 0.03; ResidSd = 17.3 }
 )
+$script:StatsTpMean = 75.1   # corpus mean throughput (the line graph's y reference)
 
 $script:StatsResults     = @()       # cached per-design computed efficiency
 $script:StatsSelectedVar = "total"   # "total", "decomp", or a var Key
 $script:StatsPanel       = $null
 $script:StatsListPanel   = $null
-$script:StatsSummaryLbl  = $null
-$script:StatsLegendLbl   = $null
+$script:StatsSummaryLbl   = $null
+$script:StatsSummaryPanel = $null
+$script:StatsLegendLbl    = $null
 $script:StatsVarButtons  = @{}
 $script:StatsSortMode    = "fileorder"   # "fileorder" | "throughput" | "percentile" | "name"
+$script:StatsGraphType   = "bell"        # "bell" | "line" - per-design graph style
+$script:StatsShowImages  = $true         # show the plate images in single-graph layout
+$script:StatsAllGraphs   = $false        # $true = drop images, show every variable graph per design
 
 # The headline "Efficiency" score IS the throughput index: throughput is the
 # dependent variable (it correlated 0.948 with the old weighted blend, so the
@@ -6825,7 +6841,14 @@ function New-StatsDecompRow($res) {
 # "total" is the synthetic blended-score distribution (corpus constants above).
 function Get-StatsVarMeta([string]$key) {
     if ($key -eq 'total') {
-        return @{ Mean = $script:StatsTotalBaseline; Sd = $script:StatsTotalSd; Direction = 'Higher'; Unit = ''; Fmt = 'N0'; Label = 'Throughput index' }
+        # The Stats Overview graph shows ACTUAL throughput (real mean ~75 obj/day),
+        # not a normalized index; the 0-100 score is shown separately as the headline.
+        $tp = Get-EffVar 'throughput'
+        if ($null -ne $tp) {
+            $tsd = if ($tp.ContainsKey('Sd')) { [double]$tp.Sd } else { 0.0 }
+            return @{ Mean = [double]$tp.Baseline; Sd = $tsd; Direction = 'Higher'; Unit = $tp.Unit; Fmt = $tp.Fmt; Label = 'Throughput' }
+        }
+        return @{ Mean = 75.1; Sd = 17.6; Direction = 'Higher'; Unit = 'obj/day'; Fmt = 'N1'; Label = 'Throughput' }
     }
     $v = Get-EffVar $key
     if ($null -eq $v) { return $null }
@@ -6833,9 +6856,10 @@ function Get-StatsVarMeta([string]$key) {
     return @{ Mean = [double]$v.Baseline; Sd = $sd; Direction = $v.Direction; Unit = $v.Unit; Fmt = $v.Fmt; Label = $v.Label }
 }
 
-# This design's raw value for the selected variable (or its Total score).
+# This design's raw value for the graph. For the Stats Overview the graph plots
+# ACTUAL throughput (obj/day); the normalized 0-100 score is shown separately.
 function Get-StatsCardValue($res, [string]$key) {
-    if ($key -eq 'total') { if ($null -ne $res.Total) { return [double]$res.Total } else { return $null } }
+    if ($key -eq 'total') { if ($res.Raw.ContainsKey('throughput')) { return [double]$res.Raw['throughput'] } else { return $null } }
     if ($res.Raw.ContainsKey($key)) { return [double]$res.Raw[$key] }
     return $null
 }
@@ -6959,6 +6983,94 @@ function New-BellCurveCanvas([double]$mean, [double]$sd, [double]$value, [string
     $dSign = if ($diff -ge 0) { "+" } else { "" }
     Add-StatsText $cv $mx ($axisY + 26) ($dSign + ("{0:$fmt}" -f $diff) + $uSuffix + " vs mean") $mkHex 13 $true
 
+    return $cv
+}
+
+# Draws throughput (y) vs one variable (x): the corpus trend line + 1-SD band +
+# the corpus-avg-throughput reference, with THIS design marked at (value, its
+# throughput). Weak-fit variables (R2 < 0.20) draw a faint dashed line and a
+# "weak fit" note instead of a confident trend. Returns a Canvas.
+function New-LineGraphCanvas($vdef, [double]$value, [double]$designTp) {
+    $W = 600.0; $H = 250.0
+    $pl = 50.0; $pr = 16.0; $pt = 28.0; $pb = 30.0
+    $plotW = $W - $pl - $pr; $plotH = $H - $pt - $pb
+    $mean  = [double]$vdef.Baseline
+    $sd    = if ($vdef.ContainsKey('Sd'))      { [double]$vdef.Sd }      else { 1.0 }
+    if ($sd -le 0) { $sd = 1.0 }
+    $slope = if ($vdef.ContainsKey('Slope'))   { [double]$vdef.Slope }   else { 0.0 }
+    $rsd   = if ($vdef.ContainsKey('ResidSd')) { [double]$vdef.ResidSd } else { 15.0 }
+    $r2    = if ($vdef.ContainsKey('R2'))      { [double]$vdef.R2 }      else { 0.0 }
+    $tpMean = [double]$script:StatsTpMean
+    $xMin = $mean - 2.0 * $sd; $xMax = $mean + 2.0 * $sd; $xSpan = $xMax - $xMin
+    if ($xSpan -le 0) { $xSpan = 1.0 }
+    $yMin = 20.0; $yMax = 140.0; $ySpan = $yMax - $yMin
+    $weak = ($r2 -lt 0.20)
+    $uSuffix = if ($vdef.Unit -ne "") { " " + $vdef.Unit } else { "" }
+
+    $cv = New-Object System.Windows.Controls.Canvas
+    $cv.Width = $W; $cv.Height = $H
+    $px = { param([double]$x) $pl + (($x - $xMin) / $xSpan) * $plotW }
+    $py = { param([double]$y) $pt + (($yMax - $y) / $ySpan) * $plotH }
+    $clampY = { param([double]$y) [Math]::Max($yMin, [Math]::Min($yMax, $y)) }
+    $lineAt = { param([double]$x) $tpMean + $slope * ($x - $mean) }
+
+    # 1-SD band
+    if (-not $weak) {
+        $poly = New-Object System.Windows.Shapes.Polygon
+        $poly.Fill = Get-WpfColor "#1D9E75"; $poly.Opacity = 0.15
+        $pc = New-Object System.Windows.Media.PointCollection
+        for ($i = 0; $i -le 24; $i++) { $x = $xMin + $xSpan * $i / 24.0; $pc.Add((New-Object System.Windows.Point((& $px $x), (& $py (& $clampY ((& $lineAt $x) + $rsd)))))) }
+        for ($i = 24; $i -ge 0; $i--) { $x = $xMin + $xSpan * $i / 24.0; $pc.Add((New-Object System.Windows.Point((& $px $x), (& $py (& $clampY ((& $lineAt $x) - $rsd)))))) }
+        $poly.Points = $pc
+        $cv.Children.Add($poly) | Out-Null
+    }
+
+    # axes
+    $ax = New-Object System.Windows.Shapes.Line; $ax.X1 = $pl; $ax.Y1 = $pt + $plotH; $ax.X2 = $pl + $plotW; $ax.Y2 = $pt + $plotH; $ax.Stroke = Get-WpfColor "#3A3D50"; $ax.StrokeThickness = 1; $cv.Children.Add($ax) | Out-Null
+    $ay = New-Object System.Windows.Shapes.Line; $ay.X1 = $pl; $ay.Y1 = $pt; $ay.X2 = $pl; $ay.Y2 = $pt + $plotH; $ay.Stroke = Get-WpfColor "#3A3D50"; $ay.StrokeThickness = 1; $cv.Children.Add($ay) | Out-Null
+
+    # corpus-avg-throughput dashed horizontal + y ticks
+    foreach ($yt in @(40, 75, 110)) {
+        $yy = & $py ([double]$yt)
+        $isAvg = ($yt -eq 75)
+        $gl = New-Object System.Windows.Shapes.Line; $gl.X1 = $pl; $gl.Y1 = $yy; $gl.X2 = $pl + $plotW; $gl.Y2 = $yy
+        $glHex = if ($isAvg) { "#6A6E82" } else { "#2C2F3E" }
+        $gl.Stroke = Get-WpfColor $glHex; $gl.StrokeThickness = 1
+        $dc = New-Object System.Windows.Media.DoubleCollection; $dc.Add(2); $dc.Add(3); $gl.StrokeDashArray = $dc
+        $cv.Children.Add($gl) | Out-Null
+        Add-StatsText $cv ($pl - 26) ($yy - 7) ([string]$yt) "#6E7288" 10 $false
+    }
+
+    # regression line
+    $lineHex = if ($weak) { "#54586E" } else { "#1D9E75" }
+    $lineTh  = if ($weak) { 1.5 } else { 2.4 }
+    $rl = New-Object System.Windows.Shapes.Line
+    $rl.X1 = & $px $xMin; $rl.Y1 = & $py (& $clampY (& $lineAt $xMin))
+    $rl.X2 = & $px $xMax; $rl.Y2 = & $py (& $clampY (& $lineAt $xMax))
+    $rl.Stroke = Get-WpfColor $lineHex; $rl.StrokeThickness = $lineTh
+    if ($weak) { $dl = New-Object System.Windows.Media.DoubleCollection; $dl.Add(4); $dl.Add(3); $rl.StrokeDashArray = $dl }
+    $cv.Children.Add($rl) | Out-Null
+
+    # this design's marker
+    $vx = [Math]::Max($xMin, [Math]::Min($xMax, $value))
+    $vy = & $clampY $designTp
+    $mkX = & $px $vx; $mkY = & $py $vy
+    $ml = New-Object System.Windows.Shapes.Line; $ml.X1 = $mkX; $ml.Y1 = $pt; $ml.X2 = $mkX; $ml.Y2 = $pt + $plotH
+    $ml.Stroke = Get-WpfColor "#E0633A"; $ml.StrokeThickness = 1.4
+    $dm = New-Object System.Windows.Media.DoubleCollection; $dm.Add(3); $dm.Add(3); $ml.StrokeDashArray = $dm
+    $cv.Children.Add($ml) | Out-Null
+    $dot = New-Object System.Windows.Shapes.Ellipse; $dot.Width = 11; $dot.Height = 11; $dot.Fill = Get-WpfColor "#EE6A3E"
+    [System.Windows.Controls.Canvas]::SetLeft($dot, $mkX - 5.5); [System.Windows.Controls.Canvas]::SetTop($dot, $mkY - 5.5)
+    $cv.Children.Add($dot) | Out-Null
+
+    # labels
+    Add-StatsText $cv $pl 4 "throughput (obj/day)" "#7A7E92" 10 $false
+    Add-StatsText $cv ($pl + $plotW / 2.0) ($H - 14) ($vdef.Label + $uSuffix) "#9AA0B0" 11 $true
+    Add-StatsText $cv $pl ($H - 14) ("{0:$($vdef.Fmt)}" -f $xMin) "#6E7288" 10 $false
+    Add-StatsText $cv ($pl + $plotW) ($H - 14) ("{0:$($vdef.Fmt)}" -f $xMax) "#6E7288" 10 $false
+    $tierTxt = if ($weak) { "weak fit" } elseif ($r2 -ge 0.40) { "strong fit" } else { "moderate fit" }
+    $tierHex = if ($weak) { "#9AA0B0" } elseif ($r2 -ge 0.40) { "#7FE0A8" } else { "#E8B86A" }
+    Add-StatsText $cv ($pl + $plotW - 150) 4 ("R2 " + ("{0:N2}" -f $r2) + " - " + $tierTxt) $tierHex 11 $false
     return $cv
 }
 
@@ -7140,103 +7252,145 @@ function New-StatsCardRow($res, [string]$key) {
 # Builds the per-card Stats content (bell curve + readout) into $pj.StatsCardPanel
 # for the selected variable. Rendered into the card's right column so the design
 # keeps its position across tabs.
+# Returns the bell or line graph Canvas for a variable per the current graph-type
+# toggle. The line graph only applies to real variables, not the throughput
+# overview ('total'), which always stays a distribution curve.
+function New-StatsGraph($res, [string]$key) {
+    $meta = Get-StatsVarMeta $key
+    $val  = Get-StatsCardValue $res $key
+    if ($null -eq $meta -or $null -eq $val) { return $null }
+    if ($script:StatsGraphType -eq 'line' -and $key -ne 'total') {
+        $vdef = Get-EffVar $key
+        $tp = if ($res.Raw.ContainsKey('throughput')) { [double]$res.Raw['throughput'] } else { $null }
+        if ($null -ne $vdef -and $vdef.ContainsKey('Slope') -and $null -ne $tp) {
+            return (New-LineGraphCanvas $vdef $val $tp)
+        }
+    }
+    return (New-BellCurveCanvas $meta.Mean $meta.Sd $val $meta.Direction $meta.Fmt $meta.Unit)
+}
+
+# A titled mini-graph tile used by the all-graphs layout.
+function New-StatsGraphTile([string]$title, $canvas, [double]$w) {
+    $b = New-Object System.Windows.Controls.Border
+    $b.Background = Get-WpfColor "#15161B"; $b.BorderBrush = Get-WpfColor "#2A2C38"
+    $b.BorderThickness = New-Object System.Windows.Thickness(1); $b.CornerRadius = New-Object System.Windows.CornerRadius(6)
+    $b.Margin = New-Object System.Windows.Thickness(0,0,10,10); $b.Padding = New-Object System.Windows.Thickness(8,6,8,8)
+    $st = New-Object System.Windows.Controls.StackPanel; $st.Orientation = "Vertical"
+    $st.Children.Add((New-StatsInfoLine $title "#C0C4D0" 12 $true 0)) | Out-Null
+    $vb = New-Object System.Windows.Controls.Viewbox; $vb.Stretch = "Uniform"; $vb.StretchDirection = "Both"
+    $vb.Width = $w; $vb.Margin = New-Object System.Windows.Thickness(0,4,0,0); $vb.Child = $canvas
+    $st.Children.Add($vb) | Out-Null
+    $b.Child = $st
+    return $b
+}
+
 function Build-PJobStatsContent($pj, [string]$key) {
     $panel = $pj.StatsCardPanel
     if ($null -eq $panel) { return }
     $panel.Children.Clear()
 
-    $res  = Compute-PJobEfficiency $pj
-    $meta = Get-StatsVarMeta $key
-    $val  = Get-StatsCardValue $res $key
+    $res = Compute-PJobEfficiency $pj
 
     # Design name (the card header is hidden in Stats mode).
     $panel.Children.Add((New-StatsInfoLine $res.Name "#E2E4EC" 14 $true 0)) | Out-Null
-
-    if (-not $res.HasData -or $null -eq $meta -or $null -eq $val) {
+    if (-not $res.HasData) {
         $panel.Children.Add((New-StatsInfoLine "No _Data.tsv metrics for this design (not scored)." "#666870" 12 $false 6)) | Out-Null
         return
     }
 
-    # Bell curve, scaled to fit the right column.
-    $curve = New-BellCurveCanvas $meta.Mean $meta.Sd $val $meta.Direction $meta.Fmt $meta.Unit
+    # ---- All-graphs layout: headline + a tile per variable (throughput larger) ----
+    if ($script:StatsAllGraphs) {
+        $tot = if ($null -ne $res.Total) { [double]$res.Total } else { $null }
+        if ($null -ne $tot) {
+            $tp = if ($res.Raw.ContainsKey('throughput')) { [double]$res.Raw['throughput'] } else { 0.0 }
+            $panel.Children.Add((New-StatsInfoLine ("Efficiency {0:N0} / 100   ({1:N1} obj/day)" -f $tot, $tp) (Get-StatsScoreColor $tot) 14 $true 4)) | Out-Null
+        }
+        $grid = New-Object System.Windows.Controls.WrapPanel
+        $grid.Orientation = "Horizontal"; $grid.Margin = New-Object System.Windows.Thickness(0,6,0,0)
+        foreach ($k in @('total','filament_per_unit','time_per_gram','objs_per_plate','color_changes','print_time','model_usage')) {
+            $g = New-StatsGraph $res $k
+            if ($null -eq $g) { continue }
+            $w = if ($k -eq 'total') { 560.0 } else { 400.0 }
+            $t = if ($k -eq 'total') { "Throughput (obj/day)" } else { (Get-EffVar $k).Label }
+            $grid.Children.Add((New-StatsGraphTile $t $g $w)) | Out-Null
+        }
+        $panel.Children.Add($grid) | Out-Null
+        return
+    }
+
+    # ---- Single-graph layout ----
+    $meta = Get-StatsVarMeta $key
+    $val  = Get-StatsCardValue $res $key
+    if ($null -eq $meta -or $null -eq $val) {
+        $panel.Children.Add((New-StatsInfoLine "No data for this variable." "#666870" 12 $false 6)) | Out-Null
+        return
+    }
+    $g = New-StatsGraph $res $key
     $vb = New-Object System.Windows.Controls.Viewbox
     $vb.Stretch = "Uniform"; $vb.StretchDirection = "Both"
-    $vb.HorizontalAlignment = "Left"; $vb.MaxWidth = 535; $vb.MaxHeight = 225
-    $vb.Child = $curve
+    $vb.HorizontalAlignment = "Left"; $vb.MaxWidth = 600; $vb.MaxHeight = 250
+    $vb.Child = $g
     $panel.Children.Add($vb) | Out-Null
 
-    $dirTxt = if ($meta.Direction -eq 'Higher') { "higher is better" } else { "lower is better" }
-    $panel.Children.Add((New-StatsInfoLine ($meta.Label + " - " + $dirTxt) "#B8BCC8" 12 $false 6)) | Out-Null
-
-    # Efficiency score block (throughput index)
-    $tot = if ($null -ne $res.Total) { [double]$res.Total } else { $null }
-    if ($null -ne $tot) {
-        $scoreRow = New-Object System.Windows.Controls.StackPanel
-        $scoreRow.Orientation = "Horizontal"; $scoreRow.Margin = New-Object System.Windows.Thickness(0,6,0,0)
-        $big = New-Object System.Windows.Controls.TextBlock
-        $big.Text = ("{0:N0}" -f $tot); $big.FontSize = 28; $big.FontWeight = [System.Windows.FontWeights]::Bold
-        $big.Foreground = Get-WpfColor (Get-StatsScoreColor $tot); $big.VerticalAlignment = "Center"
-        $scoreRow.Children.Add($big) | Out-Null
-        $sl = New-Object System.Windows.Controls.StackPanel
-        $sl.Margin = New-Object System.Windows.Thickness(8,0,0,0); $sl.VerticalAlignment = "Center"
-        $sl.Children.Add((New-StatsInfoLine "Efficiency score" "#C0C4D0" 12 $false 0)) | Out-Null
-        $sl.Children.Add((New-StatsInfoLine "100 = avg throughput" "#7A7E92" 11 $false 0)) | Out-Null
-        $scoreRow.Children.Add($sl) | Out-Null
-        $panel.Children.Add($scoreRow) | Out-Null
-    }
-
-    $tpRaw = if ($res.Raw.ContainsKey('throughput')) { [double]$res.Raw['throughput'] } else { $null }
-    if ($null -ne $tpRaw) { $panel.Children.Add((New-StatsInfoLine ("Throughput  {0:N1} obj/day" -f $tpRaw) "#B8BCC8" 12 $false 8)) | Out-Null }
-
-    $z = ($val - $meta.Mean) / [Math]::Max($meta.Sd, 1e-9)
-    $pctile = [Math]::Round((Get-NormalCdf $z) * 100.0)
-    $diff = $val - $meta.Mean
-    $diffSign = if ($diff -ge 0) { "+" } else { "" }
-    $uTxt = if ($meta.Unit -ne "") { " " + $meta.Unit } else { "" }
-    $diffTxt = ("{0}{1:$($meta.Fmt)}{2} vs mean" -f $diffSign, $diff, $uTxt)
-    if ([Math]::Abs($z) -ge 1.0) { $zsg = if ($z -ge 0) { "+" } else { "" }; $diffTxt += ("   ({0}{1:N1} sd)" -f $zsg, $z) }
-    $panel.Children.Add((New-StatsInfoLine ("{0}:  {1:$($meta.Fmt)}{2}" -f $meta.Label, $val, $uTxt) "#C0C4D0" 12 $false 8)) | Out-Null
-    $panel.Children.Add((New-StatsInfoLine ("p{0} on corpus   {1}" -f $pctile, $diffTxt) "#9AA0B0" 12 $false 2)) | Out-Null
-
-    # Throughput-effect callout for the identity keys
-    $chipPct = $null; $chipWhat = ""
-    switch ($key) {
-        'filament_per_unit' { if ($res.MatMult)   { $chipPct = ($res.MatMult   - 1.0) * 100.0; $chipWhat = "filament/unit lever" } }
-        'time_per_gram'     { if ($res.SpeedMult) { $chipPct = ($res.SpeedMult - 1.0) * 100.0; $chipWhat = "speed lever" } }
-        'total'             { if ($res.TpRatio)   { $chipPct = ($res.TpRatio   - 1.0) * 100.0; $chipWhat = "throughput vs baseline" } }
-    }
-    if ($null -ne $chipPct) {
-        $good = ($chipPct -ge 0)
-        $bgHex = if ($good) { "#1E3A2E" } else { "#3A1E1E" }
-        $fgHex = if ($good) { "#7FE0A8" } else { "#E89090" }
-        $verb  = if ($good) { "lifts" } else { "drags" }
-        $sign  = if ($chipPct -ge 0) { "+" } else { "" }
-        $callout = New-Object System.Windows.Controls.Border
-        $callout.CornerRadius = New-Object System.Windows.CornerRadius(4)
-        $callout.Margin = New-Object System.Windows.Thickness(0,8,0,0); $callout.Padding = New-Object System.Windows.Thickness(10,5,10,5)
-        $callout.HorizontalAlignment = "Left"; $callout.Background = Get-WpfColor $bgHex
-        $cct = New-Object System.Windows.Controls.TextBlock
-        $cct.FontSize = 12; $cct.TextWrapping = "Wrap"; $cct.Foreground = Get-WpfColor $fgHex
-        $cct.Text = ("this {0} {1} throughput {2}{3:N0}%" -f $chipWhat, $verb, $sign, $chipPct)
-        $callout.Child = $cct
-        $panel.Children.Add($callout) | Out-Null
-    }
-
-    # Stats Overview: list attributes sitting outside +-1 sd
+    # No "X - higher/lower is better" title - the graph's green/red shading shows it.
     if ($key -eq 'total') {
+        # Headline normalized efficiency score (0-100, 100 = corpus-average throughput).
+        $tot = if ($null -ne $res.Total) { [double]$res.Total } else { $null }
+        if ($null -ne $tot) {
+            $scoreRow = New-Object System.Windows.Controls.StackPanel
+            $scoreRow.Orientation = "Horizontal"; $scoreRow.Margin = New-Object System.Windows.Thickness(0,8,0,0)
+            $big = New-Object System.Windows.Controls.TextBlock
+            $big.Text = ("{0:N0}" -f $tot); $big.FontSize = 30; $big.FontWeight = [System.Windows.FontWeights]::Bold
+            $big.Foreground = Get-WpfColor (Get-StatsScoreColor $tot); $big.VerticalAlignment = "Center"
+            $scoreRow.Children.Add($big) | Out-Null
+            $sl = New-Object System.Windows.Controls.StackPanel
+            $sl.Margin = New-Object System.Windows.Thickness(8,0,0,0); $sl.VerticalAlignment = "Center"
+            $sl.Children.Add((New-StatsInfoLine "Efficiency score" "#C0C4D0" 12 $false 0)) | Out-Null
+            $sl.Children.Add((New-StatsInfoLine "100 = avg throughput" "#7A7E92" 11 $false 0)) | Out-Null
+            $scoreRow.Children.Add($sl) | Out-Null
+            $panel.Children.Add($scoreRow) | Out-Null
+        }
+        # Compact attributes-outside-1sd list: "Label: value unit, (+/-diff)".
         $outliers = @(Get-StatsOutliers $res)
-        $panel.Children.Add((New-StatsInfoLine "Attributes outside 1 sd:" "#8A8E9E" 12 $true 10)) | Out-Null
+        $panel.Children.Add((New-StatsInfoLine "Attributes outside 1 sd:" "#8A8E9E" 12 $true 14)) | Out-Null
         if ($outliers.Count -eq 0) {
-            $panel.Children.Add((New-StatsInfoLine "All attributes within 1 sd of average." "#7A7E92" 12 $false 2)) | Out-Null
+            $panel.Children.Add((New-StatsInfoLine "All within 1 sd of average." "#7A7E92" 12 $false 4)) | Out-Null
         } else {
             foreach ($o in $outliers) {
                 $hex = if ($o.Good) { "#7FE0A8" } else { "#E89090" }
-                $zs  = if ($o.Z -ge 0) { "+" } else { "" }
                 $ds  = if ($o.Diff -ge 0) { "+" } else { "" }
-                $tag = if ($o.Good) { "good" } else { "watch" }
                 $u   = if ($o.Unit -ne "") { " " + $o.Unit } else { "" }
-                $panel.Children.Add((New-StatsInfoLine ("{0}:  {1:$($o.Fmt)}{2}   {3}{4:$($o.Fmt)}{2} vs mean   {5}{6:N1} sd   ({7})" -f $o.Label, $o.Value, $u, $ds, $o.Diff, $zs, $o.Z, $tag) $hex 12 $false 2)) | Out-Null
+                $panel.Children.Add((New-StatsInfoLine ("{0}: {1:$($o.Fmt)}{2}, ({3}{4:$($o.Fmt)})" -f $o.Label, $o.Value, $u, $ds, $o.Diff) $hex 13 $false 3)) | Out-Null
             }
+        }
+    } else {
+        # Per-variable: compact value + delta line, then a throughput-effect callout
+        # for the two decomposition factors.
+        $diff = $val - $meta.Mean
+        $ds = if ($diff -ge 0) { "+" } else { "" }
+        $u  = if ($meta.Unit -ne "") { " " + $meta.Unit } else { "" }
+        $panel.Children.Add((New-StatsInfoLine ("{0}: {1:$($meta.Fmt)}{2}, ({3}{4:$($meta.Fmt)})" -f $meta.Label, $val, $u, $ds, $diff) "#C8CCD8" 14 $true 8)) | Out-Null
+
+        $chipPct = $null; $chipWhat = ""
+        switch ($key) {
+            'filament_per_unit' { if ($res.MatMult)   { $chipPct = ($res.MatMult   - 1.0) * 100.0; $chipWhat = "filament/unit" } }
+            'time_per_gram'     { if ($res.SpeedMult) { $chipPct = ($res.SpeedMult - 1.0) * 100.0; $chipWhat = "time/gram" } }
+        }
+        if ($null -ne $chipPct) {
+            $good = ($chipPct -ge 0)
+            $bgHex = if ($good) { "#1E3A2E" } else { "#3A1E1E" }
+            $fgHex = if ($good) { "#7FE0A8" } else { "#E89090" }
+            $verb  = if ($good) { "lifts" } else { "drags" }
+            $sign  = if ($chipPct -ge 0) { "+" } else { "" }
+            $callout = New-Object System.Windows.Controls.Border
+            $callout.CornerRadius = New-Object System.Windows.CornerRadius(4)
+            $callout.Margin = New-Object System.Windows.Thickness(0,8,0,0); $callout.Padding = New-Object System.Windows.Thickness(10,5,10,5)
+            $callout.HorizontalAlignment = "Left"; $callout.Background = Get-WpfColor $bgHex
+            $cct = New-Object System.Windows.Controls.TextBlock
+            $cct.FontSize = 12; $cct.TextWrapping = "Wrap"; $cct.Foreground = Get-WpfColor $fgHex
+            $cct.Text = ("{0} {1} throughput {2}{3:N0}%" -f $chipWhat, $verb, $sign, $chipPct)
+            $callout.Child = $cct
+            $panel.Children.Add($callout) | Out-Null
         }
     }
 }
@@ -7267,25 +7421,85 @@ function Set-PJobStatsMode($pj) {
     if ($null -ne $pj.ReviewStatusLabel) { $pj.ReviewStatusLabel.Visibility = "Collapsed" }
     $pj.RowPanel.BorderBrush = Get-WpfColor "#2A2C35"; $pj.RowPanel.BorderThickness = New-Object System.Windows.Thickness(1)
     $pj.StatsCardPanel.Visibility = "Visible"
+
+    # All-graphs view drops the left plate column and lets the stats content span
+    # the whole card width.
+    $hideImages = [bool]$script:StatsAllGraphs
+    if ($null -ne $pj.LeftViewbox) { $pj.LeftViewbox.Visibility = if ($hideImages) { "Collapsed" } else { "Visible" } }
+    if ($null -ne $pj.PGrid) {
+        if ($hideImages) {
+            $pj.PGrid.ColumnDefinitions[0].Width = New-Object System.Windows.GridLength(0)
+            $pj.PGrid.ColumnDefinitions[1].Width = New-Object System.Windows.GridLength(1, [System.Windows.GridUnitType]::Star)
+        } else {
+            $pj.PGrid.ColumnDefinitions[0].Width = New-Object System.Windows.GridLength(1, [System.Windows.GridUnitType]::Star)
+            $pj.PGrid.ColumnDefinitions[1].Width = New-Object System.Windows.GridLength(560)
+        }
+    }
     $pj._InStats = $true
 }
 
-# Recomputes the avg-efficiency / coverage summary shown in the Stats top bar.
+# Restores the card's default two-column layout (left plate image + 560 content)
+# when leaving Stats mode.
+function Restore-PJobColumns($pj) {
+    if ($null -ne $pj.LeftViewbox) { $pj.LeftViewbox.Visibility = "Visible" }
+    if ($null -ne $pj.PGrid) {
+        $pj.PGrid.ColumnDefinitions[0].Width = New-Object System.Windows.GridLength(1, [System.Windows.GridUnitType]::Star)
+        $pj.PGrid.ColumnDefinitions[1].Width = New-Object System.Windows.GridLength(560)
+    }
+}
+
+# Recomputes the Stats top-bar summary: non-normalized avg throughput across all
+# loaded designs, plus the average over/under vs the corpus baseline for every
+# measured variable, color-coded green (better than corpus) / red (worse).
 function Refresh-StatsSummary {
-    if ($null -eq $script:StatsSummaryLbl) { return }
-    $scored = 0; $total = 0; $sum = 0.0
+    $panel = $script:StatsSummaryPanel
+    if ($null -eq $panel) { return }
+    $panel.Children.Clear()
+
+    $rows = New-Object System.Collections.Generic.List[object]
+    $total = 0
     foreach ($gpJob in $script:jobs) {
         foreach ($pj in $gpJob.Parents) {
             $total++
             $res = Compute-PJobEfficiency $pj
-            if ($res.HasData -and $null -ne $res.Total) { $scored++; $sum += [double]$res.Total }
+            if ($res.HasData) { $rows.Add($res) | Out-Null }
         }
     }
-    if ($scored -gt 0) {
-        $script:StatsSummaryLbl.Text = "Avg efficiency: {0:N0}  |  {1}/{2} designs have data" -f ($sum / $scored), $scored, $total
-    } else {
-        $script:StatsSummaryLbl.Text = "No designs with extracted _Data.tsv yet"
+    $scored = $rows.Count
+    if ($scored -eq 0) {
+        $panel.Children.Add((New-StatsInfoLine "No designs with extracted _Data.tsv yet" "#9AA0B0" 14 $false 0)) | Out-Null
+        return
     }
+
+    # Line 1: avg throughput (non-normalized, obj/day).
+    $tpVals = @($rows | Where-Object { $_.Raw.ContainsKey('throughput') } | ForEach-Object { [double]$_.Raw['throughput'] })
+    $avgTp = if ($tpVals.Count -gt 0) { ($tpVals | Measure-Object -Average).Average } else { 0.0 }
+    $panel.Children.Add((New-StatsInfoLine ("Avg throughput {0:N1} obj/day   ({1}/{2} designs scored)" -f $avgTp, $scored, $total) "#C8CCD8" 14 $true 0)) | Out-Null
+
+    # Line 2: "Avg vs corpus:" + one colored chip per measured variable.
+    $row = New-Object System.Windows.Controls.WrapPanel
+    $row.Orientation = "Horizontal"; $row.Margin = New-Object System.Windows.Thickness(0,3,0,0)
+    $lbl = New-Object System.Windows.Controls.TextBlock
+    $lbl.Text = "Avg vs corpus:"; $lbl.Foreground = Get-WpfColor "#8A8E9E"; $lbl.FontSize = 14
+    $lbl.Margin = New-Object System.Windows.Thickness(0,0,12,0); $lbl.VerticalAlignment = "Center"
+    $row.Children.Add($lbl) | Out-Null
+
+    foreach ($v in $script:EfficiencyVars) {
+        if ($v.Key -eq 'throughput') { continue }   # throughput is the headline line
+        $vals = @($rows | Where-Object { $_.Raw.ContainsKey($v.Key) } | ForEach-Object { [double]$_.Raw[$v.Key] })
+        if ($vals.Count -eq 0) { continue }
+        $ou = (($vals | Measure-Object -Average).Average) - [double]$v.Baseline
+        $good = ($v.Direction -eq 'Higher' -and $ou -gt 0) -or ($v.Direction -eq 'Lower' -and $ou -lt 0)
+        $hex = if ([Math]::Abs($ou) -lt 1e-9) { "#9AA0B0" } elseif ($good) { "#7FE0A8" } else { "#E89090" }
+        $sign = if ($ou -ge 0) { "+" } else { "" }
+        $u = if ($v.Unit -ne "") { " " + $v.Unit } else { "" }
+        $t = New-Object System.Windows.Controls.TextBlock
+        $t.Text = ("{0} {1}{2:$($v.Fmt)}{3}" -f $v.Label, $sign, $ou, $u)
+        $t.Foreground = Get-WpfColor $hex; $t.FontSize = 14
+        $t.Margin = New-Object System.Windows.Thickness(0,0,16,0); $t.VerticalAlignment = "Center"
+        $row.Children.Add($t) | Out-Null
+    }
+    $panel.Children.Add($row) | Out-Null
 }
 
 # Highlights the selected variable button and rebuilds each card's stats content.
@@ -7306,17 +7520,42 @@ function Select-StatsVar([string]$key) {
     }
 }
 
-# Populates the shared Stats top bar (variable toggles + summary). Shown only in
-# Stats mode. No sort control (per Hank).
+# Populates the shared Stats top bar: a row of variable toggles, then a queue
+# summary block (avg throughput + average over/under per measured variable).
+# Shown only in Stats mode. No sort control (per Hank).
+# Re-applies the current Stats view (graph type / images / all-graphs) to every
+# loaded card. No-op outside Stats mode.
+function Apply-StatsView {
+    if ($script:GlobalMode -ne "Stats") { return }
+    foreach ($gpJob in $script:jobs) { foreach ($pj in $gpJob.Parents) { Set-PJobStatsMode $pj } }
+}
+
+# Switches the per-design graph style (bell curve vs throughput line graph).
+function Set-StatsGraphType([string]$t) {
+    $script:StatsGraphType = $t
+    foreach ($pair in @(@{ B = $script:BtnGraphBell; K = 'bell' }, @{ B = $script:BtnGraphLine; K = 'line' })) {
+        if ($null -eq $pair.B) { continue }
+        $active = ($pair.K -eq $t)
+        $bg = if ($active) { "#2E6E5A" } else { "#252630" }
+        $fg = if ($active) { "#FFFFFF" } else { "#9AA0B0" }
+        $bd = if ($active) { "#3FB48A" } else { "#3A3D50" }
+        $pair.B.Background = Get-WpfColor $bg; $pair.B.Foreground = Get-WpfColor $fg; $pair.B.BorderBrush = Get-WpfColor $bd
+    }
+    Apply-StatsView
+}
+
 function Build-StatsTopBar {
     $bar = $script:StatsTopBar
     if ($null -eq $bar) { return }
     $bar.Children.Clear()
 
+    $btnRow = New-Object System.Windows.Controls.WrapPanel
+    $btnRow.Orientation = "Horizontal"
+
     $title = New-Object System.Windows.Controls.TextBlock
     $title.Text = "Stats:"; $title.Foreground = Get-WpfColor "#C8CAD4"; $title.FontWeight = [System.Windows.FontWeights]::Bold
     $title.FontSize = 12; $title.VerticalAlignment = "Center"; $title.Margin = New-Object System.Windows.Thickness(0,0,10,4)
-    $bar.Children.Add($title) | Out-Null
+    $btnRow.Children.Add($title) | Out-Null
 
     function New-StatsTopBtn([string]$label, [string]$key) {
         $b = New-Object System.Windows.Controls.Button
@@ -7329,18 +7568,49 @@ function Build-StatsTopBar {
         $script:StatsVarButtons[$key] = $b
         return $b
     }
-    $bar.Children.Add((New-StatsTopBtn "Stats Overview" "total")) | Out-Null
+    $btnRow.Children.Add((New-StatsTopBtn "Stats Overview" "total")) | Out-Null
     # The two throughput factors first (Material = filament/unit, Speed = time/gram),
     # then the context vars. "throughput" itself is omitted - Stats Overview IS it.
     $statsOrder = @('filament_per_unit','time_per_gram','objs_per_plate','color_changes','print_time','model_usage')
-    foreach ($k in $statsOrder) { $vv = Get-EffVar $k; if ($vv) { $bar.Children.Add((New-StatsTopBtn $vv.Label $vv.Key)) | Out-Null } }
+    foreach ($k in $statsOrder) { $vv = Get-EffVar $k; if ($vv) { $btnRow.Children.Add((New-StatsTopBtn $vv.Label $vv.Key)) | Out-Null } }
+    $bar.Children.Add($btnRow) | Out-Null
 
-    $script:StatsSummaryLbl = New-Object System.Windows.Controls.TextBlock
-    $script:StatsSummaryLbl.Text = ""; $script:StatsSummaryLbl.Foreground = Get-WpfColor "#9AA0B0"
-    $script:StatsSummaryLbl.FontSize = 12; $script:StatsSummaryLbl.VerticalAlignment = "Center"
-    $script:StatsSummaryLbl.Margin = New-Object System.Windows.Thickness(16,0,0,4)
-    $bar.Children.Add($script:StatsSummaryLbl) | Out-Null
+    # Controls row: graph type (Bell/Line) + images / all-graphs toggles.
+    $ctrlRow = New-Object System.Windows.Controls.WrapPanel
+    $ctrlRow.Orientation = "Horizontal"; $ctrlRow.Margin = New-Object System.Windows.Thickness(0,2,0,4)
+    $gl = New-Object System.Windows.Controls.TextBlock
+    $gl.Text = "Graph:"; $gl.Foreground = Get-WpfColor "#9AA0B0"; $gl.FontSize = 12
+    $gl.VerticalAlignment = "Center"; $gl.Margin = New-Object System.Windows.Thickness(0,0,6,0)
+    $ctrlRow.Children.Add($gl) | Out-Null
+    function New-GtBtn([string]$label, [string]$k) {
+        $b = New-Object System.Windows.Controls.Button
+        $b.Content = $label; $b.Height = 26; $b.MinWidth = 56; $b.FontSize = 12
+        $b.Background = Get-WpfColor "#252630"; $b.Foreground = Get-WpfColor "#9AA0B0"
+        $b.BorderBrush = Get-WpfColor "#3A3D50"; $b.BorderThickness = New-Object System.Windows.Thickness(1)
+        $b.Cursor = [System.Windows.Input.Cursors]::Hand; $b.Margin = New-Object System.Windows.Thickness(0,0,6,0)
+        $b.Padding = New-Object System.Windows.Thickness(8,0,8,0); $b.Tag = $k
+        $b.Add_Click({ Set-StatsGraphType $this.Tag })
+        return $b
+    }
+    $script:BtnGraphBell = New-GtBtn "Bell" "bell"; $ctrlRow.Children.Add($script:BtnGraphBell) | Out-Null
+    $script:BtnGraphLine = New-GtBtn "Line" "line"; $ctrlRow.Children.Add($script:BtnGraphLine) | Out-Null
 
+    $chkAll = New-Object System.Windows.Controls.CheckBox
+    $chkAll.Content = "All graphs (no images)"; $chkAll.Foreground = Get-WpfColor "#C0C4D0"; $chkAll.FontSize = 12
+    $chkAll.IsChecked = $script:StatsAllGraphs; $chkAll.VerticalAlignment = "Center"
+    $chkAll.Margin = New-Object System.Windows.Thickness(16,0,0,0)
+    $chkAll.Add_Click({ $script:StatsAllGraphs = [bool]$this.IsChecked; Apply-StatsView })
+    $ctrlRow.Children.Add($chkAll) | Out-Null
+    $bar.Children.Add($ctrlRow) | Out-Null
+
+    # Summary block (avg throughput + color-coded per-variable over/under), filled
+    # by Refresh-StatsSummary.
+    $script:StatsSummaryPanel = New-Object System.Windows.Controls.StackPanel
+    $script:StatsSummaryPanel.Orientation = "Vertical"
+    $script:StatsSummaryPanel.Margin = New-Object System.Windows.Thickness(0,2,0,2)
+    $bar.Children.Add($script:StatsSummaryPanel) | Out-Null
+
+    Set-StatsGraphType $script:StatsGraphType   # set initial Bell/Line highlight
     Select-StatsVar "total"
 }
 
