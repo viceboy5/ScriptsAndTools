@@ -391,6 +391,47 @@ try {
                 result.Add(new MapBounds { Bounds = new Rectangle(minX[a]-2, minY[a]-2, maxX[a]-minX[a]+4, maxY[a]-minY[a]+4), BoxColor = Color.FromArgb(a) });
             return result;
         }
+
+        // Recolor every distinct non-transparent color in the pick map to a random
+        // one (stable per original color). Uses LockBits + a byte buffer so the
+        // whole image is processed in one compiled pass instead of per-pixel
+        // GetPixel/SetPixel calls (which are ~100x slower from PowerShell).
+        public static bool RandomizePick(string sourcePath, string destPath) {
+            try {
+                using (Bitmap bmp = new Bitmap(sourcePath)) {
+                    int w = bmp.Width, h = bmp.Height;
+                    var data = bmp.LockBits(new Rectangle(0, 0, w, h),
+                        System.Drawing.Imaging.ImageLockMode.ReadWrite,
+                        System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                    try {
+                        int stride = data.Stride, bytes = stride * h;
+                        byte[] buf = new byte[bytes];
+                        System.Runtime.InteropServices.Marshal.Copy(data.Scan0, buf, 0, bytes);
+                        var map = new Dictionary<int, int>();
+                        var rng = new Random();
+                        for (int y = 0; y < h; y++) {
+                            int row = y * stride;
+                            for (int x = 0; x < w; x++) {
+                                int i = row + x * 4;        // 32bppArgb byte order: B,G,R,A
+                                if (buf[i + 3] < 10) continue;
+                                int key = (buf[i+2] << 16) | (buf[i+1] << 8) | buf[i];
+                                int packed;
+                                if (!map.TryGetValue(key, out packed)) {
+                                    packed = (rng.Next(20,256) << 16) | (rng.Next(20,256) << 8) | rng.Next(20,256);
+                                    map[key] = packed;
+                                }
+                                buf[i]   = (byte)(packed & 0xFF);
+                                buf[i+1] = (byte)((packed >> 8) & 0xFF);
+                                buf[i+2] = (byte)((packed >> 16) & 0xFF);
+                            }
+                        }
+                        System.Runtime.InteropServices.Marshal.Copy(buf, 0, data.Scan0, bytes);
+                    } finally { bmp.UnlockBits(data); }
+                    bmp.Save(destPath);
+                }
+                return true;
+            } catch { return false; }
+        }
     }
 '@ -ReferencedAssemblies "System.Drawing"
 } catch {}
@@ -969,6 +1010,11 @@ function SmartFill([string]$anchorName, [string]$gpName) {
 }
 
 function Invoke-RandomizePickColors($sourcePath, $destPath) {
+    # Fast compiled path (LockBits). Falls back to the slow per-pixel loop only if
+    # the C# helper isn't available for some reason.
+    try {
+        if ([FastMergeMap]::RandomizePick($sourcePath, $destPath)) { return $true }
+    } catch {}
     $rng = New-Object System.Random
     try {
         $bmp = New-Object System.Drawing.Bitmap($sourcePath)
@@ -1164,6 +1210,8 @@ $topModeBar     = $window.FindName("TopModeBar")
 $topFilterBar   = $window.FindName("TopFilterBar")
 $script:StatsTopBar = $window.FindName("StatsTopBar")   # shared Stats variable toggles
 $scrollViewer   = $mainStack.Parent   # ScrollViewer wrapping MainStack
+# Load deferred images / Stats graphs for cards as they scroll into view.
+$scrollViewer.Add_ScrollChanged({ Render-VisibleCards })
 $script:LibrariesPanel = $null        # built later by Build-LibrariesPanel
 
 # Global workspace mode: "FilePr" | "Editing" | "Review"
@@ -2523,6 +2571,7 @@ function Set-PJobReviewMode($pJob) {
     # hide the color-edit overlay and [CURRENT] thumbnail, but keep the
     # randomized Pick.png panel visible. Also hide the Re-Nest editor's
     # preview/axis-picker images.
+    Ensure-PJobGcodeImage $pJob
     if ($pJob.GcodeImgPath -and (Test-Path $pJob.GcodeImgPath)) {
         $pJob.ReviewCardOverlay.Source     = Load-WpfImage $pJob.GcodeImgPath
         $pJob.ReviewCardOverlay.Visibility = "Visible"
@@ -2771,6 +2820,12 @@ function Set-GlobalMode([string]$mode) {
         }
     }
     if ($isStats -and $null -ne $script:StatsSummaryPanel) { Refresh-StatsSummary }
+    # Load deferred images (and, in Stats, graphs) only for cards in the viewport,
+    # after layout settles.
+    if ($isStats) { Invalidate-StatsContent }
+    if (-not $isLibraries) {
+        $window.Dispatcher.BeginInvoke([System.Action]{ Render-VisibleCards }, [System.Windows.Threading.DispatcherPriority]::Background) | Out-Null
+    }
     # Pin every card to its captured File Prep height so all tabs share the same
     # footprint (Review may still be taller by its action-button footer).
     if (-not $isLibraries) {
@@ -2865,6 +2920,7 @@ function Find-SiblingSkU([string]$folderPath, [string]$designName) {
 function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $tempWork = Join-Path $env:TEMP ("LiveCard_" + [guid]::NewGuid().ToString().Substring(0,8))
     New-Item -ItemType Directory -Path $tempWork | Out-Null
+    $swPJob = [System.Diagnostics.Stopwatch]::StartNew(); $tExtract = 0; $tColor = 0; $tPickMs = 0   # PERF timing
 
     $isZip3mf = $anchorFile.Extension -imatch '\.3mf$' -and $anchorFile.Name -notmatch '(?i)\.gcode\.3mf$'
     if ($isZip3mf) {
@@ -2884,6 +2940,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         try { [System.IO.Compression.ZipFile]::ExtractToDirectory($colorFile.FullName, $colorTempWork) } catch {}
         $colorWorkDir = $colorTempWork
     }
+    $tExtract = $swPJob.ElapsedMilliseconds   # PERF: time spent extracting 3mf(s)
 
     $activeSlots = New-Object System.Collections.ArrayList
 
@@ -2986,6 +3043,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     if ($null -ne $colorTempWork -and (Test-Path $colorTempWork)) {
         try { Remove-Item -Path $colorTempWork -Recurse -Force -ErrorAction SilentlyContinue } catch {}
     }
+    $tColor = $swPJob.ElapsedMilliseconds   # PERF: time through color parse
 
     $pJob = @{
         FolderPath = $parentPath; AnchorFile = $anchorFile; TempWork = $tempWork
@@ -3013,7 +3071,8 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         IsMerged = $false
         StatsCardPanel = $null; _InStats = $false; PnlFiles = $null
         ModeHost = $null; CardHeaderStack = $null; _FilePrepHeight = 0
-        PGrid = $null; LeftViewbox = $null
+        PGrid = $null; LeftViewbox = $null; _StatsContentBuilt = $false
+        GcodeFilePath = $null; _GcodeImgLoaded = $false
         _GpJob = $gpJob
     }
 
@@ -3145,21 +3204,11 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         }
     })
 
+    # DEFERRED: the gcode plate thumbnail (opens a second Full.gcode.3mf zip) is
+    # NOT extracted at load - only when the card is on-screen (Ensure-PJobGcodeImage,
+    # driven by Render-VisibleCards / Review / Stats). Just record the file here.
     $gcodeFile = Get-ChildItem -Path $parentPath -Filter "*Full.gcode.3mf" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if ($gcodeFile) {
-        try {
-            $zip = [System.IO.Compression.ZipFile]::OpenRead($gcodeFile.FullName)
-            # Find either plate_1.png or thumbnail.png inside the gcode file
-            $entry = $zip.Entries | Where-Object { ($_.FullName -replace "\\","/") -match "(?i)Metadata/(plate_1|thumbnail)\.png$" } | Select-Object -First 1
-            if ($entry) {
-                $gcodeImgPath = Join-Path $tempWork "plate_1_gcode.png"
-                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $gcodeImgPath, $true)
-                $pJob.GcodeImgPath = $gcodeImgPath
-                $pbCurrent.Source = Load-WpfImage $gcodeImgPath
-            } else { $currentGrid.Visibility = "Collapsed" }
-        } catch { $currentGrid.Visibility = "Collapsed" }
-        finally { if ($null -ne $zip) { $zip.Dispose() } }
-    } else { $currentGrid.Visibility = "Collapsed" }
+    if ($gcodeFile) { $pJob.GcodeFilePath = $gcodeFile.FullName } else { $currentGrid.Visibility = "Collapsed" }
 
     # Overlay Labels
     $lblCharCard = Create-TextBlock "" "#E8A135" 20 "Bold"
@@ -3591,6 +3640,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pickGrid.Children.Add($mergeBanner) | Out-Null
     $pJob.MergeBanner = $mergeBanner
 
+    $tPickStart = $swPJob.ElapsedMilliseconds   # PERF
     if ($gcodeFile) {
         try {
             $zip = [System.IO.Compression.ZipFile]::OpenRead($gcodeFile.FullName)
@@ -3606,6 +3656,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
             }
         } catch {} finally { if ($null -ne $zip) { $zip.Dispose() } }
     }
+    $tPickMs = $swPJob.ElapsedMilliseconds - $tPickStart   # PERF: pick extract+randomize+decode
     [System.Windows.Controls.Grid]::SetColumn($pickGrid, 1); $leftGrid.Children.Add($pickGrid) | Out-Null
 
     # Finished image overlay â€” spans both card and pick columns, shown after processing completes
@@ -4843,6 +4894,8 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $cbAdj.AddHandler([System.Windows.Controls.Primitives.TextBoxBase]::TextChangedEvent, [System.Windows.Controls.TextChangedEventHandler]{ param($s,$e); $t = $s.Tag; Update-ParentPreview $t.P $t.G })
 
     Update-ParentPreview $pJob $gpJob
+    $swPJob.Stop()
+    Write-Log ("PERF Build-PJob [{0}]: extract={1}ms color={2}ms pick={3}ms rest={4}ms total={5}ms" -f (Split-Path $parentPath -Leaf), $tExtract, ($tColor - $tExtract), $tPickMs, ($swPJob.ElapsedMilliseconds - $tColor - $tPickMs), $swPJob.ElapsedMilliseconds) "PERF"
     $gpJob.ParentListStack.Children.Add($pBorder) | Out-Null
     return $pJob
 }
@@ -5835,6 +5888,7 @@ $btnBrowse.Add_Click({
     $lblGlobalTitle.Text = "Queue Dashboard ($($script:jobs.Count) Theme(s) found)"
     if ($script:jobs.Count -gt 0) { Update-GlobalProcessAllStatus }
     Apply-MergeFilter
+    $window.Dispatcher.BeginInvoke([System.Action]{ Render-VisibleCards }, [System.Windows.Threading.DispatcherPriority]::Background) | Out-Null
 })
 
 
@@ -5880,15 +5934,12 @@ $window.Add_Drop({
                 if ($existingGp) {
                     # Append to existing Grandparent group
                     foreach ($pKey in $newGpQueue[$gpPath].Keys) {
-                        [System.IO.File]::AppendAllText($dbgLog, "[STEP] Build-PJob (existing GP): $pKey`r`n")
                         $pJob = Build-PJob $pKey $newGpQueue[$gpPath][$pKey] $existingGp
                         $existingGp.Parents.Add($pJob) | Out-Null
-                        [System.IO.File]::AppendAllText($dbgLog, "[STEP] Build-PJob done: $pKey`r`n")
                     }
                 } else {
                     [System.IO.File]::AppendAllText($dbgLog, "[STEP] Build-GpJob: $gpPath`r`n")
                     Build-GpJob $gpPath $newGpQueue[$gpPath]
-                    [System.IO.File]::AppendAllText($dbgLog, "[STEP] Build-GpJob done: $gpPath`r`n")
                 }
             }
         }
@@ -5896,6 +5947,7 @@ $window.Add_Drop({
         $lblGlobalTitle.Text = "Queue Dashboard ($($script:jobs.Count) Theme(s) found)"
         if ($script:jobs.Count -gt 0) { Update-GlobalProcessAllStatus }
         Apply-MergeFilter
+        $window.Dispatcher.BeginInvoke([System.Action]{ Render-VisibleCards }, [System.Windows.Threading.DispatcherPriority]::Background) | Out-Null
         [System.IO.File]::AppendAllText($dbgLog, "[DROP] Complete. Jobs: $($script:jobs.Count)`r`n")
     } catch {
         $errMsg = $_.Exception.Message
@@ -7287,6 +7339,7 @@ function New-StatsGraphTile([string]$title, $canvas, [double]$w) {
 function Build-PJobStatsContent($pj, [string]$key) {
     $panel = $pj.StatsCardPanel
     if ($null -eq $panel) { return }
+    Ensure-PJobGcodeImage $pj   # fill the left plate image for this on-screen card
     $panel.Children.Clear()
 
     $res = Compute-PJobEfficiency $pj
@@ -7395,17 +7448,79 @@ function Build-PJobStatsContent($pj, [string]$key) {
     }
 }
 
+# Lazily extracts the gcode plate thumbnail (deferred from card build) the first
+# time the card is shown. Sets the [CURRENT] thumb; reflects onto the left plate
+# overlay when in Stats/Review. Cheap/no-op after the first call.
+function Ensure-PJobGcodeImage($pj) {
+    if (-not $pj._GcodeImgLoaded) {
+        $pj._GcodeImgLoaded = $true
+        if (-not [string]::IsNullOrEmpty($pj.GcodeFilePath) -and (Test-Path $pj.GcodeFilePath)) {
+            try {
+                $zip = [System.IO.Compression.ZipFile]::OpenRead($pj.GcodeFilePath)
+                try {
+                    $entry = $zip.Entries | Where-Object { ($_.FullName -replace "\\","/") -match "(?i)Metadata/(plate_1|thumbnail)\.png$" } | Select-Object -First 1
+                    if ($entry) {
+                        $out = Join-Path $pj.TempWork "plate_1_gcode.png"
+                        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $out, $true)
+                        $pj.GcodeImgPath = $out
+                        if ($null -ne $pj.PbCurrent) { $pj.PbCurrent.Source = Load-WpfImage $out }
+                    }
+                } finally { $zip.Dispose() }
+            } catch {}
+        }
+    }
+    if ($pj.GcodeImgPath -and ($script:GlobalMode -eq "Stats" -or $script:GlobalMode -eq "Review") -and $null -ne $pj.ReviewCardOverlay -and $null -eq $pj.ReviewCardOverlay.Source) {
+        $pj.ReviewCardOverlay.Source = Load-WpfImage $pj.GcodeImgPath
+    }
+}
+
+# True if the card is on (or near) the visible scroll viewport. A generous
+# margin pre-renders just-offscreen cards so scrolling feels instant.
+function Test-CardInViewport($pj) {
+    if ($null -eq $scrollViewer -or $null -eq $pj.RowPanel) { return $true }
+    if ($pj.RowPanel.Visibility -ne [System.Windows.Visibility]::Visible) { return $false }
+    try {
+        $top = $pj.RowPanel.TransformToVisual($scrollViewer).Transform((New-Object System.Windows.Point(0,0))).Y
+        $vh  = $scrollViewer.ViewportHeight
+        if ($vh -le 0) { return $true }
+        $h = $pj.RowPanel.ActualHeight
+        return ((($top + $h) -gt -400) -and ($top -lt ($vh + 400)))
+    } catch { return $true }
+}
+
+# Marks every card's stats content stale (e.g. after a toggle) so the next render
+# rebuilds it.
+function Invalidate-StatsContent {
+    foreach ($gp in $script:jobs) { foreach ($pj in $gp.Parents) { $pj._StatsContentBuilt = $false } }
+}
+
+# For every on-screen card: load its deferred gcode image, and (in Stats) build
+# its graph content. Off-screen and already-done cards are skipped, so this is
+# cheap to call on scroll / tab-switch / load.
+function Render-VisibleCards {
+    if ($null -eq $scrollViewer -or $scrollViewer.Visibility -ne [System.Windows.Visibility]::Visible) { return }
+    foreach ($gp in $script:jobs) {
+        foreach ($pj in $gp.Parents) {
+            if ($null -eq $pj.RowPanel) { continue }
+            if (-not (Test-CardInViewport $pj)) { continue }
+            Ensure-PJobGcodeImage $pj
+            if ($script:GlobalMode -eq "Stats" -and -not $pj._StatsContentBuilt -and $null -ne $pj.StatsCardPanel) {
+                Build-PJobStatsContent $pj $script:StatsSelectedVar
+                $pj._StatsContentBuilt = $true
+            }
+        }
+    }
+}
+
 # Flips a single card into Stats mode. The per-card header (with all the File
 # Prep buttons) is HIDDEN (reserved, invisible) and File Prep stays Hidden as the
 # height anchor, so the card keeps its tallest-view height and nothing leaks.
 function Set-PJobStatsMode($pj) {
-    Build-PJobStatsContent $pj $script:StatsSelectedVar
-    # Left column: show the gcode plate (same as Review).
-    if ($pj.GcodeImgPath -and (Test-Path $pj.GcodeImgPath)) {
-        $pj.ReviewCardOverlay.Source     = Load-WpfImage $pj.GcodeImgPath
-        $pj.ReviewCardOverlay.Visibility = "Visible"
-    } elseif ($null -ne $pj.ReviewCardOverlay) {
-        $pj.ReviewCardOverlay.Visibility = "Collapsed"
+    # Content (the graphs) + the gcode plate image are built lazily by
+    # Render-VisibleCards - only for cards in the viewport. Here we just show the
+    # overlay control (image filled in by Ensure-PJobGcodeImage when rendered).
+    if ($null -ne $pj.ReviewCardOverlay) {
+        $pj.ReviewCardOverlay.Visibility = if ($pj.GcodeFilePath) { "Visible" } else { "Collapsed" }
     }
     if ($null -ne $pj.RnOvLeft)  { $pj.RnOvLeft.Visibility  = "Collapsed" }
     if ($null -ne $pj.RnOvRight) { $pj.RnOvRight.Visibility = "Collapsed" }
@@ -7515,9 +7630,7 @@ function Select-StatsVar([string]$key) {
         $b.Foreground  = Get-WpfColor $fg
         $b.BorderBrush = Get-WpfColor $bd
     }
-    if ($script:GlobalMode -eq "Stats") {
-        foreach ($gpJob in $script:jobs) { foreach ($pj in $gpJob.Parents) { Build-PJobStatsContent $pj $key } }
-    }
+    if ($script:GlobalMode -eq "Stats") { Invalidate-StatsContent; Render-VisibleCards }
 }
 
 # Populates the shared Stats top bar: a row of variable toggles, then a queue
@@ -7528,6 +7641,8 @@ function Select-StatsVar([string]$key) {
 function Apply-StatsView {
     if ($script:GlobalMode -ne "Stats") { return }
     foreach ($gpJob in $script:jobs) { foreach ($pj in $gpJob.Parents) { Set-PJobStatsMode $pj } }
+    Invalidate-StatsContent
+    Render-VisibleCards
 }
 
 # Switches the per-design graph style (bell curve vs throughput line graph).
