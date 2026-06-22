@@ -8,6 +8,7 @@ Add-Type -AssemblyName WindowsBase
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+Add-Type -AssemblyName System.IO.Compression
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $ErrorActionPreference = 'Stop'
@@ -40,6 +41,11 @@ if ([string]::IsNullOrWhiteSpace($scriptDir)) { $scriptDir = [System.Environment
 $colorCsvPath = Join-Path $scriptDir "..\libraries\FilamentLibrary.csv"
 $namesLibPath  = Join-Path $scriptDir "..\libraries\NamesLibrary.ps1"
 $purgeDictPath = Join-Path $scriptDir "..\libraries\PurgeDictionary.csv"
+
+# Base files for the purge-pass drag-and-drop builder (Purge Dictionary panel).
+$script:PurgeLibRoot     = "C:\ZB_Designs\PurgeLibraryByCombo"
+$script:PurgeBase4Color  = "C:\ZB_Designs\PurgeLibraryByCombo\PurgeBaseTests\PurgeTowers4Colors.3mf"
+$script:PurgeBaseSingle  = "C:\ZB_Designs\PurgeLibraryByCombo\PurgeBaseTests\PurgeTowers.3mf"
 
 # Row type for the Purge Dictionary grid â€” tracks original values so edited
 # cells can be highlighted and the Save button enabled only when something changed.
@@ -1712,6 +1718,670 @@ function Update-PurgeMatrixInConfigText([string]$JsonText, [hashtable]$NameByHex
 
     $data.flush_volumes_matrix = $matrix
     return ($data | ConvertTo-Json -Depth 20 -Compress:$false)
+}
+
+# ============================================================================
+#  PURGE PASS BUILDER  (drag-drop in the Purge Dictionary panel)
+#  Drop a combo .3mf -> build a 2nd-pass (4-color) or 3rd-pass (single pair)
+#  purge-tower test file, stamping the dropped colors into a base tower and
+#  injecting the dictionary's Tuned_Volume values into the flush matrix.
+# ============================================================================
+
+# File-name short form (drops the "Esun " brand prefix, matching the combo naming convention).
+function Get-PurgeShortName([string]$Name, [string]$Hex) {
+    if (-not [string]::IsNullOrWhiteSpace($Name)) { return ($Name -replace '^Esun ', '') }
+    return (([string]$Hex) -replace '#', '')
+}
+
+# Reads filament_colour from a 3mf's project_settings.config and resolves each hex to a
+# dictionary filament name. Returns @{ Hexes=@(...); Names=@(...) } (Names entries may be $null), or $null.
+function Get-3mfFilamentInfo([string]$Path) {
+    $stream = $null; $zip = $null
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        $zip    = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Read)
+        $cfg = $null
+        foreach ($e in $zip.Entries) {
+            if ($e.FullName -ieq 'Metadata/project_settings.config') {
+                $sr = [System.IO.StreamReader]::new($e.Open()); $cfg = $sr.ReadToEnd(); $sr.Dispose()
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($cfg)) { return $null }
+        $data = $cfg | ConvertFrom-Json
+        $hexes = @($data.filament_colour)
+        if ($hexes.Count -eq 0) { return $null }
+        $names = @()
+        foreach ($h in $hexes) {
+            $clean = ([string]$h).ToUpper()
+            $h7 = if ($clean.Length -ge 7) { $clean.Substring(0,7) } else { $clean }
+            if ($script:HexToName.ContainsKey($h7)) { $names += $script:HexToName[$h7] } else { $names += $null }
+        }
+        return @{ Hexes = @($hexes); Names = @($names) }
+    } catch {
+        Write-Log "Get-3mfFilamentInfo FAILED ($Path): $($_.Exception.Message)" "ERROR"; return $null
+    } finally {
+        if ($zip) { $zip.Dispose() }; if ($stream) { $stream.Dispose() }
+    }
+}
+
+# Builds a purge-tower .3mf from $BasePath: stamps $Hexes into filament_colour (in order),
+# zeroes the off-diagonal flush matrix, then injects Tuned_Volume for each ordered pair that
+# has one. $Names parallels $Hexes (used for dictionary lookups; may contain $null). Returns $true on success.
+function New-PurgeTowerFile {
+    param(
+        [string]$BasePath,
+        [string[]]$Hexes,
+        [string[]]$Names,
+        [string]$OutPath,
+        [switch]$ZeroAll
+    )
+    $n = @($Hexes).Count
+    $srcStream = $null; $srcZip = $null; $dstStream = $null; $dstZip = $null
+    $tmpPath = [System.IO.Path]::GetTempFileName() + ".3mf"
+    try {
+        $srcStream = [System.IO.File]::OpenRead($BasePath)
+        $srcZip    = [System.IO.Compression.ZipArchive]::new($srcStream, [System.IO.Compression.ZipArchiveMode]::Read)
+        $cfgText = $null
+        foreach ($entry in $srcZip.Entries) {
+            if ($entry.FullName -ieq 'Metadata/project_settings.config') {
+                $sr = [System.IO.StreamReader]::new($entry.Open()); $cfgText = $sr.ReadToEnd(); $sr.Dispose()
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($cfgText)) { Write-Log "New-PurgeTowerFile: no project_settings.config in base $BasePath" "ERROR"; return $false }
+        $data = $cfgText | ConvertFrom-Json
+        $baseSlots = @($data.filament_colour).Count
+        if ($baseSlots -ne $n) { Write-Log "New-PurgeTowerFile: base has $baseSlots slots but $n colors supplied" "ERROR"; return $false }
+
+        $data.filament_colour = @($Hexes)
+        $matrix = New-Object 'string[]' ($n * $n)
+        for ($k = 0; $k -lt $matrix.Count; $k++) { $matrix[$k] = '0' }
+        if (-not $ZeroAll) {
+            for ($i = 0; $i -lt $n; $i++) {
+                for ($j = 0; $j -lt $n; $j++) {
+                    if ($i -eq $j) { continue }
+                    $v = Get-PurgeTunedVolume $Names[$i] $Names[$j]
+                    if ($null -ne $v) { $matrix[$i * $n + $j] = "$v" }
+                }
+            }
+        }
+        $data.flush_volumes_matrix = @($matrix)
+        $newCfg = $data | ConvertTo-Json -Depth 20 -Compress:$false
+
+        $dstStream = [System.IO.File]::Open($tmpPath, [System.IO.FileMode]::Create)
+        $dstZip    = [System.IO.Compression.ZipArchive]::new($dstStream, [System.IO.Compression.ZipArchiveMode]::Create)
+        foreach ($entry in $srcZip.Entries) {
+            $dstEntry = $dstZip.CreateEntry($entry.FullName, [System.IO.Compression.CompressionLevel]::Optimal)
+            $des = $dstEntry.Open()
+            if ($entry.FullName -ieq 'Metadata/project_settings.config') {
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes($newCfg)
+                $des.Write($bytes, 0, $bytes.Length)
+            } else {
+                $ses = $entry.Open(); $ses.CopyTo($des); $ses.Dispose()
+            }
+            $des.Dispose()
+        }
+        $dstZip.Dispose(); $dstStream.Dispose(); $dstZip = $null; $dstStream = $null
+        $srcZip.Dispose(); $srcStream.Dispose(); $srcZip = $null; $srcStream = $null
+        [System.IO.File]::Copy($tmpPath, $OutPath, $true)
+        Write-Log "New-PurgeTowerFile: wrote $OutPath ($n slots)"
+        return $true
+    } catch {
+        Write-Log "New-PurgeTowerFile FAILED: $($_.Exception.Message)" "ERROR"; return $false
+    } finally {
+        if ($srcZip) { $srcZip.Dispose() }; if ($srcStream) { $srcStream.Dispose() }
+        if ($dstZip)  { $dstZip.Dispose() };  if ($dstStream) { $dstStream.Dispose() }
+        if (Test-Path $tmpPath) { Remove-Item $tmpPath -Force -ErrorAction SilentlyContinue }
+        [System.GC]::Collect(); [System.GC]::WaitForPendingFinalizers()
+    }
+}
+
+# Counts ordered pairs in a name set that have no Tuned_Volume (will print as 0).
+function Get-PurgeUntunedPairCount([string[]]$Names) {
+    $miss = 0; $m = @($Names).Count
+    for ($a = 0; $a -lt $m; $a++) {
+        for ($b = 0; $b -lt $m; $b++) {
+            if ($a -ne $b -and $null -eq (Get-PurgeTunedVolume $Names[$a] $Names[$b])) { $miss++ }
+        }
+    }
+    return $miss
+}
+
+# Returns "#000000" or "#FFFFFF" for readable text on the given background hex.
+function Get-TextColorForHex([string]$hex) {
+    try {
+        $h = ([string]$hex).TrimStart('#')
+        if ($h.Length -ge 6) {
+            $r = [Convert]::ToInt32($h.Substring(0,2),16); $g = [Convert]::ToInt32($h.Substring(2,2),16); $b = [Convert]::ToInt32($h.Substring(4,2),16)
+            if ((0.299*$r + 0.587*$g + 0.114*$b) -gt 150) { return "#000000" }
+        }
+    } catch {}
+    return "#FFFFFF"
+}
+
+# Look up the Base Volume (untuned default) for a (from,to) pair - returns $null if unset.
+function Get-PurgeBaseVolume([string]$FromName, [string]$ToName) {
+    if (-not $FromName -or -not $ToName -or $FromName -eq $ToName -or $null -eq $script:PurgeDict) { return $null }
+    foreach ($row in $script:PurgeDict) {
+        if ($row.Source_Filament -eq $FromName -and $row.Target_Filament -eq $ToName) {
+            $v = $row.Base_Volume
+            if (-not [string]::IsNullOrWhiteSpace($v)) { return $v.Trim() }
+        }
+    }
+    return $null
+}
+
+# Rebuilds the Bambu-style from/to matrix preview for the current mode/selection.
+# Each cell shows the value that will be injected; amber = tuned value differs from base,
+# green = tuned value equals base, red = no tuned value (will inject 0).
+function Update-PurgePassPreview($container, $names, $hexes, [bool]$is3rd, [int]$fromIdx, [int]$toIdx, [bool]$zeroAll = $false) {
+    $container.Children.Clear()
+    if ($is3rd) {
+        if ($fromIdx -lt 0 -or $toIdx -lt 0 -or $fromIdx -eq $toIdx) {
+            $container.Children.Add((Create-TextBlock "Pick two different colors to preview." "#888A9A" 11 "Normal")) | Out-Null
+            return
+        }
+        $idxs = @($fromIdx, $toIdx)
+    } else {
+        $idxs = @(0..(@($names).Count - 1))
+    }
+    $m = $idxs.Count
+
+    $grid = New-Object System.Windows.Controls.Grid
+    for ($c = 0; $c -le $m; $c++) { $cd = New-Object System.Windows.Controls.ColumnDefinition; $cd.Width = [System.Windows.GridLength]::Auto; $grid.ColumnDefinitions.Add($cd) | Out-Null }
+    for ($r = 0; $r -le $m; $r++) { $rd = New-Object System.Windows.Controls.RowDefinition; $rd.Height = [System.Windows.GridLength]::Auto; $grid.RowDefinitions.Add($rd) | Out-Null }
+
+    $corner = Create-TextBlock "from \ to" "#888A9A" 10 "Normal"
+    $corner.VerticalAlignment = "Center"; $corner.HorizontalAlignment = "Center"; $corner.Margin = New-Object System.Windows.Thickness(2)
+    [System.Windows.Controls.Grid]::SetRow($corner,0); [System.Windows.Controls.Grid]::SetColumn($corner,0); $grid.Children.Add($corner) | Out-Null
+
+    for ($k = 0; $k -lt $m; $k++) {
+        $ci = $idxs[$k]; $hx = "$($hexes[$ci])"
+        foreach ($place in @('top','left')) {
+            $chip = New-Object System.Windows.Controls.Border
+            $chip.Width = 30; $chip.Height = 24; $chip.CornerRadius = New-Object System.Windows.CornerRadius(3)
+            $chip.Margin = New-Object System.Windows.Thickness(2)
+            try { $chip.Background = Get-WpfColor $hx } catch { $chip.Background = Get-WpfColor "#000000" }
+            $chip.BorderBrush = Get-WpfColor "#555"; $chip.BorderThickness = New-Object System.Windows.Thickness(1)
+            $ct = Create-TextBlock "$($ci+1)" (Get-TextColorForHex $hx) 11 "Bold"
+            $ct.HorizontalAlignment = "Center"; $ct.VerticalAlignment = "Center"; $chip.Child = $ct
+            $chip.ToolTip = if ($names[$ci]) { $names[$ci] } else { $hx }
+            if ($place -eq 'top') { [System.Windows.Controls.Grid]::SetRow($chip,0); [System.Windows.Controls.Grid]::SetColumn($chip,$k+1) }
+            else { [System.Windows.Controls.Grid]::SetRow($chip,$k+1); [System.Windows.Controls.Grid]::SetColumn($chip,0) }
+            $grid.Children.Add($chip) | Out-Null
+        }
+    }
+
+    for ($r = 0; $r -lt $m; $r++) {
+        for ($c = 0; $c -lt $m; $c++) {
+            $fi = $idxs[$r]; $ti = $idxs[$c]
+            $cell = New-Object System.Windows.Controls.Border
+            $cell.Width = 50; $cell.Height = 24; $cell.Margin = New-Object System.Windows.Thickness(1)
+            $cell.BorderBrush = Get-WpfColor "#2A2C35"; $cell.BorderThickness = New-Object System.Windows.Thickness(1)
+            $bg = "#15171C"; $fg = "#C8CFDD"; $txt = "0"; $weight = "Normal"
+            if ($fi -eq $ti) {
+                $fg = "#555"
+            } elseif ($zeroAll) {
+                $fg = "#E06A6A"
+            } else {
+                $tv = Get-PurgeTunedVolume $names[$fi] $names[$ti]
+                $bv = Get-PurgeBaseVolume $names[$fi] $names[$ti]
+                if ($null -ne $tv) {
+                    $txt = "$tv"
+                    if ($null -ne $bv -and "$tv" -ne "$bv") { $bg = "#3A2E16"; $fg = "#FFD27A"; $weight = "Bold" }
+                    else { $fg = "#9FD8A0" }
+                } else {
+                    $fg = "#E06A6A"
+                }
+                $bvTip = if ($null -ne $bv) { $bv } else { "-" }
+                $cell.ToolTip = "$(if($names[$fi]){$names[$fi]}else{$hexes[$fi]}) -> $(if($names[$ti]){$names[$ti]}else{$hexes[$ti]})`nbase: $bvTip"
+            }
+            $cell.Background = Get-WpfColor $bg
+            $ctb = Create-TextBlock $txt $fg 11 $weight
+            $ctb.HorizontalAlignment = "Center"; $ctb.VerticalAlignment = "Center"; $cell.Child = $ctb
+            [System.Windows.Controls.Grid]::SetRow($cell,$r+1); [System.Windows.Controls.Grid]::SetColumn($cell,$c+1)
+            $grid.Children.Add($cell) | Out-Null
+        }
+    }
+    $container.Children.Add($grid) | Out-Null
+
+    $legend = New-Object System.Windows.Controls.StackPanel; $legend.Orientation = "Horizontal"; $legend.Margin = New-Object System.Windows.Thickness(0,8,0,0)
+    $legend.Children.Add((Create-TextBlock "amber = tuned, differs from base    " "#FFD27A" 10 "Normal")) | Out-Null
+    $legend.Children.Add((Create-TextBlock "green = tuned = base    " "#9FD8A0" 10 "Normal")) | Out-Null
+    $legend.Children.Add((Create-TextBlock "red = no tuned value (0)" "#E06A6A" 10 "Normal")) | Out-Null
+    $container.Children.Add($legend) | Out-Null
+}
+
+# Copies a 3mf to $OutPath, dropping all preview/thumbnail PNG entries. Bambu's CLI PRESERVES existing
+# thumbnails on export, so they must be absent for the slice to regenerate them in the new colors.
+function Copy-3mfWithoutThumbnails([string]$InPath, [string]$OutPath) {
+    $zi = $null; $zo = $null
+    try {
+        $zi = [System.IO.Compression.ZipFile]::OpenRead($InPath)
+        $zo = [System.IO.Compression.ZipFile]::Open($OutPath, [System.IO.Compression.ZipArchiveMode]::Create)
+        foreach ($e in $zi.Entries) {
+            if ($e.FullName -match '(?i)\.png$' -or $e.FullName -match '(?i)thumbnail') { continue }
+            $ne = $zo.CreateEntry($e.FullName, [System.IO.Compression.CompressionLevel]::Optimal)
+            $si = $e.Open(); $so = $ne.Open(); $si.CopyTo($so); $so.Dispose(); $si.Dispose()
+        }
+        return $true
+    } catch { Write-Log "Copy-3mfWithoutThumbnails FAILED: $($_.Exception.Message)" "ERROR"; return $false }
+    finally { if ($zo) { $zo.Dispose() }; if ($zi) { $zi.Dispose() } }
+}
+
+# Headlessly regenerates a 3mf's preview PNGs so they reflect the new filament colors. It strips the
+# stale thumbnails then re-exports via Bambu CLI (--export-3mf, NO slice) which regenerates them in
+# ~1s. Non-blocking (DispatcherTimer poll); calls & $OnDone $success when finished.
+function Start-BambuPreviewRegen([string]$FilePath, $OnDone) {
+    $bambu = "C:\Program Files\Bambu Studio\bambu-studio.exe"
+    if (-not (Test-Path $bambu))    { Write-Log "Start-BambuPreviewRegen: Bambu not found at $bambu" "WARN"; & $OnDone $false; return }
+    if (-not (Test-Path $FilePath)) { Write-Log "Start-BambuPreviewRegen: file missing $FilePath" "ERROR"; & $OnDone $false; return }
+    $gid    = [System.Guid]::NewGuid().ToString("N")
+    $stripIn = Join-Path $env:TEMP ("reslicein_" + $gid + ".3mf")
+    $tmpOut = Join-Path $env:TEMP ("resliceout_" + $gid + ".3mf")
+    $logOut = Join-Path $env:TEMP ("reslice_o_" + $gid + ".txt")
+    $logErr = Join-Path $env:TEMP ("reslice_e_" + $gid + ".txt")
+    if (-not (Copy-3mfWithoutThumbnails $FilePath $stripIn)) { Write-Log "Start-BambuPreviewRegen: strip step failed" "ERROR"; & $OnDone $false; return }
+    $procArgs = "--debug 3 --no-check --uptodate --allow-newer-file --export-3mf `"$tmpOut`" `"$stripIn`""
+    try {
+        $proc = Start-Process -FilePath $bambu -ArgumentList $procArgs -WorkingDirectory $env:TEMP `
+            -RedirectStandardOutput $logOut -RedirectStandardError $logErr -WindowStyle Hidden -PassThru
+    } catch {
+        Write-Log "Start-BambuPreviewRegen: launch failed: $($_.Exception.Message)" "ERROR"; & $OnDone $false; return
+    }
+    Write-Log "Start-BambuPreviewRegen: regenerating preview for $FilePath (pid $($proc.Id))"
+    $startT = Get-Date
+    $timer = New-Object System.Windows.Threading.DispatcherTimer
+    $timer.Interval = [TimeSpan]::FromMilliseconds(500)
+    $timer.Add_Tick({
+        if (-not $proc.HasExited) {
+            if (((Get-Date) - $startT).TotalSeconds -gt 90) { try { $proc.Kill() } catch {}; Write-Log "Start-BambuPreviewRegen: timeout, killed" "WARN" }
+            return
+        }
+        $timer.Stop()
+        $ok = $false
+        if (Test-Path $tmpOut) {
+            try { [System.IO.File]::Copy($tmpOut, $FilePath, $true); $ok = $true; Write-Log "Start-BambuPreviewRegen: preview updated for $FilePath" }
+            catch { Write-Log "Start-BambuPreviewRegen: copy-back failed: $($_.Exception.Message)" "ERROR" }
+        } else {
+            Write-Log "Start-BambuPreviewRegen: no output produced for $FilePath" "ERROR"
+            if (Test-Path $logErr) { Get-Content $logErr -Tail 5 -ErrorAction SilentlyContinue | ForEach-Object { Write-Log "  bambu-err: $_" "ERROR" } }
+        }
+        foreach ($f in @($stripIn, $tmpOut, $logOut, $logErr, (Join-Path $env:TEMP "result.json"))) { if (Test-Path $f) { Remove-Item $f -Force -ErrorAction SilentlyContinue } }
+        & $OnDone $ok
+    }.GetNewClosure())
+    $timer.Start()
+}
+
+# Sequentially regenerates previews for a list of built files (batch path), showing a modeless progress
+# window. NOTE: the async chain is driven through SCRIPT-SCOPE state ($script:PurgeBatch) + regular
+# functions, NOT nested closures - a .GetNewClosure() callback created inside another closure loses its
+# captured variables when invoked from a fresh timer-tick call stack (see Start-BambuPreviewRegen).
+function Start-PurgeBatchReslice($outPaths) {
+    $list = @($outPaths)
+    if ($list.Count -eq 0) { return }
+    $statusWin = New-Object System.Windows.Window
+    $statusWin.Title = "Build Purge Pass"; $statusWin.Background = Get-WpfColor "#16171B"
+    $statusWin.Width = 430; $statusWin.SizeToContent = "Height"; $statusWin.WindowStartupLocation = "CenterScreen"; $statusWin.ResizeMode = "NoResize"
+    $sp = New-Object System.Windows.Controls.StackPanel; $sp.Margin = New-Object System.Windows.Thickness(18); $statusWin.Content = $sp
+    $lbl = Create-TextBlock "Regenerating previews in Bambu (headless)..." "#E0E3EC" 12 "Normal"; $lbl.TextWrapping = "Wrap"
+    $sp.Children.Add($lbl) | Out-Null
+    $statusWin.Show()
+    $script:PurgeBatch = @{ Idx = 0; Ok = 0; List = $list; Win = $statusWin; Lbl = $lbl }
+    Invoke-PurgeBatchStep
+}
+
+function Invoke-PurgeBatchStep {
+    $b = $script:PurgeBatch
+    if ($null -eq $b) { return }
+    if ($b.Idx -ge $b.List.Count) {
+        $b.Win.Close()
+        [System.Windows.MessageBox]::Show("Preview regeneration complete: $($b.Ok)/$($b.List.Count) updated.", "Build Purge Pass", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        $script:PurgeBatch = $null
+        return
+    }
+    $cur = $b.List[$b.Idx]
+    $b.Lbl.Text = "Regenerating preview $($b.Idx + 1) / $($b.List.Count):`n$([System.IO.Path]::GetFileName($cur))"
+    Start-BambuPreviewRegen $cur { param($ok) Complete-PurgeBatchStep $ok }
+}
+
+function Complete-PurgeBatchStep($ok) {
+    $b = $script:PurgeBatch
+    if ($null -eq $b) { return }
+    if ($ok) { $b.Ok++ }
+    $b.Idx++
+    Invoke-PurgeBatchStep
+}
+
+# Single-build preview-regen completion. Context is stashed in script scope via a regular function
+# (Register-PurgePassBuildCtx) so the async callback can be a non-capturing scriptblock - see the
+# nested-closure note on Start-PurgeBatchReslice.
+function Register-PurgePassBuildCtx($btnBuild, $btnCancel, $dlgWin, $miss, $outFile) {
+    $script:PurgePassBuildCtx = @{ BtnBuild = $btnBuild; BtnCancel = $btnCancel; Win = $dlgWin; Miss = $miss; OutFile = $outFile }
+}
+
+function Complete-PurgePassBuild($ok) {
+    $c = $script:PurgePassBuildCtx
+    if ($null -eq $c) { return }
+    if ($null -ne $c.BtnBuild)  { $c.BtnBuild.IsEnabled  = $true }
+    if ($null -ne $c.BtnCancel) { $c.BtnCancel.IsEnabled = $true }
+    $msg = if ($ok) { "Done - preview updated:`n$($c.OutFile)" } else { "Built, but the preview was NOT regenerated (see debug log). File saved:`n$($c.OutFile)" }
+    if ($c.Miss -gt 0) { $msg += "`n`n$($c.Miss) pair(s) had no Tuned_Volume (0 purge)." }
+    $img = if ($ok) { [System.Windows.MessageBoxImage]::Information } else { [System.Windows.MessageBoxImage]::Warning }
+    [System.Windows.MessageBox]::Show($msg, "Build Purge Pass", [System.Windows.MessageBoxButton]::OK, $img) | Out-Null
+    if ($null -ne $c.Win) { $c.Win.Close() }
+    $script:PurgePassBuildCtx = $null
+}
+
+# Post-drop dialog: pick 2nd pass (full 4-color tower) or 3rd pass (single From->To pair), then build.
+function Show-PurgePassDialog($info, [string]$sourceName, [string]$sourcePath) {
+    $hexes = @($info.Hexes); $names = @($info.Names); $n = $hexes.Count
+    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($sourceName)
+
+    # Capture script-scope paths as LOCALS: inside a .GetNewClosure() handler, $script:* resolves
+    # to the closure's own (empty) module scope, so the handler must use these captured locals.
+    $baseFour   = $script:PurgeBase4Color
+    $baseSingle = $script:PurgeBaseSingle
+    $libRoot    = $script:PurgeLibRoot
+
+    $win = New-Object System.Windows.Window
+    $win.Title = "Build Purge Pass"; $win.Background = Get-WpfColor "#16171B"
+    $win.SizeToContent = "Height"; $win.Width = 470
+    $win.WindowStartupLocation = "CenterScreen"; $win.ResizeMode = "NoResize"
+
+    $root = New-Object System.Windows.Controls.StackPanel
+    $root.Margin = New-Object System.Windows.Thickness(16); $win.Content = $root
+
+    $lblSrc = Create-TextBlock "Source: $sourceName" "#888A9A" 11 "Normal"
+    $lblSrc.Margin = New-Object System.Windows.Thickness(0,0,0,10); $root.Children.Add($lblSrc) | Out-Null
+
+    $comboPanel = New-Object System.Windows.Controls.StackPanel
+    $comboPanel.Margin = New-Object System.Windows.Thickness(0,0,0,12)
+    for ($i = 0; $i -lt $n; $i++) {
+        $row = New-Object System.Windows.Controls.StackPanel; $row.Orientation = "Horizontal"
+        $row.Margin = New-Object System.Windows.Thickness(0,2,0,2)
+        $sw = New-Object System.Windows.Controls.Border; $sw.Width = 18; $sw.Height = 18
+        $sw.CornerRadius = New-Object System.Windows.CornerRadius(3)
+        $sw.BorderBrush = Get-WpfColor "#3A3C4A"; $sw.BorderThickness = New-Object System.Windows.Thickness(1)
+        try { $sw.Background = Get-WpfColor ($hexes[$i]) } catch { $sw.Background = Get-WpfColor "#000000" }
+        $sw.Margin = New-Object System.Windows.Thickness(0,0,8,0); $row.Children.Add($sw) | Out-Null
+        $disp = if ($names[$i]) { $names[$i] } else { "$($hexes[$i])  (unknown filament)" }
+        $fg   = if ($names[$i]) { "#E0E3EC" } else { "#E8A135" }
+        $row.Children.Add((Create-TextBlock $disp $fg 12 "Normal")) | Out-Null
+        $comboPanel.Children.Add($row) | Out-Null
+    }
+    $root.Children.Add($comboPanel) | Out-Null
+
+    $can2nd = ($n -eq 4)
+    $can1st = ($n -ge 2 -and -not [string]::IsNullOrWhiteSpace($sourcePath) -and (Test-Path $sourcePath))
+    $rb0 = New-Object System.Windows.Controls.RadioButton
+    $rb0.Content = "0th pass  (zero ALL purge - measure bleed)"; $rb0.Foreground = Get-WpfColor "#E0E3EC"
+    $rb0.Margin = New-Object System.Windows.Thickness(0,2,0,2); $rb0.IsEnabled = $can1st
+    $rb1 = New-Object System.Windows.Controls.RadioButton
+    $rb1.Content = "1st pass  (tune THIS file - same sheet + purge values)"; $rb1.Foreground = Get-WpfColor "#E0E3EC"
+    $rb1.Margin = New-Object System.Windows.Thickness(0,2,0,2); $rb1.IsEnabled = $can1st
+    $rb2 = New-Object System.Windows.Controls.RadioButton
+    $rb2.Content = "2nd pass  (4-color tower)"; $rb2.Foreground = Get-WpfColor "#E0E3EC"
+    $rb2.Margin = New-Object System.Windows.Thickness(0,2,0,2); $rb2.IsEnabled = $can2nd
+    $rb3 = New-Object System.Windows.Controls.RadioButton
+    $rb3.Content = "3rd pass  (single From -> To pair)"; $rb3.Foreground = Get-WpfColor "#E0E3EC"
+    $rb3.Margin = New-Object System.Windows.Thickness(0,2,0,6)
+    $rb1.IsChecked = $can1st
+    $rb2.IsChecked = ($can2nd -and -not $can1st)
+    $rb3.IsChecked = (-not $can1st -and -not $can2nd)
+    $root.Children.Add($rb0) | Out-Null; $root.Children.Add($rb1) | Out-Null; $root.Children.Add($rb2) | Out-Null; $root.Children.Add($rb3) | Out-Null
+
+    $pairPanel = New-Object System.Windows.Controls.StackPanel; $pairPanel.Orientation = "Horizontal"
+    $pairPanel.Margin = New-Object System.Windows.Thickness(20,2,0,10)
+    $colFrom = New-Object System.Windows.Controls.StackPanel; $colFrom.Margin = New-Object System.Windows.Thickness(0,0,12,0)
+    $colFrom.Children.Add((Create-TextBlock "From" "#888A9A" 11 "Normal")) | Out-Null
+    $cmbFrom = New-Object System.Windows.Controls.ComboBox; $cmbFrom.Width = 185; $cmbFrom.Height = 26
+    $colFrom.Children.Add($cmbFrom) | Out-Null
+    $colTo = New-Object System.Windows.Controls.StackPanel
+    $colTo.Children.Add((Create-TextBlock "To" "#888A9A" 11 "Normal")) | Out-Null
+    $cmbTo = New-Object System.Windows.Controls.ComboBox; $cmbTo.Width = 185; $cmbTo.Height = 26
+    $colTo.Children.Add($cmbTo) | Out-Null
+    for ($i = 0; $i -lt $n; $i++) {
+        $disp = if ($names[$i]) { $names[$i] } else { "$($hexes[$i])" }
+        $cmbFrom.Items.Add($disp) | Out-Null; $cmbTo.Items.Add($disp) | Out-Null
+    }
+    $cmbFrom.SelectedIndex = 0; $cmbTo.SelectedIndex = [Math]::Min(1, $n - 1)
+    $pairPanel.Children.Add($colFrom) | Out-Null; $pairPanel.Children.Add($colTo) | Out-Null
+    $pairPanel.Visibility = if ([bool]$rb3.IsChecked) { "Visible" } else { "Collapsed" }
+    $root.Children.Add($pairPanel) | Out-Null
+
+    # Preview of the values that will be injected (Bambu-style from/to matrix).
+    $root.Children.Add((Create-TextBlock "Values to inject from the Purge Dictionary (Tuned_Volume) - replaces the file's matrix:" "#888A9A" 11 "Normal")) | Out-Null
+    $previewScroll = New-Object System.Windows.Controls.ScrollViewer
+    $previewScroll.VerticalScrollBarVisibility = "Auto"; $previewScroll.MaxHeight = 240
+    $previewScroll.Margin = New-Object System.Windows.Thickness(0,4,0,10)
+    $previewScroll.Background = Get-WpfColor "#101218"
+    $previewScroll.Padding = New-Object System.Windows.Thickness(8,6,8,6)
+    $previewPanel = New-Object System.Windows.Controls.StackPanel
+    $previewScroll.Content = $previewPanel
+    $root.Children.Add($previewScroll) | Out-Null
+
+    $refreshPreview = {
+        $i3 = [bool]$rb3.IsChecked
+        $z0 = [bool]$rb0.IsChecked
+        Update-PurgePassPreview $previewPanel $names $hexes $i3 $cmbFrom.SelectedIndex $cmbTo.SelectedIndex $z0
+    }.GetNewClosure()
+
+    $rb0.Add_Checked({ $pairPanel.Visibility = "Collapsed"; & $refreshPreview }.GetNewClosure())
+    $rb1.Add_Checked({ $pairPanel.Visibility = "Collapsed"; & $refreshPreview }.GetNewClosure())
+    $rb2.Add_Checked({ $pairPanel.Visibility = "Collapsed"; & $refreshPreview }.GetNewClosure())
+    $rb3.Add_Checked({ $pairPanel.Visibility = "Visible";   & $refreshPreview }.GetNewClosure())
+    $cmbFrom.Add_SelectionChanged({ if ([bool]$rb3.IsChecked) { & $refreshPreview } }.GetNewClosure())
+    $cmbTo.Add_SelectionChanged({   if ([bool]$rb3.IsChecked) { & $refreshPreview } }.GetNewClosure())
+    & $refreshPreview
+
+    $btnRow = New-Object System.Windows.Controls.StackPanel; $btnRow.Orientation = "Horizontal"
+    $btnRow.HorizontalAlignment = "Right"; $btnRow.Margin = New-Object System.Windows.Thickness(0,6,0,0)
+    $btnBuild  = New-Object System.Windows.Controls.Button; $btnBuild.Content = "Build..."; $btnBuild.Width = 90; $btnBuild.Height = 30
+    $btnBuild.Margin = New-Object System.Windows.Thickness(0,0,10,0)
+    $btnCancel = New-Object System.Windows.Controls.Button; $btnCancel.Content = "Cancel"; $btnCancel.Width = 80; $btnCancel.Height = 30
+    $btnRow.Children.Add($btnBuild) | Out-Null; $btnRow.Children.Add($btnCancel) | Out-Null
+    $root.Children.Add($btnRow) | Out-Null
+
+    $statusLbl = Create-TextBlock "" "#E8A135" 11 "Normal"
+    $statusLbl.Margin = New-Object System.Windows.Thickness(0,8,0,0); $statusLbl.TextWrapping = "Wrap"
+    $root.Children.Add($statusLbl) | Out-Null
+
+    $btnCancel.Add_Click({ $win.Close() }.GetNewClosure())
+    $btnBuild.Add_Click({
+        Write-Log "Show-PurgePassDialog: Build button click handler entered"
+        $mode3 = [bool]$rb3.IsChecked
+        $mode1 = [bool]$rb1.IsChecked
+        $mode0 = [bool]$rb0.IsChecked
+        if ($mode3) {
+            $fi = $cmbFrom.SelectedIndex; $ti = $cmbTo.SelectedIndex
+            if ($fi -lt 0 -or $ti -lt 0 -or $fi -eq $ti) {
+                [System.Windows.MessageBox]::Show("Pick two different colors for From and To.", "Build Purge Pass") | Out-Null; return
+            }
+            $base = $baseSingle
+            $useHexes = @($hexes[$fi], $hexes[$ti])
+            $useNames = @($names[$fi], $names[$ti])
+            $defName  = (Get-PurgeShortName $useNames[0] $useHexes[0]) + "-" + (Get-PurgeShortName $useNames[1] $useHexes[1]) + ".3mf"
+        } elseif ($mode0) {
+            # 0th pass: THIS file with ALL purge zeroed - the bleed-measurement print.
+            $base = $sourcePath
+            $useHexes = @($hexes); $useNames = @($names)
+            $defName  = $baseName + "_0thPass.3mf"
+        } elseif ($mode1) {
+            # 1st pass: tune THIS file in place - same sheet, just inject the purge values.
+            $base = $sourcePath
+            $useHexes = @($hexes); $useNames = @($names)
+            $defName  = $baseName + "_1stPass.3mf"
+        } else {
+            $base = $baseFour
+            $useHexes = @($hexes); $useNames = @($names)
+            $defName  = $baseName + "_2ndPass.3mf"
+        }
+        Write-Log "Build clicked: mode0=$mode0 mode1=$mode1 mode3=$mode3 base=$base defName=$defName"
+        if (-not (Test-Path $base)) { [System.Windows.MessageBox]::Show("Base file not found:`n$base", "Build Purge Pass") | Out-Null; return }
+
+        # Confirm before building if any pair has no tuned value (will be 0 purge). Skipped for 0th pass (intentionally all 0).
+        $missPre = Get-PurgeUntunedPairCount $useNames
+        if (-not $mode0 -and $missPre -gt 0) {
+            $confirm = [System.Windows.MessageBox]::Show("$missPre color pair(s) have no Tuned_Volume and will be built with 0 purge.`n`nBuild anyway?", "Untuned pairs", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
+            if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) { return }
+        }
+
+        $sfd = New-Object Microsoft.Win32.SaveFileDialog
+        $sfd.Filter = "3MF files (*.3mf)|*.3mf"; $sfd.FileName = $defName; $sfd.OverwritePrompt = $true
+        if (Test-Path $libRoot) { $sfd.InitialDirectory = $libRoot }
+        $sfdResult = $sfd.ShowDialog()
+        Write-Log "Build: SaveFileDialog result=$sfdResult file=$($sfd.FileName)"
+        if (-not $sfdResult) { return }
+
+        if (New-PurgeTowerFile -BasePath $base -Hexes $useHexes -Names $useNames -OutPath $sfd.FileName -ZeroAll:$mode0) {
+            $miss = if ($mode0) { 0 } else { $missPre }
+            $btnBuild.IsEnabled = $false; $btnCancel.IsEnabled = $false
+            $statusLbl.Foreground = Get-WpfColor "#E8A135"
+            $statusLbl.Text = "Built. Regenerating preview (headless)..."
+            Register-PurgePassBuildCtx $btnBuild $btnCancel $win $miss $sfd.FileName
+            Start-BambuPreviewRegen $sfd.FileName { param($ok) Complete-PurgePassBuild $ok }
+        } else {
+            [System.Windows.MessageBox]::Show("Build failed - see debug log.", "Build Purge Pass", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+        }
+    }.GetNewClosure())
+
+    Write-Log "Show-PurgePassDialog: showing dialog ($n colors, can2nd=$can2nd)"
+    $win.ShowDialog() | Out-Null
+    Write-Log "Show-PurgePassDialog: dialog closed"
+}
+
+# Modern Vista+ folder picker (IFileOpenDialog with FOS_PICKFOLDERS) instead of the legacy
+# tree-view FolderBrowserDialog. Returns the chosen path, or $null if cancelled. Falls back to the
+# classic dialog if the COM interop is unavailable.
+function Select-FolderModern([string]$initialDir, [string]$title) {
+    try {
+        if (-not ('ModernDialogs.FolderPicker' -as [type])) {
+            Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+namespace ModernDialogs {
+    [ComImport, ClassInterface(ClassInterfaceType.None), Guid("DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7")]
+    internal class FileOpenDialogClass { }
+    [ComImport, Guid("d57c7288-d4ad-4768-be02-9d969532d960"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IFileOpenDialog {
+        [PreserveSig] int Show(IntPtr parent);
+        void SetFileTypes(uint cFileTypes, IntPtr rgFilterSpec);
+        void SetFileTypeIndex(uint iFileType);
+        void GetFileTypeIndex(out uint piFileType);
+        void Advise(IntPtr pfde, out uint pdwCookie);
+        void Unadvise(uint dwCookie);
+        void SetOptions(uint fos);
+        void GetOptions(out uint pfos);
+        void SetDefaultFolder(IShellItem psi);
+        void SetFolder(IShellItem psi);
+        void GetFolder(out IShellItem ppsi);
+        void GetCurrentSelection(out IShellItem ppsi);
+        void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+        void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string pszName);
+        void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string pszTitle);
+        void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string pszText);
+        void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string pszLabel);
+        void GetResult(out IShellItem ppsi);
+    }
+    [ComImport, Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IShellItem {
+        void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
+        void GetParent(out IShellItem ppsi);
+        void GetDisplayName(uint sigdnName, out IntPtr ppszName);
+        void GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
+        void Compare(IShellItem psi, uint hint, out int piOrder);
+    }
+    public static class FolderPicker {
+        const uint FOS_PICKFOLDERS = 0x20;
+        const uint FOS_FORCEFILESYSTEM = 0x40;
+        const uint SIGDN_FILESYSPATH = 0x80058000;
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+        private static extern void SHCreateItemFromParsingName(
+            [MarshalAs(UnmanagedType.LPWStr)] string pszPath, IntPtr pbc,
+            [In] ref Guid riid, [MarshalAs(UnmanagedType.Interface)] out IShellItem ppv);
+        public static string Show(IntPtr owner, string initialDir, string title) {
+            IFileOpenDialog dlg = (IFileOpenDialog)new FileOpenDialogClass();
+            uint opts; dlg.GetOptions(out opts);
+            dlg.SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+            if (!string.IsNullOrEmpty(title)) dlg.SetTitle(title);
+            if (!string.IsNullOrEmpty(initialDir)) {
+                try {
+                    Guid iid = typeof(IShellItem).GUID;
+                    IShellItem item;
+                    SHCreateItemFromParsingName(initialDir, IntPtr.Zero, ref iid, out item);
+                    if (item != null) dlg.SetFolder(item);
+                } catch { }
+            }
+            int hr = dlg.Show(owner);
+            if (hr != 0) return null;
+            IShellItem result; dlg.GetResult(out result);
+            IntPtr pName; result.GetDisplayName(SIGDN_FILESYSPATH, out pName);
+            string path = Marshal.PtrToStringUni(pName);
+            Marshal.FreeCoTaskMem(pName);
+            return path;
+        }
+    }
+}
+"@ -ErrorAction Stop
+        }
+        $owner = [IntPtr]::Zero
+        try { if ($null -ne $window) { $owner = (New-Object System.Windows.Interop.WindowInteropHelper($window)).Handle } } catch {}
+        return [ModernDialogs.FolderPicker]::Show($owner, $initialDir, $title)
+    } catch {
+        Write-Log "Select-FolderModern: modern picker failed, falling back to classic: $($_.Exception.Message)" "WARN"
+        $fb = New-Object System.Windows.Forms.FolderBrowserDialog
+        if ($initialDir -and (Test-Path $initialDir)) { $fb.SelectedPath = $initialDir }
+        if ($fb.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { return $fb.SelectedPath }
+        return $null
+    }
+}
+
+# Drop dispatcher: single file -> dialog; multiple files -> batch 2nd-pass towers.
+function Invoke-PurgePassDrop($paths) {
+    Write-Log "Invoke-PurgePassDrop: $(@($paths).Count) path(s): $(@($paths) -join '; ')"
+    $files = @($paths | Where-Object { $_ -match '(?i)\.3mf$' -and $_ -notmatch '(?i)\.gcode\.3mf$' })
+    Write-Log "Invoke-PurgePassDrop: $($files.Count) usable .3mf file(s)"
+    if ($files.Count -eq 0) { [System.Windows.MessageBox]::Show("Drop one or more combo .3mf files.", "Build Purge Pass") | Out-Null; return }
+
+    if ($files.Count -eq 1) {
+        $info = Get-3mfFilamentInfo $files[0]
+        Write-Log "Invoke-PurgePassDrop: single file, info null? $($null -eq $info); colors=$(if($info){@($info.Hexes).Count}else{'-'})"
+        if ($null -eq $info) { [System.Windows.MessageBox]::Show("Could not read colors from:`n$($files[0])", "Build Purge Pass") | Out-Null; return }
+        Show-PurgePassDialog $info ([System.IO.Path]::GetFileName($files[0])) $files[0]
+        return
+    }
+
+    # Multiple files -> batch 2nd-pass build (single pair pick only makes sense per-file).
+    $valid = @(); $skipped = @()
+    foreach ($f in $files) {
+        $info = Get-3mfFilamentInfo $f
+        if ($null -ne $info -and @($info.Hexes).Count -eq 4) { $valid += @{ Path = $f; Info = $info } }
+        else { $skipped += [System.IO.Path]::GetFileName($f) }
+    }
+    if ($valid.Count -eq 0) { [System.Windows.MessageBox]::Show("None of the dropped files have 4 readable colors for a 2nd-pass tower.", "Build Purge Pass") | Out-Null; return }
+
+    $filesWithUntuned = @($valid | Where-Object { (Get-PurgeUntunedPairCount @($_.Info.Names)) -gt 0 }).Count
+    $msg = "Build $($valid.Count) 2nd-pass tower(s) from PurgeTowers4Colors."
+    if ($skipped.Count -gt 0) { $msg += "`n`nSkipping (not 4 colors): " + ($skipped -join ', ') }
+    if ($filesWithUntuned -gt 0) { $msg += "`n`nWARNING: $filesWithUntuned file(s) have color pairs with no Tuned_Volume (built as 0 purge)." }
+    $msg += "`n`nChoose an output folder next."
+    if ([System.Windows.MessageBox]::Show($msg, "Build Purge Pass", [System.Windows.MessageBoxButton]::OKCancel, [System.Windows.MessageBoxImage]::Information) -ne [System.Windows.MessageBoxResult]::OK) { return }
+    if (-not (Test-Path $script:PurgeBase4Color)) { [System.Windows.MessageBox]::Show("Base file not found:`n$($script:PurgeBase4Color)", "Build Purge Pass") | Out-Null; return }
+
+    $initDir = if (Test-Path $script:PurgeLibRoot) { $script:PurgeLibRoot } else { "" }
+    $destDir = Select-FolderModern $initDir "Choose output folder for the 2nd-pass tower(s)"
+    if ([string]::IsNullOrWhiteSpace($destDir)) { return }
+
+    $built = 0; $failed = 0; $builtPaths = @()
+    foreach ($v in $valid) {
+        $out = Join-Path $destDir ([System.IO.Path]::GetFileNameWithoutExtension($v.Path) + "_2ndPass.3mf")
+        if (New-PurgeTowerFile -BasePath $script:PurgeBase4Color -Hexes @($v.Info.Hexes) -Names @($v.Info.Names) -OutPath $out) { $built++; $builtPaths += $out } else { $failed++ }
+    }
+    if ($failed -gt 0) {
+        [System.Windows.MessageBox]::Show("Built $built tower(s), $failed failed (see debug log).`nNow regenerating previews in Bambu.", "Build Purge Pass", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+    }
+    # Regenerate each file's preview headlessly (sequential, modeless progress + final summary).
+    Start-PurgeBatchReslice $builtPaths
 }
 
 # Color-only enqueue â€” saves current color selections to the .3mf files, no other tasks run
@@ -8484,6 +9154,33 @@ function Build-LibrariesPanel {
     $purgeContainer.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{ Height = "Auto" })) | Out-Null
     $secPurge.Children.Add($purgeContainer) | Out-Null
 
+    # Drag-drop: drop combo .3mf file(s) anywhere on the Purge Dictionary panel to build a pass.
+    # Marking the event Handled stops the window-level loader from treating the file as a print job.
+    $secPurge.AllowDrop = $true
+    $secPurge.Add_DragOver({
+        param($s, $e)
+        if ($e.Data.GetDataPresent([System.Windows.DataFormats]::FileDrop)) { $e.Effects = [System.Windows.DragDropEffects]::Copy }
+        else { $e.Effects = [System.Windows.DragDropEffects]::None }
+        $e.Handled = $true
+    })
+    $secPurge.Add_Drop({
+        param($s, $e)
+        if (-not $e.Data.GetDataPresent([System.Windows.DataFormats]::FileDrop)) { return }
+        $e.Handled = $true
+        # Defer the dialog to a later dispatcher tick so this Drop handler returns immediately.
+        # Showing a modal dialog synchronously here would block the OLE drop from completing,
+        # freezing the drag source (File Explorer) until the dialog closed.
+        $script:PendingPurgeDrop = $e.Data.GetData([System.Windows.DataFormats]::FileDrop)
+        Write-Log "Purge drop: received $(@($script:PendingPurgeDrop).Count) file(s), deferring to dispatcher"
+        $s.Dispatcher.BeginInvoke([System.Action]{
+            Write-Log "Purge drop: deferred action firing"
+            $paths = $script:PendingPurgeDrop; $script:PendingPurgeDrop = $null
+            if ($null -eq $paths) { return }
+            try { Invoke-PurgePassDrop $paths }
+            catch { Write-Log "Purge drop FAILED: $($_.Exception.Message)" "ERROR"; [System.Windows.MessageBox]::Show("Drop failed: $($_.Exception.Message)", "Build Purge Pass") | Out-Null }
+        }, [System.Windows.Threading.DispatcherPriority]::Background) | Out-Null
+    })
+
     $purgeHdrBar = New-Object System.Windows.Controls.DockPanel
     $purgeHdrBar.LastChildFill = $false; $purgeHdrBar.Margin = New-Object System.Windows.Thickness(0,0,0,10)
     [System.Windows.Controls.Grid]::SetRow($purgeHdrBar, 0); $purgeContainer.Children.Add($purgeHdrBar) | Out-Null
@@ -8499,6 +9196,13 @@ function Build-LibrariesPanel {
     $purgeAvgSavings.Foreground = Get-WpfColor "#7FD8A0"; $purgeAvgSavings.VerticalAlignment = "Center"
     [System.Windows.Controls.DockPanel]::SetDock($purgeAvgSavings, [System.Windows.Controls.Dock]::Right)
     $purgeHdrBar.Children.Add($purgeAvgSavings) | Out-Null
+
+    $purgeDropHint = New-Object System.Windows.Controls.TextBlock
+    $purgeDropHint.Text = "   drag combo .3mf here  ->  build 2nd / 3rd pass"
+    $purgeDropHint.FontSize = 11; $purgeDropHint.Foreground = Get-WpfColor "#6FA0E0"
+    $purgeDropHint.VerticalAlignment = "Center"; $purgeDropHint.Margin = New-Object System.Windows.Thickness(18,0,0,0)
+    [System.Windows.Controls.DockPanel]::SetDock($purgeDropHint, [System.Windows.Controls.Dock]::Left)
+    $purgeHdrBar.Children.Add($purgeDropHint) | Out-Null
 
     # â”€â”€ Filter bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $purgeFilterPanel = New-Object System.Windows.Controls.StackPanel
