@@ -43,6 +43,8 @@ $namesLibPath  = Join-Path $scriptDir "..\libraries\NamesLibrary.ps1"
 $purgeDictPath = Join-Path $scriptDir "..\libraries\PurgeDictionary.csv"
 
 # Base files for the purge-pass drag-and-drop builder (Purge Dictionary panel).
+# These are RESOLVED per-drop relative to the dropped input file (Resolve-PurgeBasePaths) so the tool
+# works regardless of what the repo folder is named. The values below are only a dev-machine fallback.
 $script:PurgeLibRoot     = "C:\ZB_Designs\PurgeLibraryByCombo"
 $script:PurgeBase4Color  = "C:\ZB_Designs\PurgeLibraryByCombo\PurgeBaseTests\PurgeTowers4Colors.3mf"
 $script:PurgeBaseSingle  = "C:\ZB_Designs\PurgeLibraryByCombo\PurgeBaseTests\PurgeTowers.3mf"
@@ -2336,12 +2338,41 @@ namespace ModernDialogs {
     }
 }
 
+# Resolves the purge base-file paths RELATIVE to a dropped input file: walks up the directory tree
+# for a 'PurgeBaseTests' folder containing the base towers, so the tool works regardless of what the
+# repo folder is named. Sets $script:PurgeLibRoot/PurgeBase4Color/PurgeBaseSingle. Returns $true if found.
+function Resolve-PurgeBasePaths([string]$inputPath) {
+    $dir = [System.IO.Path]::GetDirectoryName($inputPath)
+    while (-not [string]::IsNullOrEmpty($dir)) {
+        $pbt = Join-Path $dir "PurgeBaseTests"
+        $b4  = Join-Path $pbt "PurgeTowers4Colors.3mf"
+        if (Test-Path $b4) {
+            $script:PurgeLibRoot    = $dir
+            $script:PurgeBase4Color = $b4
+            $script:PurgeBaseSingle = Join-Path $pbt "PurgeTowers.3mf"
+            Write-Log "Resolve-PurgeBasePaths: root=$dir"
+            return $true
+        }
+        $parent = [System.IO.Path]::GetDirectoryName($dir)
+        if ([string]::IsNullOrEmpty($parent) -or $parent -eq $dir) { break }
+        $dir = $parent
+    }
+    Write-Log "Resolve-PurgeBasePaths: no PurgeBaseTests found above $inputPath" "WARN"
+    return $false
+}
+
 # Drop dispatcher: single file -> dialog; multiple files -> batch 2nd-pass towers.
 function Invoke-PurgePassDrop($paths) {
     Write-Log "Invoke-PurgePassDrop: $(@($paths).Count) path(s): $(@($paths) -join '; ')"
     $files = @($paths | Where-Object { $_ -match '(?i)\.3mf$' -and $_ -notmatch '(?i)\.gcode\.3mf$' })
     Write-Log "Invoke-PurgePassDrop: $($files.Count) usable .3mf file(s)"
     if ($files.Count -eq 0) { [System.Windows.MessageBox]::Show("Drop one or more combo .3mf files.", "Build Purge Pass") | Out-Null; return }
+
+    # Resolve the base files relative to the dropped file (so any repo folder name works).
+    if (-not (Resolve-PurgeBasePaths $files[0])) {
+        [System.Windows.MessageBox]::Show("Could not locate the base files.`n`nExpected a 'PurgeBaseTests' folder (with PurgeTowers4Colors.3mf / PurgeTowers.3mf) in a parent directory of the dropped file:`n$($files[0])", "Build Purge Pass", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+        return
+    }
 
     if ($files.Count -eq 1) {
         $info = Get-3mfFilamentInfo $files[0]
