@@ -2843,6 +2843,7 @@ function Set-GlobalMode([string]$mode) {
 # Saves a SKU value to the TSV for a given card folder.
 # Called from both the per-card Save button and the queue-level CSV import.
 function Save-SkuToTsv([string]$skuVal, [string]$folderPath, $anchorFile) {
+    $script:SiblingSkuCache.Clear()   # a SKU changed; sibling lookups may be stale
     $af         = $anchorFile
     $anchorBase = if ($null -ne $af) { [System.IO.Path]::GetFileNameWithoutExtension($af.FullName) } else { "" }
     $tsvBase    = $anchorBase -replace '(?i)_?(Full|Nest|Final)$', ''
@@ -2892,35 +2893,46 @@ function Find-DuplicateSku([string]$sku, [string]$excludeFolderPath) {
 # Returns a hashtable { SKU; Printer; FilePath } or $null if nothing found.
 # Theme root is 3 levels up from the design folder:
 #   ThemeRoot / {Printer}_{Theme} / {Printer}_{Type}_{Theme} / {Printer}_{Design}_{Theme}
-function Find-SiblingSkU([string]$folderPath, [string]$designName) {
-    if ([string]::IsNullOrWhiteSpace($designName)) { return $null }
-    $themeRoot = Split-Path (Split-Path (Split-Path $folderPath -Parent) -Parent) -Parent
-    if ([string]::IsNullOrWhiteSpace($themeRoot) -or -not (Test-Path $themeRoot)) { return $null }
+# Cache of sibling-SKU lookups, keyed by theme root -> ( designName -> {SKU;Printer;FilePath} ).
+# Built once per theme root (one recursive scan) instead of re-scanning per card.
+# Cleared on each load and whenever a SKU is written.
+$script:SiblingSkuCache = @{}
 
+function Get-SiblingSkuMap([string]$themeRoot) {
+    if ($script:SiblingSkuCache.ContainsKey($themeRoot)) { return $script:SiblingSkuCache[$themeRoot] }
+    $map = @{}
     $datePat = '^\d{1,2}/\d{1,2}/\d{4}$'
-    $currentTsvItem = Get-ChildItem $folderPath -Filter "*_Data.tsv" -ErrorAction SilentlyContinue | Select-Object -First 1
-    $currentTsv = if ($null -ne $currentTsvItem) { $currentTsvItem.FullName } else { '' }
-
     foreach ($tsv in (Get-ChildItem $themeRoot -Recurse -Filter "*_Data.tsv" -ErrorAction SilentlyContinue)) {
-        if ($tsv.FullName -eq $currentTsv) { continue }
         try {
             $line = Get-Content $tsv.FullName -ErrorAction SilentlyContinue | Select-Object -Last 1
             if (-not $line) { continue }
             $cols = $line -split "`t"
-            if ($cols.Count -lt 4 -or $cols[2].Trim() -ne $designName) { continue }
+            if ($cols.Count -lt 4) { continue }
+            $dn = $cols[2].Trim()
+            if ($dn -eq '' -or $map.ContainsKey($dn)) { continue }
             $isOld = $cols.Count -gt 4 -and $cols[4] -match $datePat
             $sku   = if (-not $isOld -and $cols[3].Trim() -match $script:SkuPattern) { $cols[3].Trim() } else { '' }
             if ($sku -eq '') { continue }
-            return @{ SKU = $sku; Printer = $cols[0].Trim(); FilePath = $tsv.FullName }
+            $map[$dn] = @{ SKU = $sku; Printer = $cols[0].Trim(); FilePath = $tsv.FullName }
         } catch { continue }
     }
-    return $null
+    $script:SiblingSkuCache[$themeRoot] = $map
+    return $map
+}
+
+function Find-SiblingSkU([string]$folderPath, [string]$designName) {
+    if ([string]::IsNullOrWhiteSpace($designName)) { return $null }
+    $themeRoot = Split-Path (Split-Path (Split-Path $folderPath -Parent) -Parent) -Parent
+    if ([string]::IsNullOrWhiteSpace($themeRoot) -or -not (Test-Path $themeRoot)) { return $null }
+    # A SKU-less design (the only caller) is never in the map, so a hit is always a
+    # genuine sibling, not the design's own row.
+    return (Get-SiblingSkuMap $themeRoot)[$designName]
 }
 
 function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $tempWork = Join-Path $env:TEMP ("LiveCard_" + [guid]::NewGuid().ToString().Substring(0,8))
     New-Item -ItemType Directory -Path $tempWork | Out-Null
-    $swPJob = [System.Diagnostics.Stopwatch]::StartNew(); $tExtract = 0; $tColor = 0; $tPickMs = 0   # PERF timing
+    $swPJob = [System.Diagnostics.Stopwatch]::StartNew(); $tExtract = 0; $tColor = 0; $tPickMs = 0; $tSkuMs = 0; $tOverlayMs = 0; $tEditMs = 0   # PERF timing
 
     $isZip3mf = $anchorFile.Extension -imatch '\.3mf$' -and $anchorFile.Name -notmatch '(?i)\.gcode\.3mf$'
     if ($isZip3mf) {
@@ -3073,6 +3085,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         ModeHost = $null; CardHeaderStack = $null; _FilePrepHeight = 0
         PGrid = $null; LeftViewbox = $null; _StatsContentBuilt = $false
         GcodeFilePath = $null; _GcodeImgLoaded = $false
+        RenestTag = $null; FeRenestSource = $null; FeRenestFinal = $null; _EditingImagesLoaded = $false
         _GpJob = $gpJob
     }
 
@@ -3252,6 +3265,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pJob.BtnBrowseImg = $btnBrowseImg
 
     # Color Slots (Protected against malformed hex codes)
+    $tOverlayStart = $swPJob.ElapsedMilliseconds   # PERF
     $colorsOverlayStack = New-Object System.Windows.Controls.StackPanel
     $colorsOverlayStack.Orientation = "Vertical"
     $colorsOverlayStack.HorizontalAlignment = "Right"
@@ -3449,6 +3463,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     }
     $cardGrid.Children.Add($colorsOverlayStack) | Out-Null
     $pJob.ColorsOverlayStack = $colorsOverlayStack
+    $tOverlayMs = $swPJob.ElapsedMilliseconds - $tOverlayStart   # PERF: color combo build
 
     # Processing Overlay (border + bottom label + progress bar)
     $cardBorderOverlay = New-Object System.Windows.Controls.Border
@@ -3907,9 +3922,11 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
     # If no SKU yet, look for one in a sibling printer variant under the same theme root
     $siblingSkuInfo = $null
+    $tSkuStart = $swPJob.ElapsedMilliseconds   # PERF
     if ($txtSku.Text -eq '' -and $skuDesignName -ne '') {
         $siblingSkuInfo = Find-SiblingSkU $pJob.FolderPath $skuDesignName
     }
+    $tSkuMs = $swPJob.ElapsedMilliseconds - $tSkuStart   # PERF: sibling-SKU lookup (cached after the 1st card)
 
     # Sync SKU button â€” visible only when a sibling SKU is available and this card has none
     $btnSyncSku = New-Object System.Windows.Controls.Button
@@ -4531,6 +4548,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
     $btnRunRenest.Add_Click({
         $t = $this.Tag
+        Ensure-PJobEditingImages $t.P   # in case the deferred editing setup hasn't run yet
         if (-not (Test-Path -LiteralPath $t.WorkerPath)) {
             $t.LblStatus.Text = "Worker script not found"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"; return
         }
@@ -4580,6 +4598,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
     $btnAxisRotate.Add_Click({
         $t = $this.Tag
+        Ensure-PJobEditingImages $t.P   # in case the deferred editing setup hasn't run yet
         if ($null -eq $t.SrcRefRotNorm) {
             $t.LblStatus.Text = "Orientation not loaded (need Final + Nest Source)"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"; return
         }
@@ -4796,28 +4815,15 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         else               { $pJob.RnOvRight = $ovBorder; $pJob.RnImgRight = $ovImg; $pJob.RnLblRight = $ovLbl }
     }
 
-    # Pre-load top_1.png images from source and final 3MF files into the overlays
-    try {
-        $ovTmpDir = Join-Path $env:TEMP ("ov_imgs_" + [System.Guid]::NewGuid().ToString("N"))
-        New-Item -ItemType Directory -Path $ovTmpDir -Force | Out-Null
-        $ovSrcPath = if ($null -ne $feRenestSource -and (Test-Path -LiteralPath $feRenestSource.FullName)) {
-            Extract-3mfPickImage $feRenestSource.FullName $ovTmpDir "ovsrc"
-        } else { $null }
-        $ovFinPath = if ($null -ne $feRenestFinal -and (Test-Path -LiteralPath $feRenestFinal.FullName)) {
-            Extract-3mfPickImage $feRenestFinal.FullName $ovTmpDir "ovfin"
-        } else { $null }
-        if ($null -ne $ovSrcPath -and (Test-Path $ovSrcPath)) { $pJob.RnImgLeft.Source  = Load-WpfImage $ovSrcPath }
-        if ($null -ne $ovFinPath -and (Test-Path $ovFinPath)) { $pJob.RnImgRight.Source = Load-WpfImage $ovFinPath }
-        $renestTag.OvSrcPath = $ovSrcPath
-        $renestTag.OvFinPath = $ovFinPath
-        # Load the orientation state immediately so the Final preview shows
-        # the spin Re-Nest will apply (nest angle + any saved Rotate-90
-        # offset) with the reference axes, before any user interaction.
-        if (-not (Initialize-OrientationState $renestTag)) {
-            Update-NestRefAxesOverlay $renestTag
-            Update-FinalCurrentAxesOverlay $renestTag
-        }
-    } catch {}
+    # DEFERRED: the editing re-nest preview images (two more 3mf zip extracts) and
+    # orientation parse are only needed when the Editing tab is open. Just stash
+    # the refs here; Ensure-PJobEditingImages does the work lazily (driven by
+    # Render-VisibleCards when in Editing mode).
+    $tEditStart = $swPJob.ElapsedMilliseconds   # PERF
+    $pJob.RenestTag      = $renestTag
+    $pJob.FeRenestSource = $feRenestSource
+    $pJob.FeRenestFinal  = $feRenestFinal
+    $tEditMs = $swPJob.ElapsedMilliseconds - $tEditStart   # PERF (now ~0; work deferred)
 
     $btnApply.Tag = @{ P = $pJob; G = $gpJob }
     $btnApply.Add_Click({
@@ -4895,7 +4901,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
     Update-ParentPreview $pJob $gpJob
     $swPJob.Stop()
-    Write-Log ("PERF Build-PJob [{0}]: extract={1}ms color={2}ms pick={3}ms rest={4}ms total={5}ms" -f (Split-Path $parentPath -Leaf), $tExtract, ($tColor - $tExtract), $tPickMs, ($swPJob.ElapsedMilliseconds - $tColor - $tPickMs), $swPJob.ElapsedMilliseconds) "PERF"
+    Write-Log ("PERF Build-PJob [{0}]: extract={1}ms color={2}ms pick={3}ms sku={4}ms combos={5}ms edit={6}ms rest={7}ms total={8}ms" -f (Split-Path $parentPath -Leaf), $tExtract, ($tColor - $tExtract), $tPickMs, $tSkuMs, $tOverlayMs, $tEditMs, ($swPJob.ElapsedMilliseconds - $tColor - $tPickMs - $tSkuMs - $tOverlayMs - $tEditMs), $swPJob.ElapsedMilliseconds) "PERF"
     $gpJob.ParentListStack.Children.Add($pBorder) | Out-Null
     return $pJob
 }
@@ -7474,6 +7480,30 @@ function Ensure-PJobGcodeImage($pj) {
     }
 }
 
+# Lazily builds the editing re-nest previews (two more 3mf image extracts) + the
+# orientation state, deferred from card build. Only needed in the Editing tab.
+function Ensure-PJobEditingImages($pj) {
+    if ($pj._EditingImagesLoaded) { return }
+    $pj._EditingImagesLoaded = $true
+    $renestTag = $pj.RenestTag
+    if ($null -eq $renestTag) { return }
+    try {
+        $ovTmpDir = Join-Path $env:TEMP ("ov_imgs_" + [System.Guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $ovTmpDir -Force | Out-Null
+        $src = $pj.FeRenestSource; $fin = $pj.FeRenestFinal
+        $ovSrcPath = if ($null -ne $src -and (Test-Path -LiteralPath $src.FullName)) { Extract-3mfPickImage $src.FullName $ovTmpDir "ovsrc" } else { $null }
+        $ovFinPath = if ($null -ne $fin -and (Test-Path -LiteralPath $fin.FullName)) { Extract-3mfPickImage $fin.FullName $ovTmpDir "ovfin" } else { $null }
+        if ($null -ne $ovSrcPath -and (Test-Path $ovSrcPath)) { $pj.RnImgLeft.Source  = Load-WpfImage $ovSrcPath }
+        if ($null -ne $ovFinPath -and (Test-Path $ovFinPath)) { $pj.RnImgRight.Source = Load-WpfImage $ovFinPath }
+        $renestTag.OvSrcPath = $ovSrcPath
+        $renestTag.OvFinPath = $ovFinPath
+        if (-not (Initialize-OrientationState $renestTag)) {
+            Update-NestRefAxesOverlay $renestTag
+            Update-FinalCurrentAxesOverlay $renestTag
+        }
+    } catch {}
+}
+
 # True if the card is on (or near) the visible scroll viewport. A generous
 # margin pre-renders just-offscreen cards so scrolling feels instant.
 function Test-CardInViewport($pj) {
@@ -7504,6 +7534,7 @@ function Render-VisibleCards {
             if ($null -eq $pj.RowPanel) { continue }
             if (-not (Test-CardInViewport $pj)) { continue }
             Ensure-PJobGcodeImage $pj
+            if ($script:GlobalMode -eq "Editing") { Ensure-PJobEditingImages $pj }
             if ($script:GlobalMode -eq "Stats" -and -not $pj._StatsContentBuilt -and $null -ne $pj.StatsCardPanel) {
                 Build-PJobStatsContent $pj $script:StatsSelectedVar
                 $pj._StatsContentBuilt = $true
