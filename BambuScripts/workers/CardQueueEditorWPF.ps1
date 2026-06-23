@@ -9443,6 +9443,75 @@ function Build-LibrariesPanel {
         return [System.Windows.Markup.XamlReader]::Load($xr)
     }
 
+    # Editing TextBox style that turns amber live while the value is dirty, so the
+    # cell shows the dirty state WHILE you type (the editor sits on top of the cell,
+    # so the cell's own background can't show through during edit).
+    function New-PurgeEditStyle([string]$dirtyProp) {
+        $xaml = @"
+<Style TargetType="TextBox" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Setter Property="TextAlignment" Value="Center"/>
+  <Setter Property="Background" Value="Transparent"/>
+  <Setter Property="Foreground" Value="#E0E3EC"/>
+  <Setter Property="BorderThickness" Value="0"/>
+  <Style.Triggers>
+    <DataTrigger Binding="{Binding $dirtyProp}" Value="True">
+      <Setter Property="Background" Value="#B9711F"/>
+      <Setter Property="Foreground" Value="#1A1A1A"/>
+    </DataTrigger>
+  </Style.Triggers>
+</Style>
+"@
+        $xr = [System.Xml.XmlReader]::Create((New-Object System.IO.StringReader($xaml)))
+        return [System.Windows.Markup.XamlReader]::Load($xr)
+    }
+
+    # A reliable editable value column: the cell content is a Border that FILLS the
+    # cell, and its background is driven by the dirty/saved triggers (DataGridCell
+    # background via style can get swallowed by the theme; a cell-filling Border in
+    # the template always paints). The editing TextBox commits per keystroke and
+    # turns amber live while dirty.
+    function New-PurgeValueColumn([string]$header, [string]$valueProp, [string]$dirtyProp, [string]$savedProp, [int]$width) {
+        $cellXaml = @"
+<DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Border x:Name="b" Background="Transparent" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Padding="2,4,2,4">
+    <TextBlock x:Name="t" Text="{Binding $valueProp}" TextAlignment="Center" Foreground="#E0E3EC" VerticalAlignment="Center"/>
+  </Border>
+  <DataTemplate.Triggers>
+    <DataTrigger Binding="{Binding $savedProp}" Value="True">
+      <Setter TargetName="b" Property="Background" Value="#1E472E"/>
+      <Setter TargetName="t" Property="Foreground" Value="#88DDAA"/>
+    </DataTrigger>
+    <DataTrigger Binding="{Binding $dirtyProp}" Value="True">
+      <Setter TargetName="b" Property="Background" Value="#B9711F"/>
+      <Setter TargetName="t" Property="Foreground" Value="#1A1A1A"/>
+    </DataTrigger>
+  </DataTemplate.Triggers>
+</DataTemplate>
+"@
+        $editXaml = @"
+<DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Border x:Name="eb" Background="Transparent" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+    <TextBox x:Name="tb" Text="{Binding $valueProp, UpdateSourceTrigger=PropertyChanged}" TextAlignment="Center"
+             Background="Transparent" Foreground="#E0E3EC" BorderThickness="0" VerticalContentAlignment="Center"/>
+  </Border>
+  <DataTemplate.Triggers>
+    <DataTrigger Binding="{Binding $dirtyProp}" Value="True">
+      <Setter TargetName="eb" Property="Background" Value="#B9711F"/>
+      <Setter TargetName="tb" Property="Foreground" Value="#1A1A1A"/>
+    </DataTrigger>
+  </DataTemplate.Triggers>
+</DataTemplate>
+"@
+        $col = New-Object System.Windows.Controls.DataGridTemplateColumn
+        $col.Header = $header; $col.Width = $width; $col.SortMemberPath = $valueProp
+        $col.CellTemplate        = [System.Windows.Markup.XamlReader]::Load([System.Xml.XmlReader]::Create((New-Object System.IO.StringReader($cellXaml))))
+        $col.CellEditingTemplate = [System.Windows.Markup.XamlReader]::Load([System.Xml.XmlReader]::Create((New-Object System.IO.StringReader($editXaml))))
+        return $col
+    }
+
     # Centered text for numeric-style columns
     $purgeCenterStyle = New-Object System.Windows.Style([System.Windows.Controls.TextBlock])
     $purgeCenterStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.TextBlock]::TextAlignmentProperty, [System.Windows.TextAlignment]::Center))) | Out-Null
@@ -9469,18 +9538,10 @@ function Build-LibrariesPanel {
     $colTuned.CellStyle = New-PurgeCellStyle "TunedDirty" "TunedSaved"
     $purgeGrid.Columns.Add($colTuned) | Out-Null
 
-    $colTunedVol = New-Object System.Windows.Controls.DataGridTextColumn
-    $colTunedVol.Header = "Tuned Volume"; $colTunedVol.Binding = New-Object System.Windows.Data.Binding("Tuned_Volume")
-    $colTunedVol.Width = 110
-    $colTunedVol.ElementStyle = $purgeCenterStyle; $colTunedVol.EditingElementStyle = $purgeCenterEditStyle
-    $colTunedVol.CellStyle = New-PurgeCellStyle "TunedVolumeDirty" "TunedVolumeSaved"
+    $colTunedVol = New-PurgeValueColumn "Tuned Volume" "Tuned_Volume" "TunedVolumeDirty" "TunedVolumeSaved" 110
     $purgeGrid.Columns.Add($colTunedVol) | Out-Null
 
-    $colBaseVol = New-Object System.Windows.Controls.DataGridTextColumn
-    $colBaseVol.Header = "Base Volume"; $colBaseVol.Binding = New-Object System.Windows.Data.Binding("Base_Volume")
-    $colBaseVol.Width = 110
-    $colBaseVol.ElementStyle = $purgeCenterStyle; $colBaseVol.EditingElementStyle = $purgeCenterEditStyle
-    $colBaseVol.CellStyle = New-PurgeCellStyle "BaseVolumeDirty" "BaseVolumeSaved"
+    $colBaseVol = New-PurgeValueColumn "Base Volume" "Base_Volume" "BaseVolumeDirty" "BaseVolumeSaved" 110
     $purgeGrid.Columns.Add($colBaseVol) | Out-Null
 
     $colSavings = New-Object System.Windows.Controls.DataGridTextColumn
