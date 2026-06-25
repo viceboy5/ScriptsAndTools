@@ -209,12 +209,22 @@ function Get-AxisSnappedRot([double[]]$r) {
 # own per-instance rotations relate to each other - so the output's tilt is
 # unchanged from $rRefNorm and only its world-Z orientation varies per clone.
 # Translation handling is unchanged from Apply-TxCorrection.
-function Apply-TxCorrectionYawOnly([double[]]$tx, [double[]]$rRefNorm, [double]$deltaYawDeg, [double[]]$tDelta, [double]$sRatio = 1.0) {
+#
+# Scale: $rRefNorm (manualFinalRotNorm) is NORMALIZED - Normalize-Rot3x3 strips
+# any scale to a unit-length rotation - so $rNew = $rRefNorm * yawRot starts at
+# scale 1.0, NOT at the source clone's scale (unlike Apply-TxCorrection, where
+# $rSrc already carries the source's own scale). The caller must therefore pass
+# $scaleOut = the desired OUTPUT scale (the Final's own scale) directly, not the
+# sRatio = scaleFinal/srcScale ratio used by Apply-TxCorrection - multiplying a
+# unit-scale matrix by that ratio instead of by the true scale silently produces
+# scaleFinal/srcScale, which collapses to ~1.0 (no scale at all) whenever the
+# Final and source clones share the same scale (e.g. both at 97%).
+function Apply-TxCorrectionYawOnly([double[]]$tx, [double[]]$rRefNorm, [double]$deltaYawDeg, [double[]]$tDelta, [double]$scaleOut = 1.0) {
     $rSrc = Get-TxRot $tx
     $yawRot = Get-ZRotationMatrix $deltaYawDeg
     $rNew = Mul-3x3 $rRefNorm $yawRot
-    if ([Math]::Abs($sRatio - 1.0) -gt 1e-6) {
-        for ($ri = 0; $ri -lt 9; $ri++) { $rNew[$ri] *= $sRatio }
+    if ([Math]::Abs($scaleOut - 1.0) -gt 1e-6) {
+        for ($ri = 0; $ri -lt 9; $ri++) { $rNew[$ri] *= $scaleOut }
     }
     $tDeltaXY = [double[]]($tDelta[0], $tDelta[1], 0)
     $dRot = Rotate-Vec $tDeltaXY $rSrc
@@ -860,7 +870,7 @@ try {
             $sRatio   = if ($srcScale -gt 1e-9) { $scaleFinal / $srcScale } else { 1.0 }
             if ($manualYawMode) {
                 $deltaYaw  = (Get-RelativeYawDeg (Get-TxRot (Parse-Tx $tx)) $manualSrcRefRotNorm) + $manualRefSpinDeg
-                $corrected = Apply-TxCorrectionYawOnly (Parse-Tx $tx) $manualFinalRotNorm $deltaYaw $tDelta $sRatio
+                $corrected = Apply-TxCorrectionYawOnly (Parse-Tx $tx) $manualFinalRotNorm $deltaYaw $tDelta $scaleFinal
             } else {
                 $corrected = Apply-TxCorrection (Parse-Tx $tx) $rotCorrection $tDelta $sRatio
             }
@@ -937,7 +947,7 @@ try {
             $sRatio   = if ($srcScale -gt 1e-9) { $scaleFinal / $srcScale } else { 1.0 }
             if ($manualYawMode) {
                 $deltaYaw  = (Get-RelativeYawDeg (Get-TxRot (Parse-Tx $sourceTransforms[$i])) $manualSrcRefRotNorm) + $manualRefSpinDeg
-                $corrected = Apply-TxCorrectionYawOnly (Parse-Tx $sourceTransforms[$i]) $manualFinalRotNorm $deltaYaw $tDelta $sRatio
+                $corrected = Apply-TxCorrectionYawOnly (Parse-Tx $sourceTransforms[$i]) $manualFinalRotNorm $deltaYaw $tDelta $scaleFinal
             } else {
                 $corrected = Apply-TxCorrection (Parse-Tx $sourceTransforms[$i]) $rotCorrection $tDelta $sRatio
             }
@@ -1187,7 +1197,7 @@ try {
             $dbSRatio   = if ($dbSrcScale -gt 1e-9) { $scaleFinal / $dbSrcScale } else { 1.0 }
             if ($manualYawMode) {
                 $dbDeltaYaw = (Get-RelativeYawDeg (Get-TxRot (Parse-Tx $v)) $manualSrcRefRotNorm) + $manualRefSpinDeg
-                $cv = Apply-TxCorrectionYawOnly (Parse-Tx $v) $manualFinalRotNorm $dbDeltaYaw $tDelta $dbSRatio
+                $cv = Apply-TxCorrectionYawOnly (Parse-Tx $v) $manualFinalRotNorm $dbDeltaYaw $tDelta $scaleFinal
             } else {
                 $cv = Apply-TxCorrection (Parse-Tx $v) $rotCorrection $tDelta $dbSRatio
             }
