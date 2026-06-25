@@ -138,11 +138,19 @@ if ($hasSettings) {
             $asmMember = $assemble.SelectSingleNode("assemble_item[@object_id='$kId']")
             if ($null -ne $asmMember) { $assemble.RemoveChild($asmMember) | Out-Null }
         }
-        # Force the survivor's assemble transform to perfectly match its actual plate coordinates
+        # Force the survivor's assemble transform to perfectly match its actual plate
+        # position, keeping rotation at identity (unchanged, verified-working
+        # behavior) but carrying over the real uniform scale instead of hardcoding
+        # it to 1. Hardcoding scale to identity here strips any scale the user
+        # applied (e.g. 95%), and Bambu's resave below then reconciles the object
+        # back to that identity baseline, silently restoring 100% scale before
+        # nesting.
         $asmSurv = $assemble.SelectSingleNode("assemble_item[@object_id='$survivorObjectId']")
         if ($null -ne $asmSurv) {
             $tx = Parse-Tx ($closestItem.GetAttribute('transform'))
-            $asmSurv.SetAttribute('transform', "1 0 0 0 1 0 0 0 1 $($tx[9]) $($tx[10]) $($tx[11])")
+            $scale = [Math]::Sqrt($tx[0]*$tx[0] + $tx[1]*$tx[1] + $tx[2]*$tx[2])
+            if ($scale -lt 1e-9) { $scale = 1.0 }
+            $asmSurv.SetAttribute('transform', "$scale 0 0 0 $scale 0 0 0 $scale $($tx[9]) $($tx[10]) $($tx[11])")
         }
     }
 }
