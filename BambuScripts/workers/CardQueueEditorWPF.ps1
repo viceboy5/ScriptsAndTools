@@ -101,11 +101,12 @@ public class PurgeDictRow : INotifyPropertyChanged {
     public string Source_Hex { get { return _sourceHex; } set { _sourceHex = value; Raise("Source_Hex"); } }
     public string Target_Hex { get { return _targetHex; } set { _targetHex = value; Raise("Target_Hex"); } }
 
-    // Percent of purge volume saved by the tuned value vs. the untuned base - blank for untuned/unparseable rows
+    // Percent of purge volume saved by the tuned value vs. the base - shown live for
+    // ANY row with a parseable Base+Tuned volume (a tentative preview), regardless of
+    // the Tuned flag. The running AVERAGE (SavingsValue) stays Tuned-only (final).
     public string Savings_Pct {
         get {
             double baseV, tunedV;
-            if (!_tuned) return "";
             if (!double.TryParse(_baseVolume, out baseV) || !double.TryParse(_tunedVolume, out tunedV)) return "";
             if (baseV <= 0) return "";
             double pct = (baseV - tunedV) / baseV * 100.0;
@@ -3630,6 +3631,91 @@ function Find-SiblingSkU([string]$folderPath, [string]$designName) {
     return (Get-SiblingSkuMap $themeRoot)[$designName]
 }
 
+# Re-nest has a 100% success rate in practice, so no manual confirm step -
+# a successful re-nest replaces the source immediately. Defined at script
+# scope (not nested in Build-PJob) so the script-scope renest completion
+# tick ($script:_RenestTickSB) can call it too.
+function Invoke-RenestAutoReplace($t) {
+    if ([string]::IsNullOrEmpty($t.RenestPath) -or -not (Test-Path -LiteralPath $t.RenestPath)) {
+        $t.LblStatus.Text = "Renest file not found"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"; return
+    }
+    if ([string]::IsNullOrEmpty($t.SourcePath)) {
+        $t.LblStatus.Text = "Source path unknown"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"; return
+    }
+    try {
+        # 1. Replace the source file with the renested file first
+        Move-Item -LiteralPath $t.RenestPath -Destination $t.SourcePath -Force
+        $t.RenestPath = ""
+
+        # 2. Auto-revert merge if applicable
+        $srcDir  = Split-Path $t.SourcePath -Parent
+        $srcBase = [System.IO.Path]::GetFileNameWithoutExtension($t.SourcePath)
+
+        $mergeReverted = $false
+
+        if ($srcBase -imatch '_Nest$') {
+            # â”€â”€ Merged folder: source was Nest.3mf â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            # feRenestSource resolves to Nest.3mf when the folder is merged because
+            # it carries the individual-object transforms. The renested file now
+            # lives at Nest.3mf; we need to delete the stale Full.3mf and rename
+            # Nest â†’ Full to restore a clean pre-merge state.
+            $corePrefix    = $srcBase -replace '(?i)_Nest$', ''  # e.g. X1C_Arthropleura
+            $staleFullPath = Join-Path $srcDir ($corePrefix + '_Full.3mf')
+            $staleFiles    = @(
+                $staleFullPath,
+                (Join-Path $srcDir ($corePrefix + '_Final.gcode.3mf')),
+                (Join-Path $srcDir ($corePrefix + '_Full.gcode.3mf')),
+                (Join-Path $srcDir ($corePrefix + '_Data.tsv'))
+            )
+            foreach ($s in $staleFiles) {
+                Remove-StaleFile $s
+            }
+            # Rename the renested Nest.3mf â†’ Full.3mf
+            Rename-Item -LiteralPath $t.SourcePath -NewName ($corePrefix + '_Full.3mf') -Force
+            $mergeReverted = $true
+
+        } elseif ($srcBase -imatch '_Full$') {
+            # â”€â”€ Unmerged folder: source was Full.3mf â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            # A Nest.3mf shouldn't normally be here but handle it in case.
+            $corePrefix = $srcBase -replace '(?i)_Full$', ''
+            $nestFile   = Join-Path $srcDir ($corePrefix + '_Nest.3mf')
+            if (Test-Path -LiteralPath $nestFile) {
+                $staleFiles = @(
+                    $nestFile,
+                    (Join-Path $srcDir ($corePrefix + '_Final.gcode.3mf')),
+                    (Join-Path $srcDir ($srcBase    + '.gcode.3mf')),
+                    (Join-Path $srcDir ($corePrefix + '_Data.tsv'))
+                )
+                foreach ($s in $staleFiles) {
+                    if (Test-Path -LiteralPath $s) { Remove-Item -LiteralPath $s -Force -ErrorAction SilentlyContinue }
+                }
+                $mergeReverted = $true
+            }
+        }
+
+        if ($mergeReverted) {
+            # Update the card UI to reflect that the merge has been undone
+            if ($null -ne $t.P.ChkMerge) {
+                $t.P.ChkMerge.IsEnabled  = $true
+                $t.P.ChkMerge.Foreground = Get-WpfColor "#FFFFFF"
+                $t.P.ChkMerge.ToolTip    = $null
+            }
+            if ($null -ne $t.P.BtnRevertMerge) {
+                $t.P.BtnRevertMerge.IsEnabled  = $false
+                $t.P.BtnRevertMerge.Background = Get-WpfColor "#3A3A3A"
+                $t.P.BtnRevertMerge.Foreground = Get-WpfColor "#666666"
+                $t.P.BtnRevertMerge.ToolTip    = "No merged file detected"
+            }
+            if ($null -ne $t.P.MergeBanner) { $t.P.MergeBanner.Visibility = "Collapsed" }
+            $t.LblStatus.Text = "Re-nested - source replaced + merge reverted."; $t.LblStatus.Foreground = Get-WpfColor "#4CAF72"
+        } else {
+            $t.LblStatus.Text = "Re-nested - source replaced."; $t.LblStatus.Foreground = Get-WpfColor "#4CAF72"
+        }
+    } catch {
+        $t.LblStatus.Text = "Replace failed: $($_.Exception.Message)"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"
+    }
+}
+
 function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $tempWork = Join-Path $env:TEMP ("LiveCard_" + [guid]::NewGuid().ToString().Substring(0,8))
     New-Item -ItemType Directory -Path $tempWork | Out-Null
@@ -5132,30 +5218,18 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
 
     $reviewBtnRow = New-Object System.Windows.Controls.StackPanel
     $reviewBtnRow.Orientation = "Horizontal"
-    $btnReplaceSource = New-Object System.Windows.Controls.Button
-    $btnReplaceSource.Content = "Confirm and Replace"; $btnReplaceSource.Height = 30; $btnReplaceSource.Width = 160
-    $btnReplaceSource.FontWeight = [System.Windows.FontWeights]::Bold; $btnReplaceSource.FontSize = 11
-    $btnReplaceSource.Background = Get-WpfColor "#2E5A42"; $btnReplaceSource.Foreground = Get-WpfColor "#FFFFFF"
-    $btnReplaceSource.BorderThickness = 0; $btnReplaceSource.Cursor = [System.Windows.Input.Cursors]::Hand
-    $btnReplaceSource.Margin = New-Object System.Windows.Thickness(0,0,8,0)
-    $reviewBtnRow.Children.Add($btnReplaceSource) | Out-Null
 
+    # Re-nest auto-replaces the source on success (100% success rate in practice,
+    # and the manual confirm step caused issues when users forgot to click it) -
+    # so this row is now just status/debug access, not a confirm/discard gate.
     $btnOpenRenest = New-Object System.Windows.Controls.Button
     $btnOpenRenest.Content = "Open in Bambu"; $btnOpenRenest.Height = 30; $btnOpenRenest.Width = 110
     $btnOpenRenest.FontSize = 11; $btnOpenRenest.Background = Get-WpfColor "#2A2C38"
     $btnOpenRenest.Foreground = Get-WpfColor "#7AAABB"; $btnOpenRenest.BorderThickness = 0
     $btnOpenRenest.Cursor = [System.Windows.Input.Cursors]::Hand
     $btnOpenRenest.Margin = New-Object System.Windows.Thickness(0,0,8,0)
-    $btnOpenRenest.ToolTip = "Open the re-nested .3mf in Bambu Studio without replacing the source file"
+    $btnOpenRenest.ToolTip = "Open the replaced source .3mf in Bambu Studio"
     $reviewBtnRow.Children.Add($btnOpenRenest) | Out-Null
-
-    $btnDiscardRenest = New-Object System.Windows.Controls.Button
-    $btnDiscardRenest.Content = "Discard"; $btnDiscardRenest.Height = 30; $btnDiscardRenest.Width = 80
-    $btnDiscardRenest.FontSize = 11; $btnDiscardRenest.Background = Get-WpfColor "#3A2020"
-    $btnDiscardRenest.Foreground = Get-WpfColor "#CC8888"; $btnDiscardRenest.BorderThickness = 0
-    $btnDiscardRenest.Cursor = [System.Windows.Input.Cursors]::Hand
-    $btnDiscardRenest.Margin = New-Object System.Windows.Thickness(0,0,8,0)
-    $reviewBtnRow.Children.Add($btnDiscardRenest) | Out-Null
 
     $btnOpenDebug = New-Object System.Windows.Controls.Button
     $btnOpenDebug.Content = "Open Debug"; $btnOpenDebug.Height = 30; $btnOpenDebug.Width = 90
@@ -5240,9 +5314,7 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         RotCorrTempPath   = ""
     }
     $btnRunRenest.Tag        = $renestTag
-    $btnReplaceSource.Tag    = $renestTag
     $btnOpenRenest.Tag       = $renestTag
-    $btnDiscardRenest.Tag    = $renestTag
     $btnOpenDebug.Tag        = $renestTag
     $btnSaveDebug.Tag        = $renestTag
     $btnAxisRotate.Tag  = $renestTag
@@ -5308,129 +5380,22 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
         Update-FinalCurrentAxesOverlay $t
     })
 
-    $btnReplaceSource.Add_Click({
-        $t = $this.Tag
-        if ([string]::IsNullOrEmpty($t.RenestPath) -or -not (Test-Path -LiteralPath $t.RenestPath)) {
-            $t.LblStatus.Text = "Renest file not found"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"; return
-        }
-        if ([string]::IsNullOrEmpty($t.SourcePath)) {
-            $t.LblStatus.Text = "Source path unknown"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"; return
-        }
-        try {
-            # 1. Replace the source file with the renested file first
-            Move-Item -LiteralPath $t.RenestPath -Destination $t.SourcePath -Force
-            $t.BorderReview.Visibility = "Collapsed"
-            $t.RenestPath = ""
-
-            # 2. Auto-revert merge if applicable
-            $srcDir  = Split-Path $t.SourcePath -Parent
-            $srcBase = [System.IO.Path]::GetFileNameWithoutExtension($t.SourcePath)
-
-            $mergeReverted = $false
-
-            if ($srcBase -imatch '_Nest$') {
-                # â”€â”€ Merged folder: source was Nest.3mf â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-                # feRenestSource resolves to Nest.3mf when the folder is merged because
-                # it carries the individual-object transforms. The renested file now
-                # lives at Nest.3mf; we need to delete the stale Full.3mf and rename
-                # Nest â†’ Full to restore a clean pre-merge state.
-                $corePrefix    = $srcBase -replace '(?i)_Nest$', ''  # e.g. X1C_Arthropleura
-                $staleFullPath = Join-Path $srcDir ($corePrefix + '_Full.3mf')
-                $staleFiles    = @(
-                    $staleFullPath,
-                    (Join-Path $srcDir ($corePrefix + '_Final.gcode.3mf')),
-                    (Join-Path $srcDir ($corePrefix + '_Full.gcode.3mf')),
-                    (Join-Path $srcDir ($corePrefix + '_Data.tsv'))
-                )
-                foreach ($s in $staleFiles) {
-                    Remove-StaleFile $s
-                }
-                # Rename the renested Nest.3mf â†’ Full.3mf
-                Rename-Item -LiteralPath $t.SourcePath -NewName ($corePrefix + '_Full.3mf') -Force
-                $mergeReverted = $true
-
-            } elseif ($srcBase -imatch '_Full$') {
-                # â”€â”€ Unmerged folder: source was Full.3mf â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-                # A Nest.3mf shouldn't normally be here but handle it in case.
-                $corePrefix = $srcBase -replace '(?i)_Full$', ''
-                $nestFile   = Join-Path $srcDir ($corePrefix + '_Nest.3mf')
-                if (Test-Path -LiteralPath $nestFile) {
-                    $staleFiles = @(
-                        $nestFile,
-                        (Join-Path $srcDir ($corePrefix + '_Final.gcode.3mf')),
-                        (Join-Path $srcDir ($srcBase    + '.gcode.3mf')),
-                        (Join-Path $srcDir ($corePrefix + '_Data.tsv'))
-                    )
-                    foreach ($s in $staleFiles) {
-                        if (Test-Path -LiteralPath $s) { Remove-Item -LiteralPath $s -Force -ErrorAction SilentlyContinue }
-                    }
-                    $mergeReverted = $true
-                }
-            }
-
-            if ($mergeReverted) {
-                # Update the card UI to reflect that the merge has been undone
-                if ($null -ne $t.P.ChkMerge) {
-                    $t.P.ChkMerge.IsEnabled  = $true
-                    $t.P.ChkMerge.Foreground = Get-WpfColor "#FFFFFF"
-                    $t.P.ChkMerge.ToolTip    = $null
-                }
-                if ($null -ne $t.P.BtnRevertMerge) {
-                    $t.P.BtnRevertMerge.IsEnabled  = $false
-                    $t.P.BtnRevertMerge.Background = Get-WpfColor "#3A3A3A"
-                    $t.P.BtnRevertMerge.Foreground = Get-WpfColor "#666666"
-                    $t.P.BtnRevertMerge.ToolTip    = "No merged file detected"
-                }
-                if ($null -ne $t.P.MergeBanner) { $t.P.MergeBanner.Visibility = "Collapsed" }
-                $t.LblStatus.Text = "Source replaced + merge reverted."; $t.LblStatus.Foreground = Get-WpfColor "#4CAF72"
-            } else {
-                $t.LblStatus.Text = "Source replaced."; $t.LblStatus.Foreground = Get-WpfColor "#4CAF72"
-            }
-        } catch {
-            $t.LblStatus.Text = "Replace failed: $($_.Exception.Message)"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"
-        }
-    })
-
     $btnOpenRenest.Add_Click({
         $t = $this.Tag
-        if ([string]::IsNullOrEmpty($t.RenestPath) -or -not (Test-Path -LiteralPath $t.RenestPath)) {
-            $t.LblStatus.Text = "Renest file not found"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"; return
+        if ([string]::IsNullOrEmpty($t.SourcePath) -or -not (Test-Path -LiteralPath $t.SourcePath)) {
+            $t.LblStatus.Text = "Source file not found"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"; return
         }
         $bambuPath = "C:\Program Files\Bambu Studio\bambu-studio.exe"
         if (-not (Test-Path -LiteralPath $bambuPath)) {
             $t.LblStatus.Text = "Bambu Studio not found: $bambuPath"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"; return
         }
         try {
-            Start-Process -FilePath $bambuPath -ArgumentList "`"$($t.RenestPath)`""
-            $t.LblStatus.Text = "Opened re-nested file in Bambu Studio for review."
+            Start-Process -FilePath $bambuPath -ArgumentList "`"$($t.SourcePath)`""
+            $t.LblStatus.Text = "Opened replaced source in Bambu Studio."
             $t.LblStatus.Foreground = Get-WpfColor "#888A9A"
         } catch {
             $t.LblStatus.Text = "Failed to open: $($_.Exception.Message)"; $t.LblStatus.Foreground = Get-WpfColor "#D95F5F"
         }
-    })
-
-    $btnDiscardRenest.Add_Click({
-        $t = $this.Tag
-        if (-not [string]::IsNullOrEmpty($t.RenestPath) -and (Test-Path -LiteralPath $t.RenestPath)) {
-            try { Remove-Item -LiteralPath $t.RenestPath -Force -ErrorAction SilentlyContinue } catch {}
-        }
-        # Restore right overlay to the original Final image (revert label back to "Final")
-        try {
-            if ($null -ne $t.P.RnLblRight) { $t.P.RnLblRight.Text = "Final" }
-            if (-not [string]::IsNullOrEmpty($t.FinalPath) -and (Test-Path -LiteralPath $t.FinalPath)) {
-                $discardTmpDir = Join-Path $env:TEMP ("discard_imgs_" + [System.Guid]::NewGuid().ToString("N"))
-                New-Item -ItemType Directory -Path $discardTmpDir -Force | Out-Null
-                $discardFinPath = Extract-3mfPickImage $t.FinalPath $discardTmpDir "dfin"
-                if ($null -ne $discardFinPath -and (Test-Path $discardFinPath)) {
-                    $t.P.RnImgRight.Source = Load-WpfImage $discardFinPath
-                }
-            }
-            # Re-apply the orientation spin + axes to the restored Final preview
-            Update-FinalCurrentAxesOverlay $t
-        } catch {}
-        $t.BorderReview.Visibility = "Collapsed"
-        $t.LblStatus.Text = "Discarded."; $t.LblStatus.Foreground = Get-WpfColor "#888A9A"
-        $t.RenestPath = ""
     })
 
     $btnOpenDebug.Add_Click({
@@ -6349,10 +6314,12 @@ $script:_RenestTickSB = {
             # Ensure overlays are visible (they may have been hidden if in non-Editing mode)
             $t2.P.RnOvLeft.Visibility  = "Visible"
             $t2.P.RnOvRight.Visibility = "Visible"
-            $t2.LblStatus.Text = "Done - review and confirm below."; $t2.LblStatus.Foreground = Get-WpfColor "#4CAF72"
         } catch {
             $t2.LblStatus.Text = "Done (preview error: $($_.Exception.Message))"; $t2.LblStatus.Foreground = Get-WpfColor "#F0A030"
         }
+        # Re-nest has a 100% success rate in practice - no manual confirm gate.
+        # Replace the source immediately instead of waiting on a "Confirm and Replace" click.
+        Invoke-RenestAutoReplace $t2
         $t2.BorderReview.Visibility = "Visible"
     } else {
         $t2.LblStatus.Text = "Failed (exit $exitCode)"; $t2.LblStatus.Foreground = Get-WpfColor "#D95F5F"
@@ -9667,11 +9634,15 @@ function Build-LibrariesPanel {
 
     $btnDiscardPurge.Add_Click({
         Write-Log "btnDiscardPurge: clicked"
-        $capturedPurgeGrid4.CommitEdit([System.Windows.Controls.DataGridEditingUnit]::Row, $true) | Out-Null
+        # Fully exit edit mode first so the edited cell drops its editor and shows
+        # its display template (otherwise the reverted value never appears on screen).
+        try { $capturedPurgeGrid4.CommitEdit([System.Windows.Controls.DataGridEditingUnit]::Cell, $true) | Out-Null } catch {}
+        try { $capturedPurgeGrid4.CommitEdit([System.Windows.Controls.DataGridEditingUnit]::Row,  $true) | Out-Null } catch {}
         # Detach handler so per-row RevertToBaseline doesn't trigger N^2 dirty scans
         foreach ($r in $capturedPurgeDict4) { $r.remove_PropertyChanged($capturedRowHandler) }
         foreach ($r in $capturedPurgeDict4) { if ($r.IsDirty) { $r.RevertToBaseline() } }
         foreach ($r in $capturedPurgeDict4) { $r.add_PropertyChanged($capturedRowHandler) }
+        try { $capturedPurgeGrid4.Items.Refresh() } catch {}   # force the grid to re-read the reverted values
         $capturedBtnSavePurge4.IsEnabled    = $false
         $capturedBtnDiscardPurge4.IsEnabled = $false
         $capturedBtnDiscardPurge4.Background = Get-WpfColor "#3A3A3A"
