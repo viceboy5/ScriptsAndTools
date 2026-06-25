@@ -14,11 +14,12 @@ $script:GpThemes = @(
 
 $script:PrinterPrefixes = @('X1C', 'P2S', 'H2S')
 
-$script:Tags = @('KC', 'Big', 'Huge', 'High')
+$script:Tags = @('KC', 'Big', 'Huge', 'High', 'Giant')
 
 $script:TagLabels = @{
     'KC'   = 'Keychain'
     'Huge'   = 'Huge Wig'
-    'High'   = 'High Res'
+    'Giant'   = 'Giant'
     'Big'   = 'Big Wig'
+    'High'   = 'High Res'
 }
