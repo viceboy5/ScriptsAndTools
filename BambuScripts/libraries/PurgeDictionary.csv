@@ -193,7 +193,7 @@ Esun Black	Esun Very Perri	TRUE	220	547
 Esun Black	Esun Purple	TRUE	155	393
 Esun Black	Esun Bone White	TRUE	325	611
 Esun Black	Esun Peak Green	TRUE	365	680
-Esun Black	Esun Brown	TRUE	200	404
+Esun Black	Esun Brown	TRUE	250	404
 Esun Black	Esun Pink	TRUE	220	613
 Esun Black	Sunlu Gray	TRUE	270	504
 Esun Black	Esun Haze Blue	TRUE	175	502
@@ -624,7 +624,7 @@ Esun Green	Esun Pine Green	TRUE	160	208
 Esun Green	Esun Purple			231
 Esun Green	Esun Red	TRUE	330	414
 Esun Green	Esun Silver	TRUE	270	414
-Esun Green	Esun Space Blue		220	500
+Esun Green	Esun Space Blue		270	500
 Esun Green	Esun Warm White	TRUE	360	581
 Esun Green	Voxel Ziro Brown	TRUE	305	495
 Esun Green	Sunlu Gray			412
@@ -781,7 +781,7 @@ Esun Light Blue	Sunlu Silk (White)			466
 Esun Light Blue	Eryone Silk (RYB)			351
 Esun Light Blue	Eryone Silk (RPG)			326
 Esun Light Blue	Voxel Silk (Sky Blue)			220
-Esun Light Brown	Esun Blue		180	292
+Esun Light Brown	Esun Blue	TRUE	220	292
 Esun Light Brown	Esun Brown	TRUE	125	183
 Esun Light Brown	Esun Peak Green	TRUE	130	455
 Esun Light Brown	Esun Orange	TRUE	140	306
@@ -809,7 +809,7 @@ Esun Light Brown	Esun Silver		205	338
 Esun Light Brown	Esun Space Blue		280	526
 Esun Light Brown	Esun Very Perri	TRUE	190	400
 Esun Light Brown	Esun Warm White	TRUE	310	520
-Esun Light Brown	Esun Yellow		270	465
+Esun Light Brown	Esun Yellow		300	465
 Esun Light Brown	Voxel Ziro Brown	TRUE	120	279
 Esun Light Brown	Sunlu Gray			336
 Esun Light Brown	Sunlu Mint Green			421
@@ -836,7 +836,7 @@ Esun Magenta	Esun Cold White	TRUE	290	647
 Esun Magenta	Esun Baby Pink			545
 Esun Magenta	Esun Beige			588
 Esun Magenta	Esun Blue	TRUE	175	291
-Esun Magenta	Esun Bone White		215	559
+Esun Magenta	Esun Bone White		275	559
 Esun Magenta	Esun Brown	TRUE	170	287
 Esun Magenta	Esun Dark Blue			220
 Esun Magenta	Esun Fire Engine Red			181
@@ -899,7 +899,7 @@ Esun Matcha Green	Esun Olive Green			180
 Esun Matcha Green	Esun Orange			293
 Esun Matcha Green	Esun Purple	TRUE	140	303
 Esun Matcha Green	Esun Silver			235
-Esun Matcha Green	Esun Space Blue		155	337
+Esun Matcha Green	Esun Space Blue	TRUE	185	337
 Esun Matcha Green	Esun Very Perri			344
 Esun Matcha Green	Esun Warm White			321
 Esun Matcha Green	Voxel Ziro Brown			206
@@ -942,10 +942,10 @@ Esun Olive Green	Esun Matcha Green			432
 Esun Olive Green	Esun Orange			412
 Esun Olive Green	Esun Pine Green	TRUE	115	167
 Esun Olive Green	Esun Green			201
-Esun Olive Green	Esun Pink		210	452
+Esun Olive Green	Esun Pink	TRUE	225	452
 Esun Olive Green	Esun Red			304
 Esun Olive Green	Esun Silver	TRUE	195	318
-Esun Olive Green	Esun Space Blue		190	484
+Esun Olive Green	Esun Space Blue		240	484
 Esun Olive Green	Esun Warm White			501
 Esun Olive Green	Esun Yellow	TRUE	220	515
 Esun Olive Green	Voxel Ziro Brown			346
@@ -1116,7 +1116,7 @@ Esun Pink	Esun Matcha Green	TRUE	170	414
 Esun Pink	Sunlu Mint Green	TRUE	150	306
 Esun Pink	Esun Cold White	TRUE	210	418
 Esun Pink	Esun Baby Pink			310
-Esun Pink	Esun Beige	TRUE	190	381
+Esun Pink	Esun Beige	TRUE	220	381
 Esun Pink	Esun Blue	TRUE	110	278
 Esun Pink	Esun Bone White		195	323
 Esun Pink	Esun Dark Blue			245
@@ -1127,12 +1127,12 @@ Esun Pink	Esun Light Brown			288
 Esun Pink	Esun Magenta			231
 Esun Pink	Esun Olive Green	TRUE	125	271
 Esun Pink	Esun Orange	TRUE	120	341
-Esun Pink	Esun Peak Green		200	420
+Esun Pink	Esun Peak Green	TRUE	210	420
 Esun Pink	Esun Purple			178
 Esun Pink	Esun Red			324
 Esun Pink	Esun Silver	TRUE	200	225
-Esun Pink	Esun Space Blue		165	360
-Esun Pink	Esun Warm White		210	401
+Esun Pink	Esun Space Blue	TRUE	180	360
+Esun Pink	Esun Warm White		300	401
 Esun Pink	Voxel Ziro Brown			268
 Esun Pink	Sunlu Gray			225
 Esun Pink	Sunlu Silk (Blue)			307
@@ -1170,8 +1170,8 @@ Esun Purple	Esun Haze Blue			454
 Esun Purple	Esun Jade Green			585
 Esun Purple	Esun Light Blue			604
 Esun Purple	Esun Light Brown		180	480
-Esun Purple	Esun Magenta		180	320
-Esun Purple	Esun Matcha Green		215	676
+Esun Purple	Esun Magenta	TRUE	210	320
+Esun Purple	Esun Matcha Green		285	676
 Esun Purple	Esun Pine Green			391
 Esun Purple	Esun Green			327
 Esun Purple	Esun Pink			470
@@ -1311,7 +1311,7 @@ Esun Space Blue	Esun Matcha Green	TRUE	160	427
 Esun Space Blue	Esun Olive Green	TRUE	130	271
 Esun Space Blue	Esun Peak Green			394
 Esun Space Blue	Esun Green	TRUE	125	245
-Esun Space Blue	Esun Pink		175	337
+Esun Space Blue	Esun Pink	TRUE	200	337
 Esun Space Blue	Esun Red			355
 Esun Space Blue	Esun Silver		150	281
 Esun Space Blue	Esun Very Perri			250
@@ -1446,7 +1446,7 @@ Esun Yellow	Esun Bone White	TRUE	370	282
 Esun Yellow	Esun Brown	TRUE	170	274
 Esun Yellow	Esun Dark Blue			266
 Esun Yellow	Esun Gray			265
-Esun Yellow	Esun Haze Blue		300	299
+Esun Yellow	Esun Haze Blue		400	299
 Esun Yellow	Esun Light Brown	TRUE	120	240
 Esun Yellow	Esun Magenta			329
 Esun Yellow	Esun Olive Green	TRUE	120	277
