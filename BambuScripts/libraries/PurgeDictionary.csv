@@ -194,9 +194,9 @@ Esun Black	Esun Purple	TRUE	155	393
 Esun Black	Esun Bone White	TRUE	325	611
 Esun Black	Esun Peak Green	TRUE	365	680
 Esun Black	Esun Brown	TRUE	250	404
-Esun Black	Esun Pink	TRUE	220	613
+Esun Black	Esun Pink	TRUE	360	613
 Esun Black	Sunlu Gray	TRUE	270	504
-Esun Black	Esun Haze Blue	TRUE	175	502
+Esun Black	Esun Haze Blue		275	502
 Esun Black	Esun Light Brown	TRUE	255	518
 Esun Black	Esun Light Blue	TRUE	200	651
 Esun Black	Esun Yellow	TRUE	485	557
@@ -1179,7 +1179,7 @@ Esun Purple	Esun Red			407
 Esun Purple	Esun Silver		240	489
 Esun Purple	Esun Warm White	TRUE	320	650
 Esun Purple	Voxel Ziro Brown			551
-Esun Purple	Sunlu Gray		260	487
+Esun Purple	Sunlu Gray	TRUE	300	487
 Esun Purple	Sunlu Mint Green			538
 Esun Purple	Sunlu Silk (Blue)			456
 Esun Purple	Sunlu Silk (Bronze)			483
@@ -1264,7 +1264,7 @@ Esun Silver	Esun Matcha Green			380
 Esun Silver	Esun Olive Green	TRUE	130	182
 Esun Silver	Esun Pine Green			208
 Esun Silver	Esun Green	TRUE	130	189
-Esun Silver	Esun Pink		135	296
+Esun Silver	Esun Pink	TRUE	175	296
 Esun Silver	Esun Purple		110	263
 Esun Silver	Esun Space Blue		105	355
 Esun Silver	Esun Very Perri			223
@@ -1294,7 +1294,7 @@ Esun Space Blue	Esun Purple	TRUE	150	301
 Esun Space Blue	Esun Brown	TRUE	155	268
 Esun Space Blue	Esun Yellow	TRUE	160	476
 Esun Space Blue	Esun Baby Pink			418
-Esun Space Blue	Esun Black		130	222
+Esun Space Blue	Esun Black	TRUE	145	222
 Esun Space Blue	Esun Blue			276
 Esun Space Blue	Esun Bone White	TRUE	170	379
 Esun Space Blue	Esun Cold White	TRUE	170	457
@@ -1346,7 +1346,7 @@ Esun Very Perri	Esun Orange	TRUE	135	416
 Esun Very Perri	Esun Pink	TRUE	150	334
 Esun Very Perri	Esun Bone White	TRUE	165	427
 Esun Very Perri	Esun Baby Pink			436
-Esun Very Perri	Esun Beige		190	492
+Esun Very Perri	Esun Beige		260	492
 Esun Very Perri	Esun Blue			173
 Esun Very Perri	Esun Dark Blue			190
 Esun Very Perri	Esun Fire Engine Red			291
@@ -1359,7 +1359,7 @@ Esun Very Perri	Esun Magenta			315
 Esun Very Perri	Esun Matcha Green			504
 Esun Very Perri	Esun Peak Green			504
 Esun Very Perri	Esun Pine Green			263
-Esun Very Perri	Esun Red		165	347
+Esun Very Perri	Esun Red	TRUE	205	347
 Esun Very Perri	Esun Silver			274
 Esun Very Perri	Esun Space Blue			360
 Esun Very Perri	Esun Warm White	TRUE	310	481
@@ -1456,7 +1456,7 @@ Esun Yellow	Esun Red	TRUE	120	345
 Esun Yellow	Esun Silver	TRUE	270	287
 Esun Yellow	Esun Warm White			390
 Esun Yellow	Voxel Ziro Brown	TRUE	140	242
-Esun Yellow	Sunlu Mint Green		310	312
+Esun Yellow	Sunlu Mint Green		350	312
 Esun Yellow	Sunlu Silk (Blue)			314
 Esun Yellow	Sunlu Silk (Bronze)			286
 Esun Yellow	Sunlu Silk (Silver)			287
