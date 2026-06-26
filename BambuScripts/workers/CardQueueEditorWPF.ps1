@@ -7222,6 +7222,41 @@ function Rebuild-TagsList($stack) {
 function Set-GpThemes([string[]]$items)        { $script:GpThemes        = $items }
 function Set-PrinterPrefixes([string[]]$items) { $script:PrinterPrefixes = $items }
 
+# Repopulates one selection-only ComboBox in place, preserving the current
+# selection if it still exists. Used to push Naming-Convention edits (tags,
+# themes, printer prefixes) into every already-built card WITHOUT reloading the
+# editor. These combos use .Items (not ItemsSource), so Items.Clear()/Add() works.
+function Update-NamingCombo($combo, [string[]]$items, [bool]$hasNone) {
+    if ($null -eq $combo) { return }
+    $sel = if ($null -ne $combo.SelectedItem) { $combo.SelectedItem.ToString() } else { $null }
+    $combo.Items.Clear()
+    if ($hasNone) { [void]$combo.Items.Add("(none)") }
+    foreach ($it in $items) { [void]$combo.Items.Add($it) }
+    if ($null -ne $sel -and $combo.Items.Contains($sel)) {
+        $combo.SelectedItem = $sel
+    } elseif ($hasNone) {
+        $combo.SelectedIndex = 0
+    } else {
+        $combo.SelectedIndex = -1
+    }
+}
+
+# Refreshes the Tag / Theme / Printer-Prefix dropdowns on every loaded card so
+# Naming-Convention edits take effect live. Called after any add/remove/save in
+# the Naming Conventions editor.
+function Refresh-NamingDropdowns {
+    if ($null -eq $script:jobs) { return }
+    foreach ($gp in $script:jobs) {
+        Update-NamingCombo $gp.CbPrefix $script:PrinterPrefixes $true
+        Update-NamingCombo $gp.CbTag    $script:Tags           $true
+        Update-NamingCombo $gp.TBTheme  $script:GpThemes       $false
+        if ($null -ne $gp.Parents) {
+            foreach ($pj in $gp.Parents) { Update-NamingCombo $pj.TBTag $script:Tags $true }
+        }
+    }
+    Write-Log "Refresh-NamingDropdowns: updated dropdowns on $($script:jobs.Count) group(s)"
+}
+
 function Invoke-AddTagEntry([string]$tn, [string]$tl, $stack) {
     Write-Log "Invoke-AddTagEntry: tn='$tn' tl='$tl'"
     $tes = $script:TagEditState
@@ -7241,6 +7276,7 @@ function Invoke-AddTagEntry([string]$tn, [string]$tl, $stack) {
     if ($null -ne $tes.LblBox) { $tes.LblBox.Text = "" }
     if ($null -ne $tes.AddBtn) { $tes.AddBtn.Content = "Add" }
     Rebuild-TagsList $stack
+    Refresh-NamingDropdowns
     Write-Log "Invoke-AddTagEntry: done (Tags=$($script:Tags.Count))"
 }
 
@@ -7256,6 +7292,7 @@ function Invoke-RemoveTagEntry([string]$tn, $stack) {
     if ($null -ne $tes.LblBox) { $tes.LblBox.Text = "" }
     if ($null -ne $tes.AddBtn) { $tes.AddBtn.Content = "Add" }
     Rebuild-TagsList $stack
+    Refresh-NamingDropdowns
     Write-Log "Invoke-RemoveTagEntry: done (Tags=$($script:Tags.Count))"
 }
 
@@ -7269,6 +7306,54 @@ function Invoke-SaveTagsSection($stack) {
     }
     Write-Log "Invoke-SaveTagsSection: Save-NamesLibrary returned false" "ERROR"
     return $false
+}
+
+# â”€â”€ Purge Dictionary filter/avg helpers (SCRIPT SCOPE) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# These MUST be regular script-scope functions, not GetNewClosure() script blocks
+# invoked with '&'. A captured '$closure' variable resolves to $null when the
+# handler runs on a fresh dispatcher callstack (CellEditEnding -> BeginInvoke, or a
+# SelectionChanged closure), producing "The expression after '&' ... is not valid"
+# and leaving the filter combos wedged (e.g. column-sort commits a cell edit ->
+# CellEditEnding fires this -> FATAL). Regular functions resolve $script: reliably.
+# State is published into $script: by the panel builder when the section is built.
+$script:PurgeAvgSavingsLbl = $null
+$script:PurgeView          = $null
+$script:PurgeCmbFrom       = $null
+$script:PurgeCmbTuned      = $null
+$script:PurgeCmbVol        = $null
+
+function Update-PurgeAvgSavings {
+    $lbl = $script:PurgeAvgSavingsLbl
+    if ($null -eq $lbl) { return }
+    $vals = @()
+    foreach ($r in $script:PurgeDict) {
+        if ($r.SavingsValue -ne $null) { $vals += [double]$r.SavingsValue }
+    }
+    if ($vals.Count -gt 0) {
+        $avg = ($vals | Measure-Object -Average).Average
+        $lbl.Text = "Avg Savings (tuned): {0:N1}% across {1} combo{2}" -f $avg, $vals.Count, $(if ($vals.Count -eq 1) { "" } else { "s" })
+    } else {
+        $lbl.Text = "Avg Savings (tuned): -"
+    }
+}
+
+function Apply-PurgeFilter {
+    $view = $script:PurgeView
+    if ($null -eq $view) { return }
+    $fromSel  = if ($script:PurgeCmbFrom)  { $script:PurgeCmbFrom.SelectedItem }  else { $null }
+    $tunedSel = if ($script:PurgeCmbTuned) { $script:PurgeCmbTuned.SelectedItem } else { $null }
+    $volSel   = if ($script:PurgeCmbVol)   { $script:PurgeCmbVol.SelectedItem }   else { $null }
+    $view.Filter = [Predicate[Object]]{
+        param($item)
+        if ($fromSel -and $fromSel -ne "(All)" -and $item.Source_Filament -ne $fromSel) { return $false }
+        if ($tunedSel -eq "Tuned only" -and -not $item.Tuned) { return $false }
+        if ($tunedSel -eq "Not tuned" -and $item.Tuned) { return $false }
+        $hasVol = -not [string]::IsNullOrWhiteSpace($item.Tuned_Volume)
+        if ($volSel -eq "Has value" -and -not $hasVol) { return $false }
+        if ($volSel -eq "Empty" -and $hasVol) { return $false }
+        return $true
+    }.GetNewClosure()
+    $view.Refresh()
 }
 
 # ============================================================================
@@ -7309,6 +7394,24 @@ $script:EfficiencyVars = @(
     @{ Key = "model_usage";       Label = "Model Filament";  Unit = "g";       Baseline = 315.0; Sd = 67.1; Direction = "Lower";  Weight = 1.0; Fmt = "N0"; Slope = -0.048;  R2 = 0.03; ResidSd = 17.3 }
 )
 $script:StatsTpMean = 75.1   # corpus mean throughput (the line graph's y reference)
+
+# Efficiency datasets keyed by "PRINTER|FILETYPE" (uppercased). A design is only
+# scored against the dataset matching its own printer + file type; if there is no
+# dataset for it, it is SKIPPED (never compared to a mismatched corpus). So far
+# the only harvested corpus is X1C-Standard (n=298), which IS $script:EfficiencyVars
+# above - registered here as the active dataset. Add a new key when a second
+# printer/file-type corpus is harvested (>=25 rows) - see PROGRESS.md.
+$script:EffDatasets = @{
+    'X1C|STANDARD' = @{ Label = 'X1C-Standard'; Vars = $script:EfficiencyVars; TpMean = $script:StatsTpMean }
+}
+
+# Returns the dataset for a printer/file-type, or $null when none exists (skip).
+function Get-EffDataset([string]$printer, [string]$fileType) {
+    if ([string]::IsNullOrWhiteSpace($printer) -or [string]::IsNullOrWhiteSpace($fileType)) { return $null }
+    $key = ($printer.Trim() + '|' + $fileType.Trim()).ToUpperInvariant()
+    if ($script:EffDatasets.ContainsKey($key)) { return $script:EffDatasets[$key] }
+    return $null
+}
 
 $script:StatsResults     = @()       # cached per-design computed efficiency
 $script:StatsSelectedVar = "total"   # "total", "decomp", or a var Key
@@ -7377,7 +7480,13 @@ function Get-PJobEfficiencyData($pj) {
     # Need a real time + object count to score this design.
     if ($null -eq $objCount -or $objCount -le 0 -or $timeH -le 0) { return $null }
 
-    return @{ TimeH = $timeH; Objects = $objCount; ColorSwaps = $colorSwaps; ModelG = $modelG; TotalG = $totalG }
+    # Printer + FileType are always the first two columns; used to pick the
+    # matching efficiency dataset (a design is only scored against its own
+    # printer/file-type corpus, never the default X1C-Standard set).
+    $printer  = if ($cols.Count -gt 0) { $cols[0].Trim() } else { "" }
+    $fileType = if ($cols.Count -gt 1) { $cols[1].Trim() } else { "" }
+
+    return @{ TimeH = $timeH; Objects = $objCount; ColorSwaps = $colorSwaps; ModelG = $modelG; TotalG = $totalG; Printer = $printer; FileType = $fileType }
 }
 
 # value -> 0..200 score vs baseline (100 = at baseline)
@@ -7394,6 +7503,18 @@ function Compute-PJobEfficiency($pj) {
     $d = Get-PJobEfficiencyData $pj
     $res = @{ PJob = $pj; Name = (Split-Path $pj.FolderPath -Leaf); HasData = $false; Raw = @{}; Scores = @{}; Total = $null; Data = $d }
     if ($null -eq $d -or $null -eq $d.TimeH -or $d.TimeH -le 0) { return $res }
+
+    # Only score a design against the dataset matching its own printer + file type.
+    # No matching dataset -> skip entirely (HasData stays false, so it is not shown
+    # and is never compared to a mismatched corpus, e.g. the X1C-Standard baselines).
+    $ds = Get-EffDataset $d.Printer $d.FileType
+    $res.Dataset = $ds
+    $res.DatasetKey = (("{0}|{1}" -f $d.Printer, $d.FileType))
+    if ($null -eq $ds) {
+        Write-Log ("Stats: skipping '{0}' - no efficiency dataset for printer/type '{1}'" -f $res.Name, $res.DatasetKey)
+        return $res
+    }
+
     $obj = if ($d.Objects -and $d.Objects -gt 0) { [double]$d.Objects } else { $null }
 
     $raw = @{}
@@ -8021,7 +8142,13 @@ function Build-PJobStatsContent($pj, [string]$key) {
     # Design name (the card header is hidden in Stats mode).
     $panel.Children.Add((New-StatsInfoLine $res.Name "#E2E4EC" 14 $true 0)) | Out-Null
     if (-not $res.HasData) {
-        $panel.Children.Add((New-StatsInfoLine "No _Data.tsv metrics for this design (not scored)." "#666870" 12 $false 6)) | Out-Null
+        # Distinguish "we have metrics but no matching corpus" from "no metrics at all".
+        $skipMsg = if ($null -ne $res.Data -and $null -eq $res.Dataset -and $res.Data.Printer -and $res.Data.FileType) {
+            "No efficiency dataset for {0} / {1} - not scored (won't be compared to other types)." -f $res.Data.Printer, $res.Data.FileType
+        } else {
+            "No _Data.tsv metrics for this design (not scored)."
+        }
+        $panel.Children.Add((New-StatsInfoLine $skipMsg "#666870" 12 $false 6)) | Out-Null
         return
     }
 
@@ -9010,6 +9137,7 @@ function Build-LibrariesPanel {
             $t = $this.Tag
             $items = @($t.List.Items | ForEach-Object { "$($_.Content)" })
             & $t.SetItems $items
+            Refresh-NamingDropdowns   # push Theme/Prefix edits into every loaded card live
             $ok = & $t.OnSave
             if ($ok) {
                 # Clear dirty highlights
@@ -9308,17 +9436,20 @@ function Build-LibrariesPanel {
             $st = $s.Tag
             if ($st.Filtering -or -not $st.NeedsFilter) { return }
             $st.NeedsFilter = $false
+            # try/finally guarantees Filtering is released even if an inner call throws,
+            # so the combo can never wedge "can't type" until the editor is reloaded.
             $st.Filtering = $true
-            $typed = $s.Text
-            if ([string]::IsNullOrWhiteSpace($typed)) {
-                $st.View.Filter = $null
-                $s.IsDropDownOpen = $false
-            } else {
-                $tl = $typed.ToLower()
-                $st.View.Filter = [Predicate[object]]{ param($item) $item.ToString().ToLower().Contains($tl) }.GetNewClosure()
-                $s.IsDropDownOpen = (-not $st.View.IsEmpty)
-            }
-            $st.Filtering = $false
+            try {
+                $typed = $s.Text
+                if ([string]::IsNullOrWhiteSpace($typed)) {
+                    $st.View.Filter = $null
+                    $s.IsDropDownOpen = $false
+                } else {
+                    $tl = $typed.ToLower()
+                    $st.View.Filter = [Predicate[object]]{ param($item) $item.ToString().ToLower().Contains($tl) }.GetNewClosure()
+                    $s.IsDropDownOpen = (-not $st.View.IsEmpty)
+                }
+            } finally { $st.Filtering = $false }
         }
         $combo.AddHandler([System.Windows.Controls.Primitives.TextBoxBase]::TextChangedEvent, $textChangedHandler)
 
@@ -9327,8 +9458,16 @@ function Build-LibrariesPanel {
             $st = $s.Tag
             if ($st.Filtering) { return }
             $st.Filtering = $true
-            $st.View.Filter = $null
-            $st.Filtering = $false
+            try { $st.View.Filter = $null } finally { $st.Filtering = $false }
+        }) | Out-Null
+
+        # Safety net: re-focusing the box always clears any stale wedged flags, so even
+        # if an unrelated dispatcher exception (e.g. a column-sort cell-commit) ever
+        # leaves the combo mid-filter, clicking back in revives typing without a reload.
+        $combo.Add_GotKeyboardFocus({
+            param($s, $e)
+            $st = $s.Tag
+            if ($null -ne $st) { $st.Filtering = $false }
         }) | Out-Null
     }
 
@@ -9521,49 +9660,21 @@ function Build-LibrariesPanel {
     $purgeView = [System.Windows.Data.CollectionViewSource]::GetDefaultView($script:PurgeDict)
     $purgeView.SortDescriptions.Add((New-Object System.ComponentModel.SortDescription("Source_Filament", [System.ComponentModel.ListSortDirection]::Ascending))) | Out-Null
 
-    # Rolling average % savings across tuned combos (untuned/unparseable rows are excluded)
-    $capturedPurgeAvgSavings = $purgeAvgSavings
-    $capturedPurgeDictForAvg = $script:PurgeDict
-    $updatePurgeAvgSavings = {
-        $vals = @()
-        foreach ($r in $capturedPurgeDictForAvg) {
-            if ($r.SavingsValue -ne $null) { $vals += [double]$r.SavingsValue }
-        }
-        if ($vals.Count -gt 0) {
-            $avg = ($vals | Measure-Object -Average).Average
-            $capturedPurgeAvgSavings.Text = "Avg Savings (tuned): {0:N1}% across {1} combo{2}" -f $avg, $vals.Count, $(if ($vals.Count -eq 1) { "" } else { "s" })
-        } else {
-            $capturedPurgeAvgSavings.Text = "Avg Savings (tuned): -"
-        }
-    }.GetNewClosure()
-    & $updatePurgeAvgSavings
+    # Rolling average % savings across tuned combos (untuned/unparseable rows are excluded).
+    # Publish state to $script: so the regular script-scope helpers (Update-PurgeAvgSavings /
+    # Apply-PurgeFilter) can run reliably from dispatcher/closure callstacks - see their
+    # definitions above for why a captured '& $closure' would NULL out and FATAL here.
+    $script:PurgeAvgSavingsLbl = $purgeAvgSavings
+    $script:PurgeView          = $purgeView
+    $script:PurgeCmbFrom       = $cmbPurgeFrom
+    $script:PurgeCmbTuned      = $cmbPurgeTuned
+    $script:PurgeCmbVol        = $cmbPurgeVol
+    Update-PurgeAvgSavings
 
-    # â”€â”€ Filter predicate â€” re-applied whenever a filter combo changes â”€â”€â”€â”€â”€â”€â”€â”€
-    $capturedPurgeView      = $purgeView
-    $capturedCmbPurgeFrom   = $cmbPurgeFrom
-    $capturedCmbPurgeTuned  = $cmbPurgeTuned
-    $capturedCmbPurgeVol    = $cmbPurgeVol
-
-    $applyPurgeFilter = {
-        $fromSel  = $capturedCmbPurgeFrom.SelectedItem
-        $tunedSel = $capturedCmbPurgeTuned.SelectedItem
-        $volSel   = $capturedCmbPurgeVol.SelectedItem
-        $capturedPurgeView.Filter = [Predicate[Object]]{
-            param($item)
-            if ($fromSel -and $fromSel -ne "(All)" -and $item.Source_Filament -ne $fromSel) { return $false }
-            if ($tunedSel -eq "Tuned only" -and -not $item.Tuned) { return $false }
-            if ($tunedSel -eq "Not tuned" -and $item.Tuned) { return $false }
-            $hasVol = -not [string]::IsNullOrWhiteSpace($item.Tuned_Volume)
-            if ($volSel -eq "Has value" -and -not $hasVol) { return $false }
-            if ($volSel -eq "Empty" -and $hasVol) { return $false }
-            return $true
-        }
-        $capturedPurgeView.Refresh()
-    }.GetNewClosure()
-
-    $cmbPurgeFrom.Add_SelectionChanged({ Write-Log "cmbPurgeFrom: changed"; & $applyPurgeFilter }.GetNewClosure())
-    $cmbPurgeTuned.Add_SelectionChanged({ Write-Log "cmbPurgeTuned: changed"; & $applyPurgeFilter }.GetNewClosure())
-    $cmbPurgeVol.Add_SelectionChanged({ Write-Log "cmbPurgeVol: changed"; & $applyPurgeFilter }.GetNewClosure())
+    # â”€â”€ Filter â€” re-applied whenever a filter combo changes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    $cmbPurgeFrom.Add_SelectionChanged({ Write-Log "cmbPurgeFrom: changed"; Apply-PurgeFilter })
+    $cmbPurgeTuned.Add_SelectionChanged({ Write-Log "cmbPurgeTuned: changed"; Apply-PurgeFilter })
+    $cmbPurgeVol.Add_SelectionChanged({ Write-Log "cmbPurgeVol: changed"; Apply-PurgeFilter })
 
     $purgeBtnGrid = New-Object System.Windows.Controls.Grid; $purgeBtnGrid.Margin = New-Object System.Windows.Thickness(0,10,0,0)
     $purgeBtnGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = [System.Windows.GridLength]::new(160) })) | Out-Null
@@ -9589,20 +9700,18 @@ function Build-LibrariesPanel {
     $capturedBtnSavePurge  = $btnSavePurge
 
     # IsEnabled is driven entirely by PropertyChanged on each PurgeDictRow (below).
-    # [action]{} blocks inside BeginInvoke lose the $script: scope when run from a
-    # GetNewClosure() handler, so relying on $script:PurgeDict there was unreliable.
-    # CellEditEnding is kept only to refresh the avg-savings label.
-    $capturedUpdateAvgSavings2 = $updatePurgeAvgSavings
+    # CellEditEnding refreshes the avg-savings label. It calls the script-scope
+    # function Update-PurgeAvgSavings BY NAME (not '& $closure') so it resolves
+    # correctly on the BeginInvoke dispatcher callstack - the previous '& $upd'
+    # NULLed out there and FATALed on every cell edit / column-sort commit.
     $purgeGrid.Add_CellEditEnding({
-        $upd = $capturedUpdateAvgSavings2
         $capturedPurgeGrid.Dispatcher.BeginInvoke(
-            [System.Windows.Threading.DispatcherPriority]::Background, [action]{ & $upd }) | Out-Null
+            [System.Windows.Threading.DispatcherPriority]::Background, [action]{ Update-PurgeAvgSavings }) | Out-Null
     }.GetNewClosure())
 
     $capturedBtnSavePurge3    = $btnSavePurge
     $capturedBtnDiscardPurge3 = $btnDiscardPurge
     $capturedPurgeDict3       = $script:PurgeDict
-    $capturedUpdateAvgSavings3 = $updatePurgeAvgSavings
     $purgeRowChangedHandler = [System.ComponentModel.PropertyChangedEventHandler]({
         param($sender, $e)
         if ($e.PropertyName -eq "IsDirty") {
@@ -9618,7 +9727,7 @@ function Build-LibrariesPanel {
             }
             $capturedBtnSavePurge3.IsEnabled    = $anyDirty
             $capturedBtnDiscardPurge3.IsEnabled = $anyDirty
-            & $capturedUpdateAvgSavings3
+            Update-PurgeAvgSavings
         }
     }.GetNewClosure())
     foreach ($row in $script:PurgeDict) {
