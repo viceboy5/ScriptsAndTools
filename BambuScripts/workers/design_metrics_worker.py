@@ -260,6 +260,69 @@ def plate_utilization(zf, printer=None):
     }
 
 
+def render_util_image(zf, printer, out_path, scale=2, pick_base=None):
+    """Render the pick image with the utilization zones overlaid:
+       objects keep their pick colors (USED), unused-but-available stays dark,
+       exclusion zone -> red, calibration line -> amber, prime tower -> purple.
+    Geometry comes from the 3mf (same as plate_utilization()). If pick_base is
+    given (e.g. the editor's randomized pick png) it is used as the object colour +
+    alpha base instead of the raw pick_1.png, so the overlay matches what the user
+    already sees on screen. Returns True on success."""
+    from PIL import ImageDraw
+    cfg = _read(zf, "Metadata/project_settings.config")
+    pjb = _read(zf, "Metadata/plate_1.json")
+    pkb = _read(zf, "Metadata/pick_1.png")
+    if not (cfg and pjb):
+        return False
+    if pick_base and os.path.exists(pick_base):
+        pick = Image.open(pick_base).convert("RGBA")
+    elif pkb:
+        pick = Image.open(io.BytesIO(pkb)).convert("RGBA")
+    else:
+        return False
+    cfg = cfg.decode("utf-8", "replace"); pj = json.loads(pjb)
+    pa = _poly(cfg, "printable_area") or [(0, 0), (256, 0), (256, 256), (0, 256)]
+    bx0, by0, bx1, by1 = _bbox(pa)
+    bed_w, bed_h = bx1 - bx0, by1 - by0
+    excl = _bbox(_poly(cfg, "bed_exclude_area")) if _poly(cfg, "bed_exclude_area") else None
+    calib = CALIBRATION_LINES.get((printer or "").upper())
+    if calib is None:
+        excl_right = excl[2] if excl else 18.0
+        calib = (excl_right, 0.0, max(excl_right + 10.0, bed_w - 10.0), 14.0)
+    tower = None
+    for o in pj.get("bbox_objects", []):
+        if re.search("wipe|prime", str(o.get("name", "")), re.I):
+            tower = tuple(float(v) for v in o["bbox"]); break
+
+    W, Hh = pick.size
+    mmppx, mmppy = bed_w / W, bed_h / Hh
+
+    def mm_rect_px(r):
+        # mm rect (x0,y0,x1,y1) -> pixel box; pick.png y is flipped vs bed y.
+        x0, y0, x1, y1 = r
+        px0 = (min(x0, x1) - bx0) / mmppx
+        px1 = (max(x0, x1) - bx0) / mmppx
+        py_top = (by1 - max(y0, y1)) / mmppy
+        py_bot = (by1 - min(y0, y1)) / mmppy
+        return (px0, py_top, px1, py_bot)
+
+    base = Image.new("RGBA", (W, Hh), (20, 21, 27, 255))           # dark bed (unused-available stays dark)
+    obj_mask = pick.getchannel("A").point(lambda a: 255 if a > ALPHA_THRESHOLD else 0)
+    base.paste(pick, (0, 0), obj_mask)                            # USED = objects in their pick colors
+
+    ov = Image.new("RGBA", (W, Hh), (0, 0, 0, 0))                 # translucent zone tints on top
+    d = ImageDraw.Draw(ov)
+    if excl:  d.rectangle(mm_rect_px(excl),  fill=(210, 60, 60, 135))    # exclusion - red
+    d.rectangle(mm_rect_px(calib), fill=(235, 150, 40, 135))            # calibration - amber
+    if tower: d.rectangle(mm_rect_px(tower), fill=(150, 90, 200, 140))  # prime tower - purple
+    base = Image.alpha_composite(base, ov)
+
+    if scale and scale != 1:
+        base = base.resize((W * scale, Hh * scale), Image.NEAREST)
+    base.convert("RGB").save(out_path)
+    return True
+
+
 def gcode_header(zf):
     """Print height + layer count (top ~60 lines of the gcode - instant)."""
     out = {}
@@ -568,6 +631,12 @@ def main():
                     help="With --csv: start the file fresh instead of appending.")
     ap.add_argument("--select", action="store_true",
                     help="Interactively pick which printers / types to harvest before parsing.")
+    ap.add_argument("--util-image", metavar="OUT.png",
+                    help="Render the plate-utilization overlay (pick.png + zones) for the single "
+                         "given design to OUT.png and exit. Cheap (no gcode-body pass).")
+    ap.add_argument("--pick-base", metavar="PNG",
+                    help="With --util-image: use this image (e.g. the randomized pick) as the "
+                         "object colour/alpha base instead of the raw pick_1.png.")
     args = ap.parse_args()
     if args.full:
         args.json = True
@@ -577,6 +646,20 @@ def main():
     if not folders:
         sys.stderr.write("No design folders found (need a *Full.gcode.3mf). Nothing to do.\n")
         sys.exit(1)
+
+    # --- plate-utilization overlay image (single design) ---
+    if args.util_image:
+        folder = folders[0]
+        _, tsv_path, g3_path = find_design_files(folder)
+        if not g3_path:
+            sys.stderr.write("No *Full.gcode.3mf for the utilization image.\n"); sys.exit(1)
+        part_a = parse_data_tsv(tsv_path) or {}
+        printer = part_a.get("printer") or os.path.basename(folder.rstrip("\\/")).split("_")[0]
+        try:
+            ok = render_util_image(zipfile.ZipFile(g3_path), printer, args.util_image, pick_base=args.pick_base)
+        except Exception as e:
+            sys.stderr.write("util-image error: %s\n" % e); sys.exit(1)
+        sys.exit(0 if ok else 1)
 
     if args.select:
         print("Scanning %d design(s)..." % len(folders))

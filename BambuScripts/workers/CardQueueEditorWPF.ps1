@@ -3387,6 +3387,7 @@ function Set-PJobReviewMode($pJob) {
         Build-ReviewContent $pJob
         $pJob.ReviewBuilt = $true
     }
+    if ($null -ne $pJob.PickUtilOverlay) { $pJob.PickUtilOverlay.Visibility = "Collapsed" }  # stats-only overlay off
     # Re-apply the production-ready border each time we enter Review mode -
     # Set-PJobEditMode resets it on the way out, and Build-ReviewContent only
     # runs once (gated by ReviewBuilt), so it won't set it again on its own.
@@ -3432,6 +3433,7 @@ function Set-PJobReviewMode($pJob) {
 # Put a single parent back into Edit mode
 function Set-PJobEditMode($pJob) {
     $pJob.ReviewCardOverlay.Visibility = "Collapsed"
+    if ($null -ne $pJob.PickUtilOverlay) { $pJob.PickUtilOverlay.Visibility = "Collapsed" }  # stats-only overlay off
     $pJob.ReviewPanel.Visibility       = "Collapsed"
     if ($null -ne $pJob.ReviewFooter) { $pJob.ReviewFooter.Visibility = "Collapsed" }
     if ($null -ne $pJob.ColorsOverlayStack) { $pJob.ColorsOverlayStack.Visibility = "Visible" }
@@ -4481,6 +4483,14 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $pbPick.Cursor = [System.Windows.Input.Cursors]::Hand
     $pickGrid.Children.Add($pbPick) | Out-Null
     $pJob.PbPick = $pbPick
+
+    # Plate-utilization overlay: sits on top of PbPick, shown only on the Stats
+    # Plate Utilization tab (zones overlaid on the pick image). Never mutates
+    # PbPick.Source, so toggling it can't disturb the merge map.
+    $pbPickUtil = New-Object System.Windows.Controls.Image; $pbPickUtil.Stretch = "Uniform"
+    $pbPickUtil.Visibility = "Collapsed"
+    $pickGrid.Children.Add($pbPickUtil) | Out-Null
+    $pJob.PickUtilOverlay = $pbPickUtil
     $pbPick.Add_MouseLeftButtonDown({
         if ($_.ClickCount -ge 2) {
             $t = $this.Tag
@@ -7535,6 +7545,15 @@ $script:EfficiencyVars = @(
     @{ Key = "time_per_gram";     Label = "Time / Gram";     Unit = "min/g";   Baseline = 5.75;  Sd = 0.99; Direction = "Lower";  Weight = 0.0; Fmt = "N2"; Slope = -12.107; R2 = 0.46; ResidSd = 12.9 }
     @{ Key = "print_time";        Label = "Print Time";      Unit = "h";       Baseline = 30.0;  Sd = 7.5;  Direction = "Lower";  Weight = 1.0; Fmt = "N1"; Slope = -1.499;  R2 = 0.41; ResidSd = 13.6 }
     @{ Key = "model_usage";       Label = "Model Filament";  Unit = "g";       Baseline = 315.0; Sd = 67.1; Direction = "Lower";  Weight = 1.0; Fmt = "N0"; Slope = -0.048;  R2 = 0.03; ResidSd = 17.3 }
+    # Parsed live from the design's gcode at stats-view time (not stored in _Data.tsv):
+    # plate utilization + color changes per layer (both from the cheap design_metrics_worker
+    # --no-body pass). Baselines/fits from the same n=298 corpus. Weight 0 = supplementary.
+    @{ Key = "plate_utilization";      Label = "Plate Utilization";    Unit = "%"; Baseline = 73.0;  Sd = 4.67; Direction = "Higher"; Weight = 0.0; Fmt = "N1"; Slope = 0.7922;   R2 = 0.04; ResidSd = 17.18 }
+    @{ Key = "color_changes_per_layer"; Label = "Color Changes / Layer"; Unit = ""; Baseline = 1.56;  Sd = 0.52; Direction = "Lower";  Weight = 0.0; Fmt = "N2"; Slope = -15.015;  R2 = 0.19; ResidSd = 15.80 }
+    # Avg layer height (print height / layer count) = a resolution proxy. Lower = finer/
+    # higher-res (and a throughput drag - more layers). From the cheap gcode-header parse.
+    # Direction Higher so coarser=green, very-fine (heavy-handed VLH) lands low/red.
+    @{ Key = "layer_height";       Label = "Avg Layer Height";     Unit = "mm"; Baseline = 0.169; Sd = 0.015; Direction = "Higher"; Weight = 0.0; Fmt = "N3"; Slope = -176.56;  R2 = 0.02; ResidSd = 17.37 }
 )
 $script:StatsTpMean = 75.1   # corpus mean throughput (the line graph's y reference)
 
@@ -7592,6 +7611,84 @@ function Get-EffVar([string]$key) {
 # The 5 summary columns are ALWAYS the last 5, so we index them from the end -
 # that stays correct across the old (no-SKU) and new TSV formats. H/M sit right
 # after the Date column, which we locate by its m/d/yyyy pattern.
+# â”€â”€ Live gcode-parsed metrics (NOT stored in _Data.tsv) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# plate_utilization_pct + color_changes_per_layer come from design_metrics_worker.py's
+# cheap --no-body pass (~0.2s; reads the gcode header + plate JSON, NOT the whole body).
+# Parsed on demand when a design's Stats card is rendered and cached by gcode path +
+# write time, so it is never re-parsed unless the design is re-sliced. travel_ratio is
+# deliberately NOT pulled here (it needs the ~10s full-body pass).
+$script:DesignMetricsCache = @{}
+$script:PythonExe = $null
+
+function Get-PythonExe {
+    if ($script:PythonExe) { return $script:PythonExe }
+    # Prefer a real CPython install; the WindowsApps "python"/"py" aliases are dead stubs
+    # (same logic as HarvestMetrics.bat).
+    $found = Get-ChildItem "$env:LOCALAPPDATA\Programs\Python\Python3*\python.exe" -ErrorAction SilentlyContinue |
+             Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+    if (-not $found -and (Test-Path "$env:LOCALAPPDATA\Python\bin\python.exe")) { $found = "$env:LOCALAPPDATA\Python\bin\python.exe" }
+    if (-not $found) { $found = "python" }
+    $script:PythonExe = $found
+    return $found
+}
+
+# Returns @{ plate_utilization; color_changes_per_layer } for a design, or $null.
+# When -ParseIfMissing is false it only returns an already-cached result (used by the
+# bulk summary so entering Stats doesn't spawn Python once per loaded design).
+function Get-DesignLiveMetrics($pj, [bool]$ParseIfMissing) {
+    $gcode = $pj.GcodeFilePath
+    if ([string]::IsNullOrWhiteSpace($gcode) -or -not (Test-Path -LiteralPath $gcode)) { return $null }
+    $key = "$gcode|$((Get-Item -LiteralPath $gcode).LastWriteTimeUtc.Ticks)"
+    if ($script:DesignMetricsCache.ContainsKey($key)) { return $script:DesignMetricsCache[$key] }
+    if (-not $ParseIfMissing) { return $null }
+    $res = $null
+    try {
+        $py     = Get-PythonExe
+        $worker = Join-Path $scriptDir "design_metrics_worker.py"
+        $json   = & $py $worker $gcode --json --no-body 2>$null | Out-String
+        if (-not [string]::IsNullOrWhiteSpace($json)) {
+            $obj = $json | ConvertFrom-Json
+            $b   = $obj.part_b
+            if ($null -ne $b) {
+                $res = @{}
+                $pu = 0.0; if ([double]::TryParse("$($b.plate_utilization_pct)", [ref]$pu) -and $pu -gt 0) { $res.plate_utilization = $pu }
+                $cc = 0.0; if ([double]::TryParse("$($b.color_changes_per_layer)", [ref]$cc) -and $cc -gt 0) { $res.color_changes_per_layer = $cc }
+                $lh = 0.0; if ([double]::TryParse("$($b.effective_layer_height_mm)", [ref]$lh) -and $lh -gt 0) { $res.layer_height = $lh }
+            }
+        }
+    } catch { Write-Log "Get-DesignLiveMetrics failed ($gcode): $($_.Exception.Message)" "WARN" }
+    $script:DesignMetricsCache[$key] = $res
+    return $res
+}
+
+# Renders (once, cached) the plate-utilization overlay PNG for a design: pick.png
+# with the objects as USED, unused-available in yellow, and the exclusion /
+# calibration / prime-tower zones tinted. Returns the PNG path, or $null.
+function Get-DesignUtilImage($pj) {
+    $gcode = $pj.GcodeFilePath
+    if ([string]::IsNullOrWhiteSpace($gcode) -or -not (Test-Path -LiteralPath $gcode)) { return $null }
+    # Use the editor's already-randomized pick as the colour base so the overlay
+    # matches the on-screen merge map (objects keep their vivid colors).
+    $pickBase = $null
+    if ($null -ne $pj.PbPick -and $null -ne $pj.PbPick.Tag -and $pj.PbPick.Tag.Path -and (Test-Path -LiteralPath $pj.PbPick.Tag.Path)) {
+        $pickBase = $pj.PbPick.Tag.Path
+    }
+    $key = "util|$gcode|$((Get-Item -LiteralPath $gcode).LastWriteTimeUtc.Ticks)|$pickBase"
+    if ($script:DesignMetricsCache.ContainsKey($key)) { return $script:DesignMetricsCache[$key] }
+    $res = $null
+    try {
+        $out    = Join-Path $pj.TempWork "plate_util.png"
+        $py     = Get-PythonExe
+        $worker = Join-Path $scriptDir "design_metrics_worker.py"
+        $wargs  = @($worker, $gcode, "--util-image", $out)
+        if ($pickBase) { $wargs += @("--pick-base", $pickBase) }
+        & $py @wargs 2>$null | Out-Null
+        if (Test-Path -LiteralPath $out) { $res = $out }
+    } catch { Write-Log "Get-DesignUtilImage failed ($gcode): $($_.Exception.Message)" "WARN" }
+    $script:DesignMetricsCache[$key] = $res
+    return $res
+}
+
 function Get-PJobEfficiencyData($pj) {
     $tsv = Get-ChildItem -Path $pj.FolderPath -Filter "*_Data.tsv" -File -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($null -eq $tsv) { return $null }
@@ -7642,7 +7739,10 @@ function Get-VarScore([double]$value, [double]$baseline, [string]$direction) {
 }
 
 # Computes raw metrics, per-variable scores, and a weighted total for one design.
-function Compute-PJobEfficiency($pj) {
+# $liveParse: when $true, parse plate_utilization + color_changes_per_layer from the
+# gcode on demand (cheap --no-body pass, cached). The bulk summary passes $false so
+# entering Stats doesn't spawn Python for every loaded design.
+function Compute-PJobEfficiency($pj, [bool]$liveParse = $false) {
     $d = Get-PJobEfficiencyData $pj
     $res = @{ PJob = $pj; Name = (Split-Path $pj.FolderPath -Leaf); HasData = $false; Raw = @{}; Scores = @{}; Total = $null; Data = $d }
     if ($null -eq $d -or $null -eq $d.TimeH -or $d.TimeH -le 0) { return $res }
@@ -7670,6 +7770,15 @@ function Compute-PJobEfficiency($pj) {
     if ($null -ne $d.ModelG -and $d.ModelG -gt 0 -and $d.TimeH -gt 0) { $raw.time_per_gram = ($d.TimeH * 60.0) / $d.ModelG }  # minutes per model gram (execution efficiency)
     if ($d.TimeH -gt 0)                                     { $raw.print_time        = $d.TimeH }                 # plate print time (h)
     if ($null -ne $d.ModelG -and $d.ModelG -gt 0)          { $raw.model_usage       = $d.ModelG }               # plate model filament (g)
+
+    # Live gcode-parsed extras (plate utilization, color changes/layer). Cache-only for
+    # the bulk summary; parsed on demand for the visible per-card render.
+    $lm = Get-DesignLiveMetrics $pj $liveParse
+    if ($null -ne $lm) {
+        if ($lm.ContainsKey('plate_utilization'))      { $raw.plate_utilization      = [double]$lm.plate_utilization }
+        if ($lm.ContainsKey('color_changes_per_layer')) { $raw.color_changes_per_layer = [double]$lm.color_changes_per_layer }
+        if ($lm.ContainsKey('layer_height'))            { $raw.layer_height           = [double]$lm.layer_height }
+    }
     $res.Raw = $raw
 
     # Throughput two-factor decomposition (exact identity):
@@ -8081,6 +8190,23 @@ function Get-StatsOutliers($res) {
     return ($out | Sort-Object -Property @{ Expression = { [Math]::Abs($_.Z) }; Descending = $true })
 }
 
+# Like Get-StatsOutliers but returns EVERY scored attribute (not just |z|>=1), each
+# tagged with IsOutlier so the Overview can show all and box the ones outside 1 sd.
+# Sorted by |z| desc so the biggest deviations (outliers) float to the top.
+function Get-StatsAttributes($res) {
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($v in $script:EfficiencyVars) {
+        if (-not $res.Raw.ContainsKey($v.Key)) { continue }
+        $sd = if ($v.ContainsKey('Sd')) { [double]$v.Sd } else { 0.0 }
+        if ($sd -le 0) { continue }
+        $raw = [double]$res.Raw[$v.Key]
+        $z = ($raw - [double]$v.Baseline) / $sd
+        $good = if ($v.Direction -eq 'Higher') { $z -gt 0 } else { $z -lt 0 }
+        $out.Add(@{ Label = $v.Label; Z = $z; Good = $good; Value = $raw; Diff = ($raw - [double]$v.Baseline); Fmt = $v.Fmt; Unit = $v.Unit; IsOutlier = ([Math]::Abs($z) -ge 1.0) }) | Out-Null
+    }
+    return ($out | Sort-Object -Property @{ Expression = { [Math]::Abs($_.Z) }; Descending = $true })
+}
+
 # One text line in the right-hand info column.
 function New-StatsInfoLine([string]$text, [string]$hex, [double]$size, [bool]$bold, [double]$top) {
     $t = New-Object System.Windows.Controls.TextBlock
@@ -8280,7 +8406,23 @@ function Build-PJobStatsContent($pj, [string]$key) {
     Ensure-PJobGcodeImage $pj   # fill the left plate image for this on-screen card
     $panel.Children.Clear()
 
-    $res = Compute-PJobEfficiency $pj
+    # On the Plate Utilization tab, overlay the zones onto the RIGHT pick image
+    # (objects keep their randomized colors; unused-available -> yellow; exclusion/
+    # calibration/prime-tower tinted). A dedicated overlay element sits on top of
+    # PbPick so we never mutate PbPick.Source. Hidden on every other tab.
+    if ($null -ne $pj.PickUtilOverlay) {
+        if ($key -eq 'plate_utilization') {
+            $u = Get-DesignUtilImage $pj
+            if ($u) {
+                $pj.PickUtilOverlay.Source = Load-WpfImage $u
+                $pj.PickUtilOverlay.Visibility = "Visible"
+            } else { $pj.PickUtilOverlay.Visibility = "Collapsed" }
+        } else {
+            $pj.PickUtilOverlay.Visibility = "Collapsed"
+        }
+    }
+
+    $res = Compute-PJobEfficiency $pj $true   # visible card -> parse the live gcode extras
 
     # Design name (the card header is hidden in Stats mode).
     $panel.Children.Add((New-StatsInfoLine $res.Name "#E2E4EC" 14 $true 0)) | Out-Null
@@ -8304,7 +8446,7 @@ function Build-PJobStatsContent($pj, [string]$key) {
         }
         $grid = New-Object System.Windows.Controls.WrapPanel
         $grid.Orientation = "Horizontal"; $grid.Margin = New-Object System.Windows.Thickness(0,6,0,0)
-        foreach ($k in @('total','filament_per_unit','time_per_gram','objs_per_plate','color_changes','print_time','model_usage')) {
+        foreach ($k in @('total','filament_per_unit','time_per_gram','objs_per_plate','color_changes','color_changes_per_layer','print_time','model_usage','plate_utilization','layer_height')) {
             $g = New-StatsGraph $res $k
             if ($null -eq $g) { continue }
             $w = if ($k -eq 'total') { 560.0 } else { 400.0 }
@@ -8347,17 +8489,29 @@ function Build-PJobStatsContent($pj, [string]$key) {
             $scoreRow.Children.Add($sl) | Out-Null
             $panel.Children.Add($scoreRow) | Out-Null
         }
-        # Compact attributes-outside-1sd list: "Label: value unit, (+/-diff)".
-        $outliers = @(Get-StatsOutliers $res)
-        $panel.Children.Add((New-StatsInfoLine "Attributes outside 1 sd:" "#8A8E9E" 12 $true 14)) | Out-Null
-        if ($outliers.Count -eq 0) {
-            $panel.Children.Add((New-StatsInfoLine "All within 1 sd of average." "#7A7E92" 12 $false 4)) | Out-Null
-        } else {
-            foreach ($o in $outliers) {
-                $hex = if ($o.Good) { "#7FE0A8" } else { "#E89090" }
-                $ds  = if ($o.Diff -ge 0) { "+" } else { "" }
-                $u   = if ($o.Unit -ne "") { " " + $o.Unit } else { "" }
-                $panel.Children.Add((New-StatsInfoLine ("{0}: {1:$($o.Fmt)}{2}, ({3}{4:$($o.Fmt)})" -f $o.Label, $o.Value, $u, $ds, $o.Diff) $hex 13 $false 3)) | Out-Null
+        # ALL attributes vs corpus average, sorted by deviation. Ones outside 1 sd are
+        # boxed + bold (green = good side, red = bad side) and carry their sd; the rest
+        # are plain grey. Outliers float to the top via the |z| sort.
+        $attrs = @(Get-StatsAttributes $res)
+        $panel.Children.Add((New-StatsInfoLine "Attributes vs corpus average:" "#8A8E9E" 12 $true 14)) | Out-Null
+        $panel.Children.Add((New-StatsInfoLine "(boxed = outside 1 sd)" "#6A6E80" 10 $false 0)) | Out-Null
+        foreach ($a in $attrs) {
+            $ds = if ($a.Diff -ge 0) { "+" } else { "" }
+            $u  = if ($a.Unit -ne "") { " " + $a.Unit } else { "" }
+            if ($a.IsOutlier) {
+                $hex = if ($a.Good) { "#7FE0A8" } else { "#E89090" }
+                $zs  = if ($a.Z -ge 0) { "+" } else { "" }
+                $txt = "{0}: {1:$($a.Fmt)}{2}, ({3}{4:$($a.Fmt)}, {5}{6:N1} sd)" -f $a.Label, $a.Value, $u, $ds, $a.Diff, $zs, $a.Z
+                $box = New-Object System.Windows.Controls.Border
+                $box.BorderBrush = Get-WpfColor $hex; $box.BorderThickness = New-Object System.Windows.Thickness(1)
+                $box.CornerRadius = New-Object System.Windows.CornerRadius(3)
+                $box.Padding = New-Object System.Windows.Thickness(5,2,5,2); $box.Margin = New-Object System.Windows.Thickness(0,3,0,0)
+                $box.HorizontalAlignment = "Left"
+                $box.Child = (New-StatsInfoLine $txt $hex 13 $true 0)
+                $panel.Children.Add($box) | Out-Null
+            } else {
+                $txt = "{0}: {1:$($a.Fmt)}{2}, ({3}{4:$($a.Fmt)})" -f $a.Label, $a.Value, $u, $ds, $a.Diff
+                $panel.Children.Add((New-StatsInfoLine $txt "#9AA0B0" 12 $false 2)) | Out-Null
             }
         }
     } else {
@@ -8655,7 +8809,7 @@ function Build-StatsTopBar {
     $btnRow.Children.Add((New-StatsTopBtn "Stats Overview" "total")) | Out-Null
     # The two throughput factors first (Material = filament/unit, Speed = time/gram),
     # then the context vars. "throughput" itself is omitted - Stats Overview IS it.
-    $statsOrder = @('filament_per_unit','time_per_gram','objs_per_plate','color_changes','print_time','model_usage')
+    $statsOrder = @('filament_per_unit','time_per_gram','objs_per_plate','color_changes','color_changes_per_layer','print_time','model_usage','plate_utilization','layer_height')
     foreach ($k in $statsOrder) { $vv = Get-EffVar $k; if ($vv) { $btnRow.Children.Add((New-StatsTopBtn $vv.Label $vv.Key)) | Out-Null } }
     $bar.Children.Add($btnRow) | Out-Null
 
