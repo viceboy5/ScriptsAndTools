@@ -2078,7 +2078,11 @@ function Complete-PurgePassBuild($ok) {
 # Post-drop dialog: pick 2nd pass (full 4-color tower) or 3rd pass (single From->To pair), then build.
 function Show-PurgePassDialog($info, [string]$sourceName, [string]$sourcePath) {
     $hexes = @($info.Hexes); $names = @($info.Names); $n = $hexes.Count
-    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($sourceName)
+    # $sourceName may be a real filename (drop flow) or a free-text label like
+    # "Esun Black -> Esun Pink" (right-click flow). Strip characters that are illegal
+    # in paths first so GetFileNameWithoutExtension can't throw on e.g. the '>'.
+    $safeSource = ($sourceName -replace '[\\/:*?"<>|]', '_')
+    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($safeSource)
 
     # Capture script-scope paths as LOCALS: inside a .GetNewClosure() handler, $script:* resolves
     # to the closure's own (empty) module scope, so the handler must use these captured locals.
@@ -2251,6 +2255,29 @@ function Show-PurgePassDialog($info, [string]$sourceName, [string]$sourcePath) {
     Write-Log "Show-PurgePassDialog: showing dialog ($n colors, can2nd=$can2nd)"
     $win.ShowDialog() | Out-Null
     Write-Log "Show-PurgePassDialog: dialog closed"
+}
+
+# Right-click handler for a Purge Dictionary grid row: build a single From->To pass
+# test file for that ordered pair. Reuses Show-PurgePassDialog with a synthesized
+# 2-color info (no source file), which degrades to the 3rd-pass single-pair builder
+# (From/To preset to this row's pair). Called BY NAME from the row ContextMenu
+# handler so it runs in script scope (reads $script: vars reliably).
+function Invoke-PurgeRowPassBuild($row) {
+    if ($null -eq $row) { Write-Log "Invoke-PurgeRowPassBuild: null row" "WARN"; return }
+    $srcName = "$($row.Source_Filament)".Trim()
+    $tgtName = "$($row.Target_Filament)".Trim()
+    Write-Log "Invoke-PurgeRowPassBuild: '$srcName' -> '$tgtName'"
+    if ([string]::IsNullOrWhiteSpace($srcName) -or [string]::IsNullOrWhiteSpace($tgtName)) {
+        [System.Windows.MessageBox]::Show("This row is missing a From or To filament.", "Build Purge Pass", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+        return
+    }
+    # Prefer the full library hex (matches Bambu's filament_colour); fall back to the
+    # row's 7-char display hex if the filament isn't in the color library. Names are
+    # the dictionary filament names either way (Get-PurgeTunedVolume keys on them).
+    $srcHex = if ($script:LibraryColors.Contains($srcName)) { "$($script:LibraryColors[$srcName])" } else { "$($row.Source_Hex)" }
+    $tgtHex = if ($script:LibraryColors.Contains($tgtName)) { "$($script:LibraryColors[$tgtName])" } else { "$($row.Target_Hex)" }
+    $info = @{ Hexes = @($srcHex, $tgtHex); Names = @($srcName, $tgtName) }
+    Show-PurgePassDialog $info "$srcName -> $tgtName" ""
 }
 
 # Modern Vista+ folder picker (IFileOpenDialog with FOS_PICKFOLDERS) instead of the legacy
@@ -9324,7 +9351,7 @@ function Build-LibrariesPanel {
     $purgeHdrBar.Children.Add($purgeAvgSavings) | Out-Null
 
     $purgeDropHint = New-Object System.Windows.Controls.TextBlock
-    $purgeDropHint.Text = "   drag combo .3mf here  ->  build 2nd / 3rd pass"
+    $purgeDropHint.Text = "   drag combo .3mf here  ->  build 2nd / 3rd pass     |     right-click a row  ->  build 3rd pass for that pair"
     $purgeDropHint.FontSize = 11; $purgeDropHint.Foreground = Get-WpfColor "#6FA0E0"
     $purgeDropHint.VerticalAlignment = "Center"; $purgeDropHint.Margin = New-Object System.Windows.Thickness(18,0,0,0)
     [System.Windows.Controls.DockPanel]::SetDock($purgeDropHint, [System.Windows.Controls.Dock]::Left)
@@ -9504,6 +9531,32 @@ function Build-LibrariesPanel {
     $purgeHdrStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Primitives.DataGridColumnHeader]::BorderBrushProperty, (Get-WpfColor "#2A2C38"))))
     $purgeHdrStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Primitives.DataGridColumnHeader]::BorderThicknessProperty, (New-Object System.Windows.Thickness(0,0,1,1)))))
     $purgeGrid.ColumnHeaderStyle = $purgeHdrStyle
+
+    # Right-click any row -> build a single From->To purge pass test file for that pair.
+    # A single shared ContextMenu is attached to every row via RowStyle; WPF sets the
+    # menu's PlacementTarget (the DataGridRow) on open, so $this.DataContext inside the
+    # MenuItem click resolves to that row's PurgeDictRow. The handler calls the
+    # script-scope function by name (safe from event-handler scope).
+    $purgeRowMenu = New-Object System.Windows.Controls.ContextMenu
+    $miBuildPass  = New-Object System.Windows.Controls.MenuItem
+    $miBuildPass.Header = "Build purge pass test file..."
+    $miBuildPass.Add_Click({
+        try {
+            # DataContext usually flows from the row; fall back to the ContextMenu's
+            # PlacementTarget (the DataGridRow) if it does not.
+            $rowItem = $this.DataContext
+            if ($null -eq $rowItem -or $rowItem -isnot [PurgeDictRow]) {
+                $cm = $this.Parent
+                if ($null -ne $cm -and $null -ne $cm.PlacementTarget) { $rowItem = $cm.PlacementTarget.DataContext }
+            }
+            Invoke-PurgeRowPassBuild $rowItem
+        }
+        catch { Write-Log "Purge row menu build EXCEPTION: $($_.Exception.Message)" "ERROR" }
+    })
+    $purgeRowMenu.Items.Add($miBuildPass) | Out-Null
+    $purgeRowStyle = New-Object System.Windows.Style([System.Windows.Controls.DataGridRow])
+    $purgeRowStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.DataGridRow]::ContextMenuProperty, $purgeRowMenu)))
+    $purgeGrid.RowStyle = $purgeRowStyle
 
     # Cell highlight: green while saved-but-unedited, orange while dirty (dirty takes precedence).
     # Built from a XAML string so WPF's own TypeConverter handles the bool->Value comparison --
