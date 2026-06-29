@@ -22,6 +22,7 @@ if ($ConsoleOnly) {
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 . (Join-Path $scriptDir "..\libraries\NamesLibrary.ps1")
+. (Join-Path $scriptDir "..\libraries\SkuStore.ps1")
 $colorCsvPath = Join-Path $scriptDir "..\libraries\FilamentLibrary.csv"
 
 # --- 1. Load the Reverse-Lookup Color Dictionary (RGB EDITION) ---
@@ -224,12 +225,15 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 # ---------------------------------------------------------------------------------
 $projectName = ((Split-Path $InputFile -Leaf) -replace '\.gcode\.3mf$', '') -replace '(?i)_Full$', ''
 
-# --- READ EXISTING SKU (preserved from seed TSV if present) ---
+# --- READ EXISTING SKU ---
+# Priority: the durable SKU sidecar (SKU.txt in the design folder) wins, because
+# it survives re-nesting / TSV rewrites; fall back to the existing TSV otherwise.
 # Old format: Printer|FileType|FileName|Theme|Date|H|M|...  (Date at col 4)
 # New format: Printer|FileType|FileName|SKU|Theme|Date|H|M| (Date at col 5)
 # Seed row:   |||SKU                                         (4 cols, no date)
-$existingSku = ""
-if ($IndividualTsvPath -ne "" -and (Test-Path $IndividualTsvPath)) {
+$designFolder = Split-Path $InputFile -Parent
+$existingSku  = Read-SkuSidecar $designFolder
+if ($existingSku -eq "" -and $IndividualTsvPath -ne "" -and (Test-Path $IndividualTsvPath)) {
     try {
         $skuLine = Get-Content $IndividualTsvPath | Select-Object -Last 1
         $skuCols = $skuLine -split "`t"
@@ -670,6 +674,12 @@ if (-not $SkipExtraction) {
         if ($IndividualTsvPath) {
             Set-Content -Path $IndividualTsvPath -Value $tsvLine
             Write-Host "Success! Saved Individual: $IndividualTsvPath" -ForegroundColor Green
+        }
+
+        # Mirror the SKU into the durable sidecar so it survives the next re-nest /
+        # TSV rewrite (also migrates SKUs that previously lived only in the TSV).
+        if ($existingSku -ne "") {
+            if (Write-SkuSidecar $designFolder $existingSku) { Write-Host "SKU sidecar updated: $existingSku" -ForegroundColor DarkGray }
         }
     }
 }

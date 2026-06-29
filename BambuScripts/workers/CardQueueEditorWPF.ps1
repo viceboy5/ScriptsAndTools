@@ -49,6 +49,9 @@ $script:PurgeLibRoot     = "C:\ZB_Designs\PurgeLibraryByCombo"
 $script:PurgeBase4Color  = "C:\ZB_Designs\PurgeLibraryByCombo\PurgeBaseTests\PurgeTowers4Colors.3mf"
 $script:PurgeBaseSingle  = "C:\ZB_Designs\PurgeLibraryByCombo\PurgeBaseTests\PurgeTowers.3mf"
 
+# Deploy script for "Send to Production" - drops the design into <printer> New/Fixed Files.
+$script:DeployScriptPath = "C:\Users\Owner\SynologyDrive\WIGGLITEERZ\04.5 Chippy Queue\Deploy_Gcode.bat"
+
 # Row type for the Purge Dictionary grid â€” tracks original values so edited
 # cells can be highlighted and the Save button enabled only when something changed.
 Add-Type -TypeDefinition @"
@@ -1083,6 +1086,7 @@ $script:editActiveJob = $null
 $script:ShowMerged   = $true   # design-card visibility filter (Show Merged checkbox)
 $script:ShowUnmerged = $true   # design-card visibility filter (Show Unmerged checkbox)
 . (Join-Path $PSScriptRoot "..\libraries\NamesLibrary.ps1")
+. (Join-Path $PSScriptRoot "..\libraries\SkuStore.ps1")
 $script:AdjPresets = @('Common','RARE','EPIC','LEGENDARY','Default')
 
 function Find-AnchorFile($folderPath) {
@@ -1398,7 +1402,23 @@ function Update-ParentPreview($pJob, $gpJob) {
 }
 
 function Add-FileRow($pJob, $gpJob, $fi) {
+    # Only the pipeline 3mf files and the _Data.tsv are actionable here. Hide aux/
+    # derived files: PNG previews, STL meshes, and the SKU.txt sidecar (the SKU is
+    # shown in the SKU box + Review tab and must not be hand-edited/deleted here).
+    # Hidden files are also kept out of the rename pass, which is exactly what we
+    # want for the fixed-name SKU.txt.
+    if ($fi.Name -imatch '\.(png|stl)$' -or $fi.Name -ieq $script:SkuSidecarName) { return }
+
     $parsed = ParseFile $fi.Name
+
+    # Type colour - shared by the suffix badge and the new-name preview so every
+    # recognised file type (now including the _Data.tsv) is consistently coded.
+    $newNameColor = if     ($fi.Name -imatch 'Nest\.3mf$')        { "#FF69B4" }  # Pink
+                   elseif ($fi.Name -imatch 'Full\.gcode\.3mf$') { "#4CAF72" }  # Green
+                   elseif ($fi.Name -imatch 'Full\.3mf$')        { "#B57BFF" }  # Purple
+                   elseif ($fi.Name -imatch 'Final\.3mf$')       { "#FFD700" }  # Yellow
+                   elseif ($fi.Name -imatch '_Data\.tsv$')       { "#FF9F40" }  # Orange - data file
+                   else                                           { "#90B8C8" }  # Blue-grey
 
     $fRow = New-Object System.Windows.Controls.Border
     $fRow.Background = Get-WpfColor "#16171B"; $fRow.BorderBrush = Get-WpfColor "#2A2C35"
@@ -1415,23 +1435,33 @@ function Add-FileRow($pJob, $gpJob, $fi) {
     $fRow.Child = $fGrid
 
     $sBadge = New-Object System.Windows.Controls.TextBox
-    $sBadge.Text = $parsed.Suffix; $sBadge.Background = Get-WpfColor "#1E2028"; $sBadge.Foreground = Get-WpfColor "#E8A135"
+    $sBadge.Text = $parsed.Suffix; $sBadge.Background = Get-WpfColor "#1E2028"; $sBadge.Foreground = Get-WpfColor $newNameColor
     $sBadge.VerticalAlignment = "Center"; $sBadge.Margin = New-Object System.Windows.Thickness(10,0,0,0)
     [System.Windows.Controls.Grid]::SetColumn($sBadge, 0); $fGrid.Children.Add($sBadge) | Out-Null
 
-    $lOld = Create-TextBlock $fi.Name "#6B6E7A" 11 "Normal"
+    # Current name - split into base (line 1) and _suffix+ext (line 2) so it breaks
+    # cleanly on its own line like the new-name preview, instead of wrapping mid-word.
+    $oldStem = $fi.Name.Substring(0, $fi.Name.Length - $parsed.Extension.Length)
+    $oldUs   = $oldStem.LastIndexOf('_')
+    if ($oldUs -ge 0) {
+        $oldBasePart = $oldStem.Substring(0, $oldUs)
+        $oldSfxPart  = $oldStem.Substring($oldUs) + $parsed.Extension
+    } else {
+        $oldBasePart = $oldStem
+        $oldSfxPart  = $parsed.Extension
+    }
+    $lOld = New-Object System.Windows.Controls.TextBlock
+    $lOld.Foreground = Get-WpfColor "#6B6E7A"; $lOld.FontSize = 11
+    $lOld.VerticalAlignment = "Center"; $lOld.TextWrapping = "Wrap"
     $lOld.Margin = New-Object System.Windows.Thickness(10,0,0,0)
-    $lOld.TextWrapping = "Wrap"
+    $lOld.Inlines.Add((New-Object System.Windows.Documents.Run($oldBasePart)))
+    $lOld.Inlines.Add((New-Object System.Windows.Documents.LineBreak))
+    $lOld.Inlines.Add((New-Object System.Windows.Documents.Run($oldSfxPart)))
     [System.Windows.Controls.Grid]::SetColumn($lOld, 1); $fGrid.Children.Add($lOld) | Out-Null
 
     $lArr = Create-TextBlock "->" "#A0A0A0" 12 "Normal"
     [System.Windows.Controls.Grid]::SetColumn($lArr, 2); $fGrid.Children.Add($lArr) | Out-Null
 
-    $newNameColor = if     ($fi.Name -imatch 'Nest\.3mf$')        { "#FF69B4" }  # Pink
-                   elseif ($fi.Name -imatch 'Full\.gcode\.3mf$') { "#4CAF72" }  # Green
-                   elseif ($fi.Name -imatch 'Full\.3mf$')        { "#B57BFF" }  # Purple
-                   elseif ($fi.Name -imatch 'Final\.3mf$')       { "#FFD700" }  # Yellow
-                   else                                           { "#90B8C8" }  # Blue-grey
     $lNew = Create-TextBlock "" $newNameColor 11 "Bold"
     $lNew.Margin = New-Object System.Windows.Thickness(5,0,5,0)
     $lNew.TextWrapping = "Wrap"
@@ -2966,11 +2996,80 @@ function Send-PJobToPrintingQueue($pj) {
 }
 
 # Run Deploy_Gcode.bat for a single design and report a friendly summary into $pj.LblReviewPrintQStatus.
+# Resolves the production destination folder for a design + New/Fixed choice, or
+# $null if the printer prefix isn't recognized (Deploy_Gcode.bat would skip it).
+# Shared by Send-PJobToProduction and the Send-to-Production dialog preview.
+function Get-ProductionTargetDir($pj, [bool]$isFix) {
+    $parentFolder  = Split-Path $pj.FolderPath -Leaf
+    $printerPrefix = ($parentFolder -split '_')[0]
+    $printerBase   = if ($printerPrefix -ieq "X1C") { "X1C" } elseif ($printerPrefix -ieq "P2S") { "P2S" } else { $null }
+    if ($null -eq $printerBase) { return $null }
+    $deployDir  = Split-Path $script:DeployScriptPath -Parent
+    $kindFolder = if ($isFix) { "Fixed Files" } else { "New Files" }
+    return (Join-Path (Join-Path $deployDir "$printerBase $kindFolder") $parentFolder)
+}
+
+# Custom Send-to-Production prompt: NEW / FIXED / Cancel, showing the destination
+# folder for each choice (it differs - New Files vs Fixed Files). Returns
+# 'New', 'Fixed', or 'Cancel'. (A MessageBox can't relabel its buttons.)
+function Show-SendToProductionDialog($pj) {
+    $parentFolder = Split-Path $pj.FolderPath -Leaf
+    $newDir   = Get-ProductionTargetDir $pj $false
+    $fixedDir = Get-ProductionTargetDir $pj $true
+
+    $win = New-Object System.Windows.Window
+    $win.Title = "Send to Production"; $win.Background = Get-WpfColor "#16171B"
+    $win.SizeToContent = "WidthAndHeight"; $win.MinWidth = 540; $win.MaxWidth = 760
+    $win.WindowStartupLocation = "CenterScreen"; $win.ResizeMode = "NoResize"
+
+    $root = New-Object System.Windows.Controls.StackPanel
+    $root.Margin = New-Object System.Windows.Thickness(18); $win.Content = $root
+
+    $root.Children.Add((Create-TextBlock "Is this a FIXED design or a NEW design?" "#E8EBF2" 14 "Bold")) | Out-Null
+    $folderLbl = Create-TextBlock $parentFolder "#9AA0B0" 11 "Normal"
+    $folderLbl.Margin = New-Object System.Windows.Thickness(0,4,0,14); $root.Children.Add($folderLbl) | Out-Null
+
+    foreach ($d in @(
+        @{ Label = "NEW design destination:";   Dir = $newDir;   Color = "#4CAF72" }
+        @{ Label = "FIXED design destination:"; Dir = $fixedDir; Color = "#E8A135" }
+    )) {
+        $blk = New-Object System.Windows.Controls.StackPanel; $blk.Margin = New-Object System.Windows.Thickness(0,0,0,10)
+        $blk.Children.Add((Create-TextBlock $d.Label $d.Color 12 "Bold")) | Out-Null
+        $pathTxt = if ($d.Dir) { $d.Dir } else { "(unrecognized printer prefix - this design would be skipped)" }
+        $pathBlk = Create-TextBlock $pathTxt "#C8CCD8" 11 "Normal"
+        $pathBlk.TextWrapping = "Wrap"; $pathBlk.Margin = New-Object System.Windows.Thickness(12,1,0,0)
+        $blk.Children.Add($pathBlk) | Out-Null
+        $root.Children.Add($blk) | Out-Null
+    }
+
+    $btnRow = New-Object System.Windows.Controls.StackPanel; $btnRow.Orientation = "Horizontal"
+    $btnRow.HorizontalAlignment = "Right"; $btnRow.Margin = New-Object System.Windows.Thickness(0,8,0,0)
+    $state = @{ Choice = 'Cancel' }
+    foreach ($b in @(
+        @{ Text = "NEW";    Bg = "#2E7D46"; Choice = 'New' }
+        @{ Text = "FIXED";  Bg = "#9A6B1E"; Choice = 'Fixed' }
+        @{ Text = "Cancel"; Bg = "#3A3D4A"; Choice = 'Cancel' }
+    )) {
+        $btn = New-Object System.Windows.Controls.Button
+        $btn.Content = $b.Text; $btn.Width = 90; $btn.Height = 30
+        $btn.Margin = New-Object System.Windows.Thickness(8,0,0,0)
+        $btn.Background = Get-WpfColor $b.Bg; $btn.Foreground = Get-WpfColor "#FFFFFF"
+        $btn.BorderThickness = 0; $btn.Cursor = [System.Windows.Input.Cursors]::Hand
+        $btn.Tag = @{ State = $state; Choice = $b.Choice; Win = $win }
+        $btn.Add_Click({ $t = $this.Tag; $t.State.Choice = $t.Choice; $t.Win.Close() })
+        $btnRow.Children.Add($btn) | Out-Null
+    }
+    $root.Children.Add($btnRow) | Out-Null
+
+    $win.ShowDialog() | Out-Null
+    return $state.Choice
+}
+
 # Used by both the per-card "Send to Production" button and the theme-wide "Send to Production (Theme)" button.
 # $isFix : $true = "Fixed Designs" deploy ($--fix), $false = "New Designs" deploy.
 function Send-PJobToProduction($pj, [bool]$isFix) {
     try {
-        $deployScript = "C:\Users\Owner\SynologyDrive\WIGGLITEERZ\04.5 Chippy Queue\Deploy_Gcode.bat"
+        $deployScript = $script:DeployScriptPath
         if (-not (Test-Path -LiteralPath $deployScript)) {
             $pj.LblReviewPrintQStatus.Text = "Deploy script not found: $deployScript"
             $pj.LblReviewPrintQStatus.Foreground = Get-WpfColor "#D95F5F"
@@ -2978,21 +3077,14 @@ function Send-PJobToProduction($pj, [bool]$isFix) {
         }
 
         # --- Pre-check: warn if files of the same name already exist at the destination ---
-        $deployDir    = Split-Path $deployScript -Parent
         $parentFolder = Split-Path $pj.FolderPath -Leaf
-        $printerPrefix = ($parentFolder -split '_')[0]
-        $printerBase = $null
-        if ($printerPrefix -ieq "X1C") { $printerBase = "X1C" }
-        elseif ($printerPrefix -ieq "P2S") { $printerBase = "P2S" }
-
-        if ($null -eq $printerBase) {
+        $targetDir    = Get-ProductionTargetDir $pj $isFix
+        if ($null -eq $targetDir) {
+            $printerPrefix = ($parentFolder -split '_')[0]
             $pj.LblReviewPrintQStatus.Text = "Unrecognized printer prefix '$printerPrefix' in folder '$parentFolder' - Deploy_Gcode.bat will skip this folder."
             $pj.LblReviewPrintQStatus.Foreground = Get-WpfColor "#D95F5F"
             return
         }
-
-        $kindFolder = if ($isFix) { "Fixed Files" } else { "New Files" }
-        $targetDir  = Join-Path (Join-Path $deployDir "$printerBase $kindFolder") $parentFolder
 
         $gcodeFiles = Get-ChildItem -Path $pj.FolderPath -Filter "*Full.gcode.3mf" -File -Recurse -ErrorAction SilentlyContinue
         $existingNames = New-Object System.Collections.Generic.List[string]
@@ -3170,6 +3262,16 @@ function Build-ReviewContent($pJob) {
         $sp.Children.Add($hdrNotReady) | Out-Null
     }
 
+    # --- SKU value (read-only; the durable value lives in the SKU.txt sidecar) ---
+    $skuVal  = $pJob.TxtSKU.Text.Trim()
+    $skuRow  = New-Object System.Windows.Controls.StackPanel; $skuRow.Orientation = "Horizontal"
+    $skuRow.Margin = New-Object System.Windows.Thickness(0,0,0,6)
+    $skuRow.Children.Add((Create-TextBlock "SKU:  " "#A0A0A0" 12 "Normal")) | Out-Null
+    $skuDisp  = if ($skuVal -ne '') { $skuVal } else { "(none assigned)" }
+    $skuColor = if ($skuVal -ne '') { "#FF9F40" } else { "#D95F5F" }
+    $skuRow.Children.Add((Create-TextBlock $skuDisp $skuColor 12 "Bold")) | Out-Null
+    $sp.Children.Add($skuRow) | Out-Null
+
     # --- Checklist section ---
     $hdrChecklist = Create-TextBlock "Production Checklist" "#A0A0A0" 11 "Bold"
     $hdrChecklist.Margin = New-Object System.Windows.Thickness(0,0,0,4)
@@ -3273,13 +3375,9 @@ function Build-ReviewContent($pJob) {
     $btnSendToProduction.Tag = @{ P = $pJob }
     $btnSendToProduction.Add_Click({
         $t = $this.Tag; $pj = $t.P
-        $choice = [System.Windows.MessageBox]::Show(
-            "Is this a NEW design (not previously sent to production)?`n`nYes = New Designs`nNo = Fixed Designs",
-            "Send to Production",
-            [System.Windows.MessageBoxButton]::YesNoCancel,
-            [System.Windows.MessageBoxImage]::Question)
-        if ($choice -eq [System.Windows.MessageBoxResult]::Cancel) { return }
-        Send-PJobToProduction $pj ($choice -eq [System.Windows.MessageBoxResult]::No)
+        $choice = Show-SendToProductionDialog $pj
+        if ($choice -eq 'Cancel') { return }
+        Send-PJobToProduction $pj ($choice -eq 'Fixed')
     })
 }
 
@@ -3596,6 +3694,8 @@ function Save-SkuToTsv([string]$skuVal, [string]$folderPath, $anchorFile) {
     } else {
         Set-Content -Path $tsvPath -Value "`t`t`t$skuVal" -Encoding UTF8
     }
+    # Mirror into the durable sidecar (survives re-nest / TSV rewrites / rename).
+    Write-SkuSidecar $folderPath $skuVal | Out-Null
 }
 
 # Returns a list of @{ DesignName; FolderPath } for every other card in the
@@ -3641,6 +3741,9 @@ function Get-SiblingSkuMap([string]$themeRoot) {
             if ($dn -eq '' -or $map.ContainsKey($dn)) { continue }
             $isOld = $cols.Count -gt 4 -and $cols[4] -match $datePat
             $sku   = if (-not $isOld -and $cols[3].Trim() -match $script:SkuPattern) { $cols[3].Trim() } else { '' }
+            # Fall back to the durable sidecar if the TSV row carries no SKU (e.g. a
+            # sibling whose TSV was rewritten by a re-nest before re-extraction).
+            if ($sku -eq '') { $sku = Read-SkuSidecar (Split-Path $tsv.FullName -Parent) }
             if ($sku -eq '') { continue }
             $map[$dn] = @{ SKU = $sku; Printer = $cols[0].Trim(); FilePath = $tsv.FullName }
         } catch { continue }
@@ -4732,6 +4835,19 @@ function Build-PJob($parentPath, $anchorFile, $gpJob) {
                 }
             }
         } catch {}
+    }
+
+    # The durable sidecar (SKU.txt) is authoritative over the regenerable TSV - if
+    # present it wins, so a re-nest that rewrote/stubbed the TSV can't lose the SKU.
+    $sidecarSku = Read-SkuSidecar $pJob.FolderPath
+    if ($sidecarSku -ne '') {
+        $txtSku.Text = $sidecarSku
+    } elseif ($txtSku.Text.Trim() -match $script:SkuPattern) {
+        # One-time migration: an existing design whose SKU lives only in the TSV
+        # gets a durable sidecar the first time it's loaded - so it's protected
+        # before any re-nest can touch the TSV. Cheap + one-time (skipped once the
+        # sidecar exists); non-fatal if the folder isn't writable.
+        Write-SkuSidecar $pJob.FolderPath $txtSku.Text.Trim() | Out-Null
     }
 
     # If no SKU yet, look for one in a sibling printer variant under the same theme root
