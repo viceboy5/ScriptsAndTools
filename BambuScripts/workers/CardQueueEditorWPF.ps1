@@ -3848,6 +3848,21 @@ function Invoke-RenestAutoReplace($t) {
     }
 }
 
+# Deferred post-renest card refresh queue. The renest completion tick enqueues the
+# (pJob, gpJob) here and schedules this via Dispatcher.BeginInvoke, so the card is
+# torn down + rebuilt AFTER the tick (and any edit-queue advance) has finished
+# touching the old pJob. Regular script-scope function + $script: queue = the safe
+# pattern for a dispatcher callback (closure/$script captures inside a bare
+# [action]{} are unreliable; a function called by name is not).
+$script:_RenestRefreshQueue = New-Object System.Collections.Generic.List[object]
+function Invoke-RenestRefreshPending {
+    if ($script:_RenestRefreshQueue.Count -eq 0) { return }
+    $item = $script:_RenestRefreshQueue[0]; $script:_RenestRefreshQueue.RemoveAt(0)
+    if ($null -eq $item.P -or $null -eq $item.G) { return }
+    try { Refresh-PJob $item.P $item.G }
+    catch { Write-Log "Renest auto-refresh failed: $($_.Exception.Message)" "ERROR" }
+}
+
 function Build-PJob($parentPath, $anchorFile, $gpJob) {
     $tempWork = Join-Path $env:TEMP ("LiveCard_" + [guid]::NewGuid().ToString().Substring(0,8))
     New-Item -ItemType Directory -Path $tempWork | Out-Null
@@ -6474,6 +6489,15 @@ $script:_RenestTickSB = {
         # Replace the source immediately instead of waiting on a "Confirm and Replace" click.
         Invoke-RenestAutoReplace $t2
         $t2.BorderReview.Visibility = "Visible"
+
+        # Auto-refresh the design so the card reflects the reverted/replaced state
+        # (new file list, regenerated preview + data). Deferred to after this tick so
+        # the edit-queue advance below still sees the live pJob before it's rebuilt.
+        if ($null -ne $t2.P -and $null -ne $t2.P._GpJob -and $null -ne $t2.P.RowPanel) {
+            $script:_RenestRefreshQueue.Add(@{ P = $t2.P; G = $t2.P._GpJob }) | Out-Null
+            $t2.P.RowPanel.Dispatcher.BeginInvoke(
+                [System.Windows.Threading.DispatcherPriority]::Background, [action]{ Invoke-RenestRefreshPending }) | Out-Null
+        }
     } else {
         $t2.LblStatus.Text = "Failed (exit $exitCode)"; $t2.LblStatus.Foreground = Get-WpfColor "#D95F5F"
     }
